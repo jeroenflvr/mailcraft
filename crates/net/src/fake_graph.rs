@@ -224,8 +224,15 @@ impl Data {
                 }
                 list.sort_by(|a, b| b.received.cmp(&a.received));
                 let top: usize = q("$top").and_then(|t| t.parse().ok()).unwrap_or(10);
-                let list: Vec<Value> = list.into_iter().take(top).map(|m| self.message_json(m)).collect();
-                ok(json!({ "value": list }))
+                let skip: usize = q("$skip").and_then(|t| t.parse().ok()).unwrap_or(0);
+                let more = list.len() > skip + top;
+                let list: Vec<Value> = list.into_iter().skip(skip).take(top).map(|m| self.message_json(m)).collect();
+                let mut v = json!({ "value": list });
+                if more {
+                    let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("$skip=")).collect();
+                    v["@odata.nextLink"] = json!(format!("{base}{path}?{}&$skip={}", rest.join("&"), skip + top));
+                }
+                ok(v)
             }
             ("POST", ["me", "messages"]) => {
                 let raw = unbase64(body);
@@ -892,6 +899,43 @@ mod tests {
         let d = server.data.lock().unwrap();
         assert!(d.throttled > 2, "the server did turn requests away ({})", d.throttled);
         assert!(d.largest_batch <= 4, "no more at once than Exchange runs for an app ({})", d.largest_batch);
+        drop(d);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// A first sync reads the messages' details from the folder's listing, a page at a time,
+    /// rather than one request each; a later sync asks only for what's new.
+    #[test]
+    fn a_first_sync_reads_details_from_the_listing() {
+        let mut d = Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        for i in 0..250 {
+            d.deliver(&inbox, &mail(&format!("Note {i:03}"), &format!("n{i}")), true, &format!("2026-10-01T{:02}:{:02}:00Z", i / 60, i % 60));
+        }
+        let server = serve(d);
+        let c = crate::graph::Client::connect(&server.base, TOKEN).unwrap();
+        let store = crate::fake::tests_store("graph-first-sync");
+        let mut st = crate::jmap::State::default();
+        crate::graph::list_folders(&c, &mut st, "a1").unwrap();
+        let opts = crate::sync::SyncOptions { prefetch: 0, ..Default::default() };
+        server.data.lock().unwrap().calls.clear();
+        crate::graph::sync_folder(&c, &mut st, &store, "a1", "INBOX", &opts).unwrap();
+        let fs = store.load_folder("a1", "INBOX").unwrap();
+        assert_eq!(fs.messages.len(), 250, "every page read");
+        assert_eq!(fs.messages[0].subject, "Note 249");
+        let calls = server.data.lock().unwrap().calls.len();
+        assert!(calls < 20, "a few pages, not one request a message ({calls})");
+
+        // Two new ones: asked for by id.
+        let raw = mail("Late", "late");
+        server.data.lock().unwrap().deliver(&inbox, &raw, false, "2026-10-02T09:00:00Z");
+        server.data.lock().unwrap().deliver(&inbox, &mail("Later", "later"), false, "2026-10-02T10:00:00Z");
+        server.data.lock().unwrap().calls.clear();
+        crate::graph::sync_folder(&c, &mut st, &store, "a1", "INBOX", &opts).unwrap();
+        assert_eq!(store.load_folder("a1", "INBOX").unwrap().messages.len(), 252);
+        let d = server.data.lock().unwrap();
+        assert!(d.calls.iter().any(|c| c.starts_with("POST /$batch")), "{:?}", d.calls);
+        assert!(!d.calls.iter().any(|c| c.contains("internetMessageHeaders") && c.contains("mailFolders")), "no full listing again");
         drop(d);
         let _ = std::fs::remove_dir_all(store.root());
     }

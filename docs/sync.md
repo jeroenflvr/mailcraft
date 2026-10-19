@@ -134,7 +134,8 @@ switched IMAP off.
   bookkeeping folders are left out.
 - **A folder sync** lists the newest messages' ids with `isRead`, `flag` and `isDraft`, then the
   details of those not cached yet (their internet headers when Exchange has them) in batches of
-  4. Sources come from `/messages/{id}/$value`; mail with attachments downloads when opened.
+  4; when there are many (a first sync), they're read from the folder's listing instead, 100 a
+  page. Sources come from `/messages/{id}/$value`; mail with attachments downloads when opened.
 - **Changes** are `PATCH`es (`isRead`, `flag`: `flagged`, `complete` for the `$Completed`
   keyword, `notFlagged`), `move`, `DELETE` and folder calls, batched.
 - **Throttling:** Exchange Online runs at most 4 requests at once for an app on a mailbox, and

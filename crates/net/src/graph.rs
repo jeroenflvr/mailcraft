@@ -36,6 +36,11 @@ const BATCH: usize = 4;
 const RETRIES: u32 = 5;
 /// Longest wait before sending a throttled request again.
 const MAX_WAIT_SECS: u64 = 30;
+/// Messages a page when details are read from a folder's listing.
+const LIST_PAGE: usize = 100;
+/// More messages than this to fetch details for, and they're read from the folder's listing
+/// instead of one request each.
+const LIST_INSTEAD: usize = 40;
 /// Pages followed for one listing.
 const MAX_PAGES: usize = 200;
 /// Folders listed at most.
@@ -318,6 +323,15 @@ impl Client {
         Ok(self.batch(&reqs)?.into_iter().filter(|(s, _)| *s == 200).map(|(_, b)| b).collect())
     }
 
+    /// The details of a folder's newest `limit` messages, read from its listing a page at a time:
+    /// far fewer requests than one per message when most aren't here yet (a first sync).
+    fn headers_listed(&self, folder: &str, limit: usize) -> Result<Vec<Value>> {
+        self.all(
+            &format!("/me/mailFolders/{}/messages?$top={LIST_PAGE}&$orderby=receivedDateTime%20desc&$select={HEADER_FIELDS}", seg(folder)),
+            limit.min(100_000),
+        )
+    }
+
     /// A message's MIME source.
     pub fn download(&self, id: &str) -> Result<Vec<u8>> {
         let r = Request::get(&format!("{}/me/messages/{}/$value", self.base, seg(id)), MAX_MIME)
@@ -531,7 +545,14 @@ pub fn sync_folder(c: &Client, st: &mut State, store: &Store, account: &str, fol
         }
     }
     let missing: Vec<String> = newest.iter().filter(|(id, _)| fs.find(st.number(id)).is_none()).map(|(id, _)| id.clone()).collect();
-    for m in c.headers(&missing)? {
+    let details = if missing.len() > LIST_INSTEAD {
+        let wanted: std::collections::HashSet<&str> = missing.iter().map(String::as_str).collect();
+        let listed = c.headers_listed(&id, newest.len())?;
+        listed.into_iter().filter(|m| m.get("id").and_then(Value::as_str).is_some_and(|i| wanted.contains(i))).collect()
+    } else {
+        c.headers(&missing)?
+    };
+    for m in details {
         let Some(id) = m.get("id").and_then(Value::as_str) else { continue };
         let key = MessageKey { account: account.to_string(), folder: folder.to_string(), validity: VALIDITY, uid: st.number(id) };
         if fs.find(key.uid).is_some() {
