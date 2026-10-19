@@ -55,6 +55,14 @@ pub struct Data {
     pub others: Vec<(String, bool)>,
     /// Messages whose source can't be had (the server fails on it).
     pub unreadable: Vec<String>,
+    /// As Exchange: requests in a batch beyond this many at once come back 429.
+    pub concurrency: Option<usize>,
+    /// The next this many requests come back 429 (too many requests).
+    pub throttle: u32,
+    /// Requests answered 429 so far.
+    pub throttled: u32,
+    /// The most requests seen in one batch.
+    pub largest_batch: usize,
     late: Vec<(std::time::Instant, Vec<u8>)>,
     next: u32,
 }
@@ -147,7 +155,14 @@ impl Data {
         match (method, parts.as_slice()) {
             ("POST", ["$batch"]) => {
                 let mut out = Vec::new();
-                for r in input["requests"].as_array().cloned().unwrap_or_default() {
+                self.largest_batch = self.largest_batch.max(input["requests"].as_array().map_or(0, Vec::len));
+                for (n, r) in input["requests"].as_array().cloned().unwrap_or_default().into_iter().enumerate() {
+                    if self.concurrency.is_some_and(|c| n >= c) {
+                        self.throttled += 1;
+                        let e = json!({"error": {"code": "ApplicationThrottled", "message": "Application is over its MailboxConcurrency limit."}});
+                        out.push(json!({"id": r["id"], "status": 429, "headers": {"Retry-After": "0"}, "body": e}));
+                        continue;
+                    }
                     let b = serde_json::to_vec(&r["body"]).unwrap_or_default();
                     let (status, rb, _) = self.route(r["method"].as_str().unwrap_or("GET"), r["url"].as_str().unwrap_or("/"), &b, base);
                     let rbody: Value = serde_json::from_slice(&rb).unwrap_or(Value::Null);
@@ -418,7 +433,8 @@ pub struct Server {
 }
 
 fn respond(s: &mut impl Write, status: u16, body: &[u8], kind: &str) {
-    let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    let wait = if status == 429 { "Retry-After: 0\r\n" } else { "" };
+    let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{wait}Connection: close\r\n\r\n", body.len());
     let _ = s.write_all(head.as_bytes());
     let _ = s.write_all(body);
 }
@@ -461,7 +477,16 @@ pub fn serve(data: Data) -> Server {
             let mut words = first.split(' ');
             let (method, target) = (words.next().unwrap_or("GET").to_string(), words.next().unwrap_or("/").to_string());
             let target = target.strip_prefix("/v1.0").unwrap_or(&target).to_string();
-            let (status, out, kind) = shared.lock().unwrap().route(&method, &target, &body, &b);
+            let mut d = shared.lock().unwrap();
+            if d.throttle > 0 {
+                d.throttle -= 1;
+                d.throttled += 1;
+                drop(d);
+                respond(&mut s, 429, br#"{"error": {"code": "TooManyRequests"}}"#, "application/json");
+                continue;
+            }
+            let (status, out, kind) = d.route(&method, &target, &body, &b);
+            drop(d);
             respond(&mut s, status, &out, kind);
         }
     });
@@ -838,6 +863,37 @@ mod tests {
         assert!(data.lock().unwrap().calls.iter().any(|c| c.starts_with("POST /$batch")), "small requests go in batches");
         pool.submit(Job::Remove { account: "a1".into() });
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Throttling (429) costs nothing: whole requests and the throttled part of a batch go again
+    /// after the wait the server asks for, so no folder role or message is missed.
+    #[test]
+    fn throttled_requests_wait_and_go_again() {
+        let mut d = Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        d.folder("Sent Items", None, Some("sentitems"));
+        d.folder("Deleted Items", None, Some("deleteditems"));
+        for i in 0..12 {
+            d.deliver(&inbox, &mail(&format!("Note {i:02}"), &format!("n{i}")), false, &format!("2026-10-01T{i:02}:00:00Z"));
+        }
+        // Stricter than Exchange, so even our own batches get turned away in part.
+        d.concurrency = Some(2);
+        d.throttle = 2;
+        let server = serve(d);
+        let c = crate::graph::Client::connect(&server.base, TOKEN).unwrap();
+        let store = crate::fake::tests_store("graph-throttled");
+        let mut st = crate::jmap::State::default();
+        let folders = crate::graph::list_folders(&c, &mut st, "a1").unwrap();
+        let role = |p: &str| folders.iter().find(|f| f.path == p).map(|f| f.role);
+        assert_eq!(role("INBOX"), Some(mailcraft_model::FolderRole::Inbox));
+        assert_eq!(role("Deleted Items"), Some(mailcraft_model::FolderRole::Trash), "no role lost to a throttled lookup");
+        crate::graph::sync_folder(&c, &mut st, &store, "a1", "INBOX", &crate::sync::SyncOptions::default()).unwrap();
+        assert_eq!(store.load_folder("a1", "INBOX").unwrap().messages.len(), 12, "every message, throttled or not");
+        let d = server.data.lock().unwrap();
+        assert!(d.throttled > 2, "the server did turn requests away ({})", d.throttled);
+        assert!(d.largest_batch <= 4, "no more at once than Exchange runs for an app ({})", d.largest_batch);
+        drop(d);
+        let _ = std::fs::remove_dir_all(store.root());
     }
 
     /// A message whose source the server won't give doesn't stop the folder: the others

@@ -134,9 +134,13 @@ switched IMAP off.
   bookkeeping folders are left out.
 - **A folder sync** lists the newest messages' ids with `isRead`, `flag` and `isDraft`, then the
   details of those not cached yet (their internet headers when Exchange has them) in batches of
-  20. Sources come from `/messages/{id}/$value`; mail with attachments downloads when opened.
+  4. Sources come from `/messages/{id}/$value`; mail with attachments downloads when opened.
 - **Changes** are `PATCH`es (`isRead`, `flag`: `flagged`, `complete` for the `$Completed`
   keyword, `notFlagged`), `move`, `DELETE` and folder calls, batched.
+- **Throttling:** Exchange Online runs at most 4 requests at once for an app on a mailbox, and
+  Graph runs a batch's requests side by side, so batches hold 4. A request turned away as too
+  busy (429, or 503 for a read) goes again after the server's `Retry-After` (at most 30 s, five
+  times), on its own or as the throttled part of a batch; only then does the account back off.
 - **Sending** posts the MIME source to `sendMail`, which files the copy in Sent Items; recipients
   only on the envelope go in a `Bcc:` header, which Exchange strips. Drafts are made from MIME and
   moved where they belong.

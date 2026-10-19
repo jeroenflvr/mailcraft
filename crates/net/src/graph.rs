@@ -8,7 +8,8 @@
 //! replies. Ids are asked for in their immutable form (`Prefer: IdType="ImmutableId"`), so a
 //! message keeps its id when it moves, as JMAP's do: the numbering and folder paths are the
 //! JMAP transport's ([`jmap::State`], [`jmap::folders`]). Several small requests go as one
-//! JSON batch (20 at a time).
+//! JSON batch (4 at a time: Exchange runs no more at once for an app on a mailbox), and requests
+//! Graph turns away as too busy (429) go again after the wait it asks for (`Retry-After`).
 
 use std::collections::HashMap;
 
@@ -28,8 +29,13 @@ pub const DEFAULT_URL: &str = "https://graph.microsoft.com/v1.0";
 const MAX_JSON: usize = 32 << 20;
 /// Largest message source downloaded.
 const MAX_MIME: usize = 64 << 20;
-/// Requests in one batch (Graph's limit).
-const BATCH: usize = 20;
+/// Requests in one batch. Graph takes 20, but runs them side by side, and Exchange Online lets an
+/// app run only 4 requests at once on a mailbox: the rest would come back throttled (429).
+const BATCH: usize = 4;
+/// Times a throttled request is sent again, waiting what the server asks (`Retry-After`).
+const RETRIES: u32 = 5;
+/// Longest wait before sending a throttled request again.
+const MAX_WAIT_SECS: u64 = 30;
 /// Pages followed for one listing.
 const MAX_PAGES: usize = 200;
 /// Folders listed at most.
@@ -66,9 +72,23 @@ fn status_error(status: u16, body: &[u8]) -> Result<()> {
     match status {
         200..=299 => Ok(()),
         401 => Err(NetError::Auth("Microsoft refused the sign-in; sign in again".into())),
-        429 | 500..=599 => Err(NetError::Closed(format!("HTTP {status}"))),
+        429 => Err(NetError::Closed("Microsoft is limiting how often MailCraft may ask (HTTP 429); it tries again shortly".into())),
+        500..=599 => Err(NetError::Closed(format!("HTTP {status}"))),
         s => Err(NetError::No(format!("HTTP {s} {}", detail()).trim().to_string())),
     }
+}
+
+/// Whether an answer means "too busy, ask again": always for 429 (nothing was done); for 503
+/// only when asking again can't do a thing twice.
+fn throttled(status: u16, method: &str) -> bool {
+    status == 429 || (status == 503 && method.eq_ignore_ascii_case("GET"))
+}
+
+/// How long to wait before the `attempt`th retry: what the server asked (seconds), or else
+/// 1, 2, 4… seconds; never more than [`MAX_WAIT_SECS`].
+fn retry_wait(retry_after: Option<&str>, attempt: u32) -> std::time::Duration {
+    let secs = retry_after.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(1u64 << attempt.min(5));
+    std::time::Duration::from_secs(secs.min(MAX_WAIT_SECS))
 }
 
 fn json_body(body: &[u8]) -> Result<Value> {
@@ -77,6 +97,21 @@ fn json_body(body: &[u8]) -> Result<Value> {
 
 fn seg(id: &str) -> String {
     http::pct(id)
+}
+
+/// Send, and when Graph says it's too busy, wait as long as it asks and send again.
+fn send_patiently(r: &Request) -> Result<Response> {
+    let mut attempt = 0;
+    loop {
+        let resp = http::send(r)?;
+        if attempt >= RETRIES || !throttled(resp.status, &r.method) {
+            return Ok(resp);
+        }
+        let wait = retry_wait(resp.header("Retry-After"), attempt);
+        log::info!("Graph is busy (HTTP {}): asking again in {}s", resp.status, wait.as_secs());
+        std::thread::sleep(wait);
+        attempt += 1;
+    }
 }
 
 impl Client {
@@ -97,7 +132,7 @@ impl Client {
             .header("Authorization", &self.auth)
             .header("Accept", "application/json")
             .header("Prefer", "IdType=\"ImmutableId\", outlook.timezone=\"UTC\"");
-        let resp = http::send(&r)?;
+        let resp = send_patiently(&r)?;
         check(&resp)?;
         if resp.body.iter().all(u8::is_ascii_whitespace) {
             return Ok(Value::Null);
@@ -140,33 +175,63 @@ impl Client {
         Ok(out)
     }
 
-    /// Run requests as JSON batches; each answer's (status, body), in order.
+    /// Run requests as JSON batches; each answer's (status, body), in order. Requests Graph
+    /// turns away as too busy go again, after the wait it asks for.
     fn batch(&self, requests: &[(&str, String, Option<Value>)]) -> Result<Vec<(u16, Value)>> {
         let mut out = Vec::with_capacity(requests.len());
         for (n, chunk) in requests.chunks(BATCH).enumerate() {
-            let reqs: Vec<Value> = chunk
-                .iter()
-                .enumerate()
-                .map(|(i, (method, url, body))| {
-                    let mut r = json!({"id": (i + 1).to_string(), "method": method, "url": url});
-                    if let Some(b) = body {
-                        r["body"] = b.clone();
-                        r["headers"] = json!({"Content-Type": "application/json"});
+            let mut answers: Vec<Option<(u16, Value)>> = vec![None; chunk.len()];
+            let mut pending: Vec<usize> = (0..chunk.len()).collect();
+            for attempt in 0..=RETRIES {
+                let reqs: Vec<Value> = pending
+                    .iter()
+                    .filter_map(|&i| {
+                        let (method, url, body) = chunk.get(i)?;
+                        let mut r = json!({"id": (i + 1).to_string(), "method": method, "url": url});
+                        if let Some(b) = body {
+                            r["body"] = b.clone();
+                            r["headers"] = json!({"Content-Type": "application/json"});
+                        }
+                        Some(r)
+                    })
+                    .collect();
+                let v = self.post("/$batch", &json!({ "requests": reqs }))?;
+                let got = v.get("responses").and_then(Value::as_array).cloned().unwrap_or_default();
+                let mut again = Vec::new();
+                let mut wait = std::time::Duration::ZERO;
+                for &i in &pending {
+                    let id = (i + 1).to_string();
+                    let a = got.iter().find(|a| a.get("id").and_then(Value::as_str) == Some(id.as_str()));
+                    let status = a.and_then(|a| a.get("status")).and_then(Value::as_u64).and_then(|s| u16::try_from(s).ok()).unwrap_or(0);
+                    if status == 0 {
+                        return Err(NetError::Protocol(format!("Graph: no answer in batch {n}")));
                     }
-                    r
-                })
-                .collect();
-            let v = self.post("/$batch", &json!({ "requests": reqs }))?;
-            let answers = v.get("responses").and_then(Value::as_array).cloned().unwrap_or_default();
-            for i in 0..chunk.len() {
-                let id = (i + 1).to_string();
-                let a = answers.iter().find(|a| a.get("id").and_then(Value::as_str) == Some(id.as_str()));
-                let status = a.and_then(|a| a.get("status")).and_then(Value::as_u64).and_then(|s| u16::try_from(s).ok()).unwrap_or(0);
-                let body = a.and_then(|a| a.get("body")).cloned().unwrap_or(Value::Null);
-                if status == 0 {
-                    return Err(NetError::Protocol(format!("Graph: no answer in batch {n}")));
+                    let method = chunk.get(i).map_or("GET", |(m, _, _)| *m);
+                    if attempt < RETRIES && throttled(status, method) {
+                        let after = a.and_then(|a| a.get("headers")).and_then(|h| {
+                            h.as_object()?.iter().find(|(k, _)| k.eq_ignore_ascii_case("retry-after")).map(|(_, v)| match v {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            })
+                        });
+                        wait = wait.max(retry_wait(after.as_deref(), attempt));
+                        again.push(i);
+                        continue;
+                    }
+                    let body = a.and_then(|a| a.get("body")).cloned().unwrap_or(Value::Null);
+                    if let Some(slot) = answers.get_mut(i) {
+                        *slot = Some((status, body));
+                    }
                 }
-                out.push((status, body));
+                if again.is_empty() {
+                    break;
+                }
+                log::info!("Graph is busy: asking again for {} of a batch in {}s", again.len(), wait.as_secs());
+                std::thread::sleep(wait);
+                pending = again;
+            }
+            for a in answers {
+                out.push(a.ok_or_else(|| NetError::Protocol(format!("Graph: no answer in batch {n}")))?);
             }
         }
         Ok(out)
@@ -258,7 +323,7 @@ impl Client {
         let r = Request::get(&format!("{}/me/messages/{}/$value", self.base, seg(id)), MAX_MIME)
             .header("Authorization", &self.auth)
             .header("Prefer", "IdType=\"ImmutableId\"");
-        let resp = http::send(&r)?;
+        let resp = send_patiently(&r)?;
         check(&resp)?;
         Ok(resp.body)
     }
