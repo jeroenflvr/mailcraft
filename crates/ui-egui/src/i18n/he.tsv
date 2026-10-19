@@ -870,3 +870,8 @@ month	May	מאי
 	{email} will be removed from MailCraft. Nothing is deleted on the server.	{email} יוסר מ-MailCraft. דבר אינו נמחק בשרת.
 	{email} will be removed from MailCraft. Its data file, {file}, stays in your MailCraft Files folder: open it from File › Open & Export to see its mail again.	{email} יוסר מ-MailCraft. קובץ הנתונים שלו, {file}, נשאר בתיקייה MailCraft Files: פתח אותו מקובץ › פתיחה וייצוא כדי לראות שוב את הדואר שלו.
 	{email} will be removed from MailCraft.	{email} יוסר מ-MailCraft.
+	All Flagged	כל המסומנים
+	Flagged Mail	דואר מסומן
+	Search Folders	תיקיות חיפוש
+	Flagged mail from every folder but Deleted Items and Junk Email	דואר מסומן מכל התיקיות מלבד פריטים שנמחקו ודואר זבל
+	Flagged mail from every account's folders but Deleted Items and Junk Email	דואר מסומן מהתיקיות של כל החשבונות מלבד פריטים שנמחקו ודואר זבל

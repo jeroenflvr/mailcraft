@@ -79,6 +79,12 @@ pub enum View {
     },
     /// Messages waiting to be sent, from every account.
     Outbox,
+    /// A search folder: the flagged mail of every folder of an account (of every account, with
+    /// none), Sent Items included and Deleted Items and Junk Email left out. The messages stay
+    /// where they are; what's done to one here is done to it in its folder.
+    Flagged {
+        account: Option<String>,
+    },
 }
 
 /// The pseudo-folder of Outbox message keys (NUL never appears in a server's folder names).
@@ -595,6 +601,9 @@ pub struct Session {
     pending_marks: BTreeMap<u64, (MessageKey, Flag)>,
     /// Summaries kept cached at most ([`CACHE_MESSAGES`]; tests make it small).
     pub(crate) cache_limit: usize,
+    /// Each folder's flagged messages, for the Flagged search folders: read once per change of
+    /// the folder, so a big mailbox's folders needn't all stay in `cache` while one is shown.
+    flagged: HashMap<(String, String), Vec<Summary>>,
     /// Built on first use from the cached mail; dropped when mail arrives.
     contacts: Option<ContactBook>,
     /// The highest UID seen per Inbox, so only mail that arrives later is announced.
@@ -678,6 +687,7 @@ impl Session {
             cache_order: Vec::new(),
             pending_marks: BTreeMap::new(),
             cache_limit: CACHE_MESSAGES,
+            flagged: HashMap::new(),
             contacts: None,
             seen_uid: HashMap::new(),
             new_mail: Vec::new(),
@@ -859,7 +869,7 @@ impl Session {
     /// The account the view belongs to (or the first one, for unified views).
     pub fn current_account(&self) -> Option<&AccountState> {
         match &self.view {
-            View::Folder { account, .. } => self.account(account),
+            View::Folder { account, .. } | View::Flagged { account: Some(account) } => self.account(account),
             _ => self.accounts.first(),
         }
     }
@@ -869,7 +879,7 @@ impl Session {
         match &self.view {
             View::Folder { account, folder } => self.folder(account, folder).map(|f| f.role),
             View::Unified { role } => Some(*role),
-            View::Empty | View::Outbox => None,
+            View::Empty | View::Outbox | View::Flagged { .. } => None,
         }
     }
 
@@ -887,6 +897,8 @@ impl Session {
                 r => format!("All {}", r.label().unwrap_or("folders")),
             },
             View::Outbox => "Outbox".to_string(),
+            View::Flagged { account: Some(_) } => "Flagged Mail".to_string(),
+            View::Flagged { account: None } => "All Flagged".to_string(),
             View::Empty => "MailCraft".to_string(),
         }
     }
@@ -916,7 +928,8 @@ impl Session {
         if total <= self.cache_limit {
             return;
         }
-        let shown = self.view_folders();
+        // A search folder's folders aren't held: it keeps their flagged mail itself.
+        let shown = if matches!(self.view, View::Flagged { .. }) { Vec::new() } else { self.view_folders() };
         let mut i = 0;
         while total > self.cache_limit && i < self.cache_order.len() {
             let k = self.cache_order.get(i).cloned().unwrap_or_default();
@@ -941,6 +954,7 @@ impl Session {
     fn reload_folder(&mut self, account: &str, folder: &str) {
         let k = (account.to_string(), folder.to_string());
         self.cache.remove(&k);
+        self.flagged.remove(&k);
         self.index = None;
         self.contacts = None;
     }
@@ -1062,12 +1076,44 @@ impl Session {
     }
 
     /// The folders the view draws from.
-    fn view_folders(&self) -> Vec<(String, String)> {
+    pub(crate) fn view_folders(&self) -> Vec<(String, String)> {
         match &self.view {
             View::Folder { account, folder } => vec![(account.clone(), folder.clone())],
             View::Unified { role } => self.accounts.iter().filter_map(|a| a.folder(*role).map(|f| (a.config.id.clone(), f.path.clone()))).collect(),
+            View::Flagged { account } => self.flagged_folders(account.as_deref()),
             View::Empty | View::Outbox => Vec::new(),
         }
+    }
+
+    /// The folders a Flagged search folder looks in: every one of the account (or of every
+    /// account), but Deleted Items and Junk Email.
+    fn flagged_folders(&self, account: Option<&str>) -> Vec<(String, String)> {
+        self.accounts
+            .iter()
+            .filter(|a| account.is_none_or(|id| a.config.id == id))
+            .flat_map(|a| {
+                a.folders
+                    .iter()
+                    .filter(|f| f.selectable && !matches!(f.role, FolderRole::Trash | FolderRole::Junk))
+                    .map(|f| (a.config.id.clone(), f.path.clone()))
+            })
+            .collect()
+    }
+
+    /// The flagged mail of a Flagged search folder's folders, each folder read once per change.
+    fn flagged_summaries(&mut self, account: Option<&str>) -> Vec<Summary> {
+        let mut out = Vec::new();
+        for k in self.flagged_folders(account) {
+            if !self.flagged.contains_key(&k) {
+                let found: Vec<Summary> =
+                    self.folder_state(&k.0, &k.1).messages.iter().filter(|m| m.flags.flagged && !m.flags.deleted).cloned().collect();
+                self.flagged.insert(k.clone(), found);
+            }
+            if let Some(found) = self.flagged.get(&k) {
+                out.extend(found.iter().cloned());
+            }
+        }
+        out
     }
 
     /// Rebuild the list from the view, search and filter, keeping the selection where possible.
@@ -1076,6 +1122,8 @@ impl Session {
             self.search_results(&q, scope)
         } else if self.view == View::Outbox {
             self.outbox_summaries()
+        } else if let View::Flagged { account } = self.view.clone() {
+            self.flagged_summaries(account.as_deref())
         } else {
             let mut v = Vec::new();
             for (a, f) in self.view_folders() {
@@ -1428,6 +1476,7 @@ impl Session {
         }
         let local = self.account(account).is_none_or(AccountState::is_local);
         self.apply_op_memory(account, &op);
+        self.apply_op_flagged(account, &op);
         if local {
             self.apply_op_local(account, &op);
         } else {
@@ -1495,6 +1544,67 @@ impl Session {
                     folder.unread = u32::try_from((i64::from(folder.unread) + d).max(0)).unwrap_or(0);
                 }
             }
+        }
+    }
+
+    /// The Flagged search folders follow a change at once too (their folders may not be cached).
+    fn apply_op_flagged(&mut self, account: &str, op: &Op) {
+        if op.is_folder_op() {
+            self.flagged.retain(|(a, _), _| a != account);
+            return;
+        }
+        match op {
+            Op::EmptyFolder { path } => {
+                self.flagged.remove(&(account.to_string(), path.clone()));
+                return;
+            }
+            // What arrives there gets new numbers: that folder is read again.
+            Op::Move { to, .. } => {
+                self.flagged.remove(&(account.to_string(), to.clone()));
+            }
+            _ => {}
+        }
+        let keys: HashSet<&MessageKey> = op.keys().iter().collect();
+        let mut stale = Vec::new();
+        for ((a, f), found) in self.flagged.iter_mut() {
+            if a != account || !keys.iter().any(|k| &k.folder == f) {
+                continue;
+            }
+            match op {
+                Op::SetFlag { flag, on, .. } => {
+                    for m in found.iter_mut().filter(|m| keys.contains(&m.key)) {
+                        flag.set(&mut m.flags, *on);
+                    }
+                    // Newly flagged: taken from the cached folder or the list it was chosen in.
+                    if *flag == Flag::Flagged && *on {
+                        let missing: Vec<&MessageKey> =
+                            keys.iter().copied().filter(|k| &k.folder == f && !found.iter().any(|m| &m.key == *k)).collect();
+                        for k in missing {
+                            let cached = self.cache.get(&(a.clone(), f.clone())).and_then(|st| st.messages.iter().find(|m| &m.key == k));
+                            match cached.or_else(|| self.list.iter().find(|m| &m.key == k)) {
+                                Some(m) => {
+                                    let mut m = m.clone();
+                                    m.flags.flagged = true;
+                                    found.push(m);
+                                }
+                                None => stale.push((a.clone(), f.clone())),
+                            }
+                        }
+                    }
+                }
+                Op::SetKeyword { keyword, on, .. } => {
+                    for m in found.iter_mut().filter(|m| keys.contains(&m.key)) {
+                        m.flags.set_keyword(keyword, *on);
+                    }
+                }
+                Op::Move { to, .. } if to == f => {}
+                Op::Move { .. } | Op::Expunge { .. } => found.retain(|m| !keys.contains(&m.key)),
+                Op::CreateFolder { .. } | Op::RenameFolder { .. } | Op::DeleteFolder { .. } | Op::EmptyFolder { .. } => {}
+            }
+            found.retain(|m| m.flags.flagged && !m.flags.deleted);
+        }
+        for k in stale {
+            self.flagged.remove(&k);
         }
     }
 
@@ -2917,6 +3027,7 @@ impl Session {
         };
         self.accounts.retain(|a| a.config.id != id);
         self.cache.retain(|(a, _), _| a != id);
+        self.flagged.retain(|(a, _), _| a != id);
         self.pim.remove(id);
         let mut kept = None;
         if let Some(store) = &self.store {

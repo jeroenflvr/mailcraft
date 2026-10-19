@@ -1250,3 +1250,31 @@ fn enter_submits_a_one_field_dialog() {
     assert!(matches!(&a.ui.dialog, Some(Dialog::AddSharedMailbox { error: Some(_), .. })), "submitted: {:?}", a.ui.dialog.is_some());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The Flagged Mail search folder draws in the folder pane (open and collapsed) and in the list,
+/// for one account and for every account, in both themes.
+#[test]
+fn the_flagged_mail_search_folder_draws() {
+    let (mut a, dir) = app("flagged");
+    let ctx = egui::Context::default();
+    frame(&ctx, &mut a, vec![]);
+    a.run("folder.flagged", json!({"account": "sample"}));
+    assert_eq!(a.session.view, mailcraft_engine::View::Flagged { account: Some("sample".into()) });
+    assert!(!a.session.list.is_empty() && a.session.list.iter().all(|m| m.flags.flagged));
+    for dark in [Some(false), Some(true)] {
+        a.ui.dark = dark;
+        frame(&ctx, &mut a, vec![]);
+        frame(&ctx, &mut a, vec![]);
+    }
+    assert!(a.ui.title_shown.contains("Flagged Mail"), "{}", a.ui.title_shown);
+    a.run("list.open", json!({"key": a.session.list[0].key.to_id()}));
+    frame(&ctx, &mut a, vec![]);
+    a.run("view.collapse", json!({"key": "search:sample"}));
+    assert!(a.session.prefs.collapsed.contains("search:sample"));
+    frame(&ctx, &mut a, vec![]);
+    a.run("folder.flagged", json!({}));
+    frame(&ctx, &mut a, vec![]);
+    frame(&ctx, &mut a, vec![]);
+    assert!(a.ui.title_shown.contains("All Flagged"), "{}", a.ui.title_shown);
+    let _ = std::fs::remove_dir_all(dir);
+}

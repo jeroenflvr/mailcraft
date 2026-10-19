@@ -871,3 +871,8 @@ month	May	5月
 	{email} will be removed from MailCraft. Nothing is deleted on the server.	{email} を MailCraft から削除します。サーバー上では何も削除されません。
 	{email} will be removed from MailCraft. Its data file, {file}, stays in your MailCraft Files folder: open it from File › Open & Export to see its mail again.	{email} を MailCraft から削除します。データ ファイル {file} は MailCraft Files フォルダーに残ります。[ファイル] › [開く/エクスポート] から開くと、メールをまた見られます。
 	{email} will be removed from MailCraft.	{email} を MailCraft から削除します。
+	All Flagged	すべてのフラグ付き
+	Flagged Mail	フラグ付きメール
+	Search Folders	検索フォルダー
+	Flagged mail from every folder but Deleted Items and Junk Email	削除済みアイテムと迷惑メール以外のすべてのフォルダーのフラグ付きメール
+	Flagged mail from every account's folders but Deleted Items and Junk Email	削除済みアイテムと迷惑メール以外のすべてのアカウントのフォルダーのフラグ付きメール

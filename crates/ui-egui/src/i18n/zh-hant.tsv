@@ -868,6 +868,11 @@
 	{email} will be removed from MailCraft. Nothing is deleted on the server.	將從 MailCraft 移除 {email}。伺服器上的內容不會被刪除。
 	{email} will be removed from MailCraft. Its data file, {file}, stays in your MailCraft Files folder: open it from File › Open & Export to see its mail again.	將從 MailCraft 移除 {email}。其資料檔 {file} 會保留在 MailCraft Files 資料夾中：從「檔案 › 開啟與匯出」開啟即可再次查看其郵件。
 	{email} will be removed from MailCraft.	將從 MailCraft 移除 {email}。
+	All Flagged	所有已加上標幟
+	Flagged Mail	已加上標幟的郵件
+	Search Folders	搜尋資料夾
+	Flagged mail from every folder but Deleted Items and Junk Email	除刪除的郵件和垃圾郵件外所有資料夾中已加上標幟的郵件
+	Flagged mail from every account's folders but Deleted Items and Junk Email	除刪除的郵件和垃圾郵件外所有帳戶資料夾中已加上標幟的郵件
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	封存

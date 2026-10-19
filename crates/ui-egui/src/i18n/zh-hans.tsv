@@ -871,3 +871,8 @@ month	May	5月
 	{email} will be removed from MailCraft. Nothing is deleted on the server.	将从 MailCraft 中删除 {email}。服务器上的内容不会被删除。
 	{email} will be removed from MailCraft. Its data file, {file}, stays in your MailCraft Files folder: open it from File › Open & Export to see its mail again.	将从 MailCraft 中删除 {email}。其数据文件 {file} 会保留在 MailCraft Files 文件夹中：从“文件 › 打开和导出”打开即可再次查看其邮件。
 	{email} will be removed from MailCraft.	将从 MailCraft 中删除 {email}。
+	All Flagged	所有已标记
+	Flagged Mail	已标记邮件
+	Search Folders	搜索文件夹
+	Flagged mail from every folder but Deleted Items and Junk Email	除已删除邮件和垃圾邮件外所有文件夹中的已标记邮件
+	Flagged mail from every account's folders but Deleted Items and Junk Email	除已删除邮件和垃圾邮件外所有帐户文件夹中的已标记邮件

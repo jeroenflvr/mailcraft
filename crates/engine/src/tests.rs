@@ -2568,3 +2568,125 @@ fn a_removed_account_keeps_its_data_file() {
     drop(s);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The Flagged Mail search folder: flagged mail from every folder of the account, Sent Items
+/// included and Deleted Items left out; the messages stay in their folders, and what's done to
+/// one there is done to it where it is.
+#[test]
+fn flagged_mail_gathers_every_folders_flagged_mail() {
+    let mut s = sample_session("flagged-folder");
+    let subjects = |s: &Session| -> Vec<String> {
+        let mut v: Vec<String> = s.list.iter().map(|m| m.subject.clone()).collect();
+        v.sort();
+        v
+    };
+    s.run("folder.flagged", &json!({"account": "sample"})).unwrap();
+    assert_eq!(s.view, View::Flagged { account: Some("sample".into()) });
+    assert_eq!(s.view_title(), "Flagged Mail");
+    assert_eq!(subjects(&s), ["Shot list v2", "Storyboard review on Thursday"]);
+    assert!(s.list.iter().all(|m| m.flags.flagged));
+
+    // Flagged in Sent Items: it's there too, with the Inbox's.
+    s.run("folder.open", &json!({"account": "sample", "folder": "Sent"})).unwrap();
+    let sent = s.list.first().cloned().expect("the sample has sent mail");
+    s.run("list.select", &json!({"key": sent.key.to_id()})).unwrap();
+    s.run("mail.flag", &json!({"on": true})).unwrap();
+    s.run("folder.flagged", &json!({"account": "sample"})).unwrap();
+    assert_eq!(s.list.len(), 3);
+    assert!(s.list.iter().any(|m| m.key == sent.key), "Sent Items' flagged mail is in");
+
+    // Reading and marking work on the message in its own folder.
+    s.run("list.select", &json!({"key": sent.key.to_id()})).unwrap();
+    s.run("mail.markUnread", &json!({})).unwrap();
+    assert!(s.list.iter().any(|m| m.key == sent.key && !m.flags.seen));
+    let in_sent = s.store.as_ref().unwrap().load_folder("sample", "Sent").unwrap();
+    assert!(in_sent.messages.iter().any(|m| m.key == sent.key && !m.flags.seen && m.flags.flagged));
+
+    // Unflagged here: gone from the search folder, still in the Inbox.
+    let k = key_of(&s, "Storyboard review on Thursday");
+    s.run("list.select", &k).unwrap();
+    s.run("mail.flag", &json!({"on": false})).unwrap();
+    assert!(!s.list.iter().any(|m| m.subject == "Storyboard review on Thursday"));
+    // Deleted from here: to Deleted Items, which the search folder leaves out, flag and all.
+    let k = key_of(&s, "Shot list v2");
+    s.run("list.select", &k).unwrap();
+    s.run("mail.delete", &json!({})).unwrap();
+    assert_eq!(s.list.len(), 1);
+    s.run("folder.open", &json!({"account": "sample", "folder": "Trash"})).unwrap();
+    assert!(s.list.iter().any(|m| m.subject == "Shot list v2" && m.flags.flagged));
+    s.run("folder.open", &json!({"account": "sample", "folder": "INBOX"})).unwrap();
+    assert!(s.list.iter().any(|m| m.subject == "Storyboard review on Thursday" && !m.flags.flagged));
+
+    // Every account's, and an account that isn't there.
+    s.run("folder.flagged", &json!({})).unwrap();
+    assert_eq!(s.view, View::Flagged { account: None });
+    assert_eq!(s.view_title(), "All Flagged");
+    assert_eq!(s.list.len(), 1);
+    assert!(s.run("folder.flagged", &json!({"account": "nobody"})).is_err());
+    assert!(s.run("folder.flagged", &json!({"account": 5})).is_err());
+
+    // Shown, it doesn't hold every folder of the account in memory.
+    s.run("folder.flagged", &json!({"account": "sample"})).unwrap();
+    s.set_cache_limit(1);
+    assert!(s.cache.len() <= 2, "{:?}", s.cache.keys().collect::<Vec<_>>());
+    s.refresh_list();
+    assert_eq!(s.list.len(), 1, "its flagged mail is kept by itself");
+    done(s);
+}
+
+/// On a server account the Flagged Mail search folder follows changes at once, before the
+/// server has them, and mail as it syncs.
+#[test]
+fn flagged_mail_follows_changes_before_the_server_answers() {
+    let store = temp("flagged-remote");
+    let mut s = Session::open(Some(store), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id = s.run("account.add", &json!({"email": "zoe@example.org", "password": "pw"})).unwrap()["account"].as_str().unwrap().to_string();
+    let folder = |path: &str, role| mailcraft_model::Folder { account: id.clone(), path: path.into(), role, selectable: true, ..Default::default() };
+    s.apply(Event::Folders {
+        account: id.clone(),
+        folders: vec![folder("INBOX", FolderRole::Inbox), folder("Sent", FolderRole::Sent), folder("Junk", FolderRole::Junk)],
+    });
+    let key = |folder: &str, uid| mailcraft_model::MessageKey { account: id.clone(), folder: folder.into(), validity: 9, uid };
+    let msg = |k: &mailcraft_model::MessageKey, subject: &str, flagged| mailcraft_model::Summary {
+        key: k.clone(),
+        subject: subject.into(),
+        date: NOW - 60,
+        flags: mailcraft_model::Flags { seen: true, flagged, ..Default::default() },
+        ..Default::default()
+    };
+    let save = |s: &Session, folder: &str, messages| {
+        let st = mailcraft_store::FolderState { validity: 9, uid_next: 9, highest_modseq: 0, messages, window: 0 };
+        s.store.as_ref().unwrap().save_folder(&id, folder, &st).unwrap();
+    };
+    save(&s, "INBOX", vec![msg(&key("INBOX", 1), "Flagged in", true), msg(&key("INBOX", 2), "Plain", false)]);
+    save(&s, "Sent", vec![msg(&key("Sent", 1), "Flagged out", true)]);
+    save(&s, "Junk", vec![msg(&key("Junk", 1), "Flagged junk", true)]);
+    for f in ["INBOX", "Sent", "Junk"] {
+        s.apply(Event::FolderChanged { account: id.clone(), folder: f.into() });
+    }
+    s.run("folder.flagged", &json!({"account": id})).unwrap();
+    let mut subjects: Vec<&str> = s.list.iter().map(|m| m.subject.as_str()).collect();
+    subjects.sort_unstable();
+    assert_eq!(subjects, ["Flagged in", "Flagged out"], "Junk Email left out");
+
+    // Unflagged here: gone at once, the change going to the server.
+    s.take_jobs();
+    s.run("list.select", &json!({"key": key("Sent", 1).to_id()})).unwrap();
+    s.run("mail.flag", &json!({"on": false})).unwrap();
+    assert_eq!(s.list.len(), 1);
+    assert!(s.take_jobs().iter().any(|j| matches!(j, Job::Apply { op: Op::SetFlag { flag: Flag::Flagged, on: false, .. }, .. })));
+
+    // Flagged in the Inbox: there when the search folder opens again, before the server answers.
+    s.run("folder.open", &json!({"account": id, "folder": "INBOX"})).unwrap();
+    s.run("list.select", &json!({"key": key("INBOX", 2).to_id()})).unwrap();
+    s.run("mail.flag", &json!({"on": true})).unwrap();
+    s.run("folder.flagged", &json!({"account": id})).unwrap();
+    assert_eq!(s.list.len(), 2);
+
+    // New flagged mail synced into a folder shows while the search folder is open.
+    save(&s, "Sent", vec![msg(&key("Sent", 1), "Flagged out", false), msg(&key("Sent", 2), "Flagged later", true)]);
+    s.apply(Event::FolderChanged { account: id.clone(), folder: "Sent".into() });
+    assert!(s.list.iter().any(|m| m.subject == "Flagged later"));
+    assert_eq!(s.list.len(), 3);
+    let _ = std::fs::remove_dir_all(s.store.as_ref().unwrap().root());
+}

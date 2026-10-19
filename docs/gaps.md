@@ -439,3 +439,12 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   file of its own (`address (2).mailcraft`), the kept one untouched; Open & Export's picker
   starts in MailCraft Files, and the kept file opens there as a mailbox of its own. A file that
   failed to open, and an account moving to Graph (starting again from the server), still go.
+- **Search Folders › Flagged Mail:** flagged mail could only be filtered folder by folder, so
+  what was flagged in Sent Items never sat beside the Inbox's. Each account has a Search Folders
+  group in the folder pane with Flagged Mail: the flagged mail of every folder but Deleted Items
+  and Junk Email, the messages staying where they are (reading, unflagging, moving or deleting one
+  there acts on it in its folder; unflagged or deleted, it leaves at once, before the server
+  answers). With several accounts, Favorites has All Flagged. `folder.flagged` opens it
+  (`{"account"?}`). Each folder's flagged messages are kept apart, read again only when that
+  folder changes, so a big mailbox isn't held in memory while it's shown. Not yet: search
+  folders of your own (other criteria), or Outlook's search folders on the server.

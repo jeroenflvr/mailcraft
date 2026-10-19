@@ -148,6 +148,8 @@ pub fn registry() -> Registry {
         // Navigation
         CommandSpec::new("folder.open", "Open folder", "Folder pane", open_folder).params(r#"{"account": string, "folder": string}"#),
         CommandSpec::new("folder.unified", "All inboxes", "Folder pane › Favorites", unified).params(r#"{"role"?: "inbox"|"sent"|"drafts"|…}"#),
+        CommandSpec::new("folder.flagged", "Flagged Mail", "Folder pane › Search Folders", open_flagged)
+            .params(r#"{"account"?: string (absent: every account)}"#),
         CommandSpec::new("folder.outbox", "Outbox", "Folder pane", |s, _| {
             s.refresh_outbox();
             s.open_view(View::Outbox);
@@ -323,7 +325,7 @@ pub fn registry() -> Registry {
         CommandSpec::new("view.collapse", "Collapse or expand in the folder pane", "Folder pane", |s, v| {
             let key = p::req_str(v, "key")?.trim();
             if key.is_empty() || key.len() > 600 {
-                return Err(CmdError::Params("`key` names what to collapse: favorites, account:<id> or folder:<account>/<path>".into()));
+                return Err(CmdError::Params("`key` names what to collapse: favorites, account:<id>, search:<id> or folder:<account>/<path>".into()));
             }
             let collapse = p::bool(v, "collapsed").unwrap_or(!s.prefs.collapsed.contains(key));
             if collapse {
@@ -338,7 +340,7 @@ pub fn registry() -> Registry {
             }
             Ok(json!({"key": key, "collapsed": collapse}))
         })
-        .params(r#"{"key": string (favorites, account:<id> or folder:<account>/<path>), "collapsed"?: bool (default: the other way)}"#),
+        .params(r#"{"key": string (favorites, account:<id>, search:<id> (its Search Folders) or folder:<account>/<path>), "collapsed"?: bool (default: the other way)}"#),
         CommandSpec::new("view.focused", "Focused Inbox", "View › Messages", |s, v| {
             s.prefs.focused_inbox = p::bool(v, "on").unwrap_or(!s.prefs.focused_inbox);
             s.focus_other = false;
@@ -889,11 +891,7 @@ fn mark_all_read(s: &mut Session, _: &Value) -> CmdResult {
 
 fn sync_folder(s: &mut Session, _: &Value) -> CmdResult {
     let mut n = 0;
-    let folders: Vec<(String, String)> = match &s.view {
-        View::Folder { account, folder } => vec![(account.clone(), folder.clone())],
-        View::Unified { role } => s.accounts.iter().filter_map(|a| a.folder(*role).map(|f| (a.config.id.clone(), f.path.clone()))).collect(),
-        View::Empty | View::Outbox => Vec::new(),
-    };
+    let folders = s.view_folders();
     for (account, folder) in folders {
         if s.account(&account).is_some_and(|a| !a.is_local()) {
             s.push_job(mailcraft_model::Job::SyncFolder { account, folder });
@@ -919,6 +917,22 @@ fn unified(s: &mut Session, v: &Value) -> CmdResult {
         None => FolderRole::Inbox,
     };
     s.open_view(View::Unified { role });
+    Ok(json!({"messages": s.list.len()}))
+}
+
+/// The Flagged Mail search folder: an account's, or every account's.
+fn open_flagged(s: &mut Session, v: &Value) -> CmdResult {
+    let account = match v.get("account") {
+        None | Some(Value::Null) => None,
+        Some(_) => {
+            let id = p::req_str(v, "account")?;
+            if s.account(id).is_none() {
+                return Err(CmdError::Params(format!("no account `{id}`")));
+            }
+            Some(id.to_string())
+        }
+    };
+    s.open_view(View::Flagged { account });
     Ok(json!({"messages": s.list.len()}))
 }
 

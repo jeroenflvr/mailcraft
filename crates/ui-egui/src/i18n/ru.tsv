@@ -868,6 +868,11 @@
 	{email} will be removed from MailCraft. Nothing is deleted on the server.	{email} будет удалена из MailCraft. На сервере ничего не удаляется.
 	{email} will be removed from MailCraft. Its data file, {file}, stays in your MailCraft Files folder: open it from File › Open & Export to see its mail again.	{email} будет удалена из MailCraft. Её файл данных {file} останется в папке MailCraft Files: откройте его через Файл › Открыть и экспортировать, чтобы снова увидеть почту.
 	{email} will be removed from MailCraft.	{email} будет удалена из MailCraft.
+	All Flagged	Все помеченные
+	Flagged Mail	Помеченная почта
+	Search Folders	Папки поиска
+	Flagged mail from every folder but Deleted Items and Junk Email	Помеченная почта из всех папок, кроме «Удалённые» и «Нежелательная почта»
+	Flagged mail from every account's folders but Deleted Items and Junk Email	Помеченная почта из папок всех учётных записей, кроме «Удалённые» и «Нежелательная почта»
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	Архив

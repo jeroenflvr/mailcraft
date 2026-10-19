@@ -71,8 +71,10 @@ JMAP.
 
 ## The session (`crates/engine`)
 
-`Session` holds the accounts (config, folders, connection status), the view (a folder, or a role
-across all accounts such as *All Inboxes*), the filter and search, the message list, selection and
+`Session` holds the accounts (config, folders, connection status), the view (a folder, a role
+across all accounts such as *All Inboxes*, or the *Flagged Mail* search folder over an account's
+folders, which keeps each folder's flagged summaries apart so the folders needn't stay cached),
+the filter and search, the message list, selection and
 focus, the open message (`Reading`, parsed on demand from the cached source), the message being
 written (`Compose`), preferences and status-bar notices.
 

@@ -1,4 +1,5 @@
-//! The folder pane: Favorites, then each account's folders as a tree with unread counts.
+//! The folder pane: Favorites, then each account's folders as a tree with unread counts, and its
+//! Search Folders (Flagged Mail).
 //! Messages dragged from the list drop onto a folder to move them; a folder dragged onto another
 //! moves inside it; an account dragged onto another takes its place. Right-click a folder to
 //! create, rename, move, delete or pin it to Favorites. Favorites, accounts and folders with
@@ -127,6 +128,13 @@ pub fn show(s: &Session, t: &Tokens, ui: &mut Ui, acts: &mut Vec<Action>) {
             if row(ui, t, Icon::Sent, "All Sent", 0, 0, sel, false, false).clicked() {
                 acts.push(Action::Run("folder.unified", json!({"role": "sent"})));
             }
+            let sel = s.view == View::Flagged { account: None } && s.search.is_none();
+            if row(ui, t, Icon::Flag, "All Flagged", 0, 0, sel, false, false)
+                .on_hover_text(tl!("Flagged mail from every account's folders but Deleted Items and Junk Email"))
+                .clicked()
+            {
+                acts.push(Action::Run("folder.flagged", json!({})));
+            }
         }
         for fav in s.favorites().into_iter().filter(|_| favorites_open) {
             if let Some(f) = s.folder(&fav.account, &fav.folder) {
@@ -252,7 +260,42 @@ pub fn show(s: &Session, t: &Tokens, ui: &mut Ui, acts: &mut Vec<Action>) {
                 let collapse = parents.contains(&f.path).then(|| s.prefs.collapsed.contains(&folder_key(&f.account, &f.path)));
                 folder_row(s, t, ui, acts, f, f.depth() + 1, false, collapse);
             }
+            if !a.folders.is_empty() {
+                search_folders(s, t, ui, acts, &a.config.id);
+            }
             ui.add_space(6.0);
+        }
+    });
+}
+
+/// An account's Search Folders: views over its folders that leave the messages where they are.
+fn search_folders(s: &Session, t: &Tokens, ui: &mut Ui, acts: &mut Vec<Action>, account: &str) {
+    let key = format!("search:{account}");
+    let collapsed = s.prefs.collapsed.contains(&key);
+    let resp = row(ui, t, Icon::Search, "Search Folders", 0, 1, false, false, false);
+    let chev = egui::Rect::from_min_size(egui::pos2(resp.rect.min.x + 10.0, resp.rect.center().y - 6.0), vec2(12.0, 12.0));
+    icons::paint(ui.painter(), chev, if collapsed { Icon::ChevronRight } else { Icon::ChevronDown }, t.dim);
+    if resp.clicked() {
+        acts.push(Action::Run("view.collapse", json!({"key": key})));
+    }
+    if collapsed {
+        return;
+    }
+    let sel = s.search.is_none() && matches!(&s.view, View::Flagged { account: Some(a) } if a == account);
+    let resp = row(ui, t, Icon::Flag, "Flagged Mail", 0, 2, sel, false, false)
+        .on_hover_text(tl!("Flagged mail from every folder but Deleted Items and Junk Email"));
+    if resp.clicked() {
+        acts.push(Action::Run("folder.flagged", json!({"account": account})));
+    }
+    resp.context_menu(|ui| {
+        if ui.button(tl!("Open")).clicked() {
+            acts.push(Action::Run("folder.flagged", json!({"account": account})));
+            ui.close();
+        }
+        if ui.button(tl!("Update folder")).clicked() {
+            acts.push(Action::Run("folder.flagged", json!({"account": account})));
+            acts.push(Action::Run("folder.sync", json!({})));
+            ui.close();
         }
     });
 }

@@ -869,6 +869,11 @@
 	{email} will be removed from MailCraft. Nothing is deleted on the server.	{email} wird aus MailCraft entfernt. Auf dem Server wird nichts gelöscht.
 	{email} will be removed from MailCraft. Its data file, {file}, stays in your MailCraft Files folder: open it from File › Open & Export to see its mail again.	{email} wird aus MailCraft entfernt. Die Datendatei {file} bleibt im Ordner „MailCraft Files“: Öffnen Sie sie über Datei › Öffnen und exportieren, um die E-Mails wieder zu sehen.
 	{email} will be removed from MailCraft.	{email} wird aus MailCraft entfernt.
+	All Flagged	Alle gekennzeichneten
+	Flagged Mail	Gekennzeichnete E-Mails
+	Search Folders	Suchordner
+	Flagged mail from every folder but Deleted Items and Junk Email	Gekennzeichnete E-Mails aus allen Ordnern außer Gelöschte Elemente und Junk-E-Mail
+	Flagged mail from every account's folders but Deleted Items and Junk Email	Gekennzeichnete E-Mails aus den Ordnern aller Konten außer Gelöschte Elemente und Junk-E-Mail
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	Archiv

@@ -870,3 +870,8 @@ month	May	mei
 	{email} will be removed from MailCraft. Nothing is deleted on the server.	{email} wordt uit MailCraft verwijderd. Er wordt niets van de server verwijderd.
 	{email} will be removed from MailCraft. Its data file, {file}, stays in your MailCraft Files folder: open it from File › Open & Export to see its mail again.	{email} wordt uit MailCraft verwijderd. Het gegevensbestand {file} blijft in de map MailCraft Files: open het via Bestand › Openen en exporteren om de e-mail weer te zien.
 	{email} will be removed from MailCraft.	{email} wordt uit MailCraft verwijderd.
+	All Flagged	Alle gemarkeerde
+	Flagged Mail	Gemarkeerde e-mail
+	Search Folders	Zoekmappen
+	Flagged mail from every folder but Deleted Items and Junk Email	Gemarkeerde e-mail uit alle mappen behalve Verwijderde items en Ongewenste e-mail
+	Flagged mail from every account's folders but Deleted Items and Junk Email	Gemarkeerde e-mail uit de mappen van alle accounts behalve Verwijderde items en Ongewenste e-mail

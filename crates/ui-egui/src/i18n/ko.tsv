@@ -868,6 +868,11 @@
 	{email} will be removed from MailCraft. Nothing is deleted on the server.	{email}이(가) MailCraft에서 제거됩니다. 서버에서는 아무것도 삭제되지 않습니다.
 	{email} will be removed from MailCraft. Its data file, {file}, stays in your MailCraft Files folder: open it from File › Open & Export to see its mail again.	{email}이(가) MailCraft에서 제거됩니다. 데이터 파일 {file}은(는) MailCraft Files 폴더에 남으며, 파일 › 열기 및 내보내기에서 열면 메일을 다시 볼 수 있습니다.
 	{email} will be removed from MailCraft.	{email}이(가) MailCraft에서 제거됩니다.
+	All Flagged	모든 플래그 지정됨
+	Flagged Mail	플래그 지정된 메일
+	Search Folders	검색 폴더
+	Flagged mail from every folder but Deleted Items and Junk Email	지운 편지함과 정크 메일을 제외한 모든 폴더의 플래그 지정된 메일
+	Flagged mail from every account's folders but Deleted Items and Junk Email	지운 편지함과 정크 메일을 제외한 모든 계정 폴더의 플래그 지정된 메일
 
 # The Archive folder, where the plain entry is the command.
 folder	Archive	보관함

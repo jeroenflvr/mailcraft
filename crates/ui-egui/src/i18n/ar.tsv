@@ -870,3 +870,8 @@ month	May	مايو
 	{email} will be removed from MailCraft. Nothing is deleted on the server.	ستتم إزالة {email} من MailCraft. لا يُحذف شيء من الخادم.
 	{email} will be removed from MailCraft. Its data file, {file}, stays in your MailCraft Files folder: open it from File › Open & Export to see its mail again.	ستتم إزالة {email} من MailCraft. يبقى ملف بياناته {file} في مجلد MailCraft Files: افتحه من ملف › فتح وتصدير لرؤية بريده مرة أخرى.
 	{email} will be removed from MailCraft.	ستتم إزالة {email} من MailCraft.
+	All Flagged	كل ما عليه علامة
+	Flagged Mail	البريد الذي عليه علامة
+	Search Folders	مجلدات البحث
+	Flagged mail from every folder but Deleted Items and Junk Email	البريد الذي عليه علامة من كل المجلدات عدا العناصر المحذوفة والبريد العشوائي
+	Flagged mail from every account's folders but Deleted Items and Junk Email	البريد الذي عليه علامة من مجلدات كل الحسابات عدا العناصر المحذوفة والبريد العشوائي
