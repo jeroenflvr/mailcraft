@@ -172,9 +172,14 @@ fn flags_filters_and_conversations() {
     assert!(s.run("mail.flag", &json!({"due": "someday"})).is_err());
     s.run("mail.flag", &json!({"complete": true})).unwrap();
     assert!(!turnaround(&s).flags.flagged && s.prefs.follow_up.is_empty());
+    assert!(turnaround(&s).flags.completed(), "ticked off");
     s.run("mail.flag", &json!({"due": "thisWeek"})).unwrap();
+    assert!(turnaround(&s).flags.flagged && !turnaround(&s).flags.completed(), "flagged again: no longer complete");
     s.run("mail.flag", &json!({"on": false})).unwrap();
     assert!(s.follow_up_due(&turnaround(&s)).is_none() && s.prefs.follow_up.is_empty());
+    s.run("mail.flag", &json!({"complete": true})).unwrap();
+    s.run("mail.flag", &json!({"on": false})).unwrap();
+    assert!(!turnaround(&s).flags.completed(), "Clear Flag clears a completed one too");
     s.run("mail.flag", &json!({"due": "none"})).unwrap();
     assert!(turnaround(&s).flags.flagged && s.follow_up_due(&turnaround(&s)).is_none());
 
@@ -923,6 +928,60 @@ fn offline_sends_wait_in_the_outbox() {
     s.apply(Event::Sent { account: id.clone(), id: 999 });
     assert_eq!(s.notices.last().unwrap().text, "Message sent");
     let _ = std::fs::remove_dir_all(store.root());
+}
+
+#[test]
+fn completed_flags_reach_the_server_in_an_order_exchange_follows() {
+    let store = temp("flag-complete");
+    let mut s = Session::open(Some(store), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id = s.run("account.add", &json!({"email": "zoe@example.org", "password": "pw"})).unwrap()["account"].as_str().unwrap().to_string();
+    let inbox =
+        mailcraft_model::Folder { account: id.clone(), path: "INBOX".into(), role: FolderRole::Inbox, selectable: true, ..Default::default() };
+    s.apply(Event::Folders { account: id.clone(), folders: vec![inbox] });
+    let key = mailcraft_model::MessageKey { account: id.clone(), folder: "INBOX".into(), validity: 9, uid: 1 };
+    let st = mailcraft_store::FolderState {
+        validity: 9,
+        uid_next: 2,
+        highest_modseq: 0,
+        messages: vec![mailcraft_model::Summary { key: key.clone(), subject: "Hello".into(), date: NOW - 60, ..Default::default() }],
+        window: 0,
+    };
+    s.store.as_ref().unwrap().save_folder(&id, "INBOX", &st).unwrap();
+    s.apply(Event::FolderChanged { account: id.clone(), folder: "INBOX".into() });
+    s.run("list.select", &json!({"key": key.to_id()})).unwrap();
+    s.take_jobs();
+    let ops = |s: &mut Session| -> Vec<Op> {
+        s.take_jobs()
+            .into_iter()
+            .filter_map(|j| match j {
+                Job::Apply { op, .. } => Some(op),
+                _ => None,
+            })
+            .collect()
+    };
+    let flag = |on| Op::SetFlag { keys: vec![key.clone()], flag: Flag::Flagged, on };
+    let done = |on| Op::SetKeyword { keys: vec![key.clone()], keyword: mailcraft_model::COMPLETED.into(), on };
+
+    s.run("mail.flag", &json!({})).unwrap();
+    assert_eq!(ops(&mut s), [flag(true)]);
+    // Graph and EWS keep one flag status: the change naming the new state goes last.
+    s.run("mail.flag", &json!({"complete": true})).unwrap();
+    assert_eq!(ops(&mut s), [flag(false), done(true)]);
+    assert!(s.list[0].flags.completed());
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(ops(&mut s), [done(false), flag(true)], "undo flags it again");
+    assert!(s.list[0].flags.flagged && !s.list[0].flags.completed());
+    s.run("mail.flag", &json!({"complete": true})).unwrap();
+    ops(&mut s);
+    s.run("mail.flag", &json!({})).unwrap();
+    assert_eq!(ops(&mut s), [done(false), flag(true)], "a click on the tick flags it again");
+    s.run("mail.flag", &json!({"complete": true})).unwrap();
+    ops(&mut s);
+    s.run("mail.flag", &json!({"on": false})).unwrap();
+    assert_eq!(ops(&mut s), [done(false)]);
+    s.run("mail.flag", &json!({"on": false})).unwrap();
+    assert!(ops(&mut s).is_empty(), "nothing to clear");
+    let _ = std::fs::remove_dir_all(s.store.as_ref().unwrap().root());
 }
 
 #[test]

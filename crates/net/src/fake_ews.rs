@@ -45,6 +45,8 @@ pub struct It {
     pub raw: Vec<u8>,
     pub read: bool,
     pub flagged: bool,
+    /// The flag was marked complete.
+    pub complete: bool,
     pub draft: bool,
     pub received: String,
 }
@@ -205,6 +207,7 @@ impl Data {
             raw: raw.to_vec(),
             read,
             flagged: false,
+            complete: false,
             draft: false,
             received: received.into(),
         });
@@ -301,8 +304,8 @@ impl Data {
             it.received,
             it.raw.len()
         ));
-        if it.flagged {
-            x.push_str(&ext("0x1090", 2));
+        if it.flagged || it.complete {
+            x.push_str(&ext("0x1090", if it.flagged { 2 } else { 1 }));
         }
         x.push_str(&ext("0x0E07", if it.draft { 8 } else { 1 }));
         x.push_str(&format!("<t:ToRecipients>{}</t:ToRecipients>", p.to.iter().map(mb).collect::<String>()));
@@ -469,6 +472,8 @@ impl Data {
                             i.read,
                             if i.flagged {
                                 "<t:ExtendedProperty><t:ExtendedFieldURI PropertyTag=\"0x1090\" PropertyType=\"Integer\"/><t:Value>2</t:Value></t:ExtendedProperty>"
+                            } else if i.complete {
+                                "<t:ExtendedProperty><t:ExtendedFieldURI PropertyTag=\"0x1090\" PropertyType=\"Integer\"/><t:Value>1</t:Value></t:ExtendedProperty>"
                             } else {
                                 ""
                             }
@@ -550,6 +555,7 @@ impl Data {
                         raw,
                         read: true,
                         flagged: false,
+                        complete: false,
                         draft,
                         received: "2026-10-15T12:00:00Z".into(),
                     });
@@ -586,7 +592,9 @@ impl Data {
                             it.read = r.text == "true";
                         }
                         if u.find("ExtendedFieldURI").and_then(|e| e.attr("PropertyTag")) == Some("0x1090") {
-                            it.flagged = u.name == "SetItemField";
+                            let status = if u.name == "SetItemField" { u.find("Value").map(|v| v.text.trim().to_string()) } else { None };
+                            it.flagged = status.as_deref() == Some("2");
+                            it.complete = status.as_deref() == Some("1");
                         }
                     }
                     out.push(ok(String::new()));
@@ -1001,6 +1009,16 @@ mod tests {
         eventually("in Projects here, flagged", || {
             store.load_folder("a1", "Projects").unwrap().messages.iter().any(|m| m.subject == "Sound mix" && m.flags.flagged)
         });
+        // Mark complete: the flag's status on the server (1), and back here from it.
+        let moved = store.load_folder("a1", "Projects").unwrap().messages.iter().find(|m| m.subject == "Sound mix").unwrap().key.clone();
+        pool.submit(Job::Apply { account: "a1".into(), op: Op::SetFlag { keys: vec![moved.clone()], flag: Flag::Flagged, on: false } });
+        pool.submit(Job::Apply {
+            account: "a1".into(),
+            op: Op::SetKeyword { keys: vec![moved.clone()], keyword: mailcraft_model::COMPLETED.into(), on: true },
+        });
+        eventually("complete on the server", || data.lock().unwrap().items.iter().any(|i| i.folder == projects && i.complete && !i.flagged));
+        pool.submit(Job::SyncFolder { account: "a1".into(), folder: "Projects".into() });
+        eventually("complete here", || store.load_folder("a1", "Projects").unwrap().messages.iter().any(|m| m.key == moved && m.flags.completed()));
 
         // Folders: create, rename and move to the top, delete.
         pool.submit(Job::Apply { account: "a1".into(), op: Op::CreateFolder { path: "Projects/Caf&AOk-".into() } });

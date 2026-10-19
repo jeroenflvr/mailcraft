@@ -156,7 +156,9 @@ mailbox; packaging for every desktop.
   - **Search tab** while searching: where to look, From / Sent To / Subject, Has Attachments,
     Unread, Categorized, Flagged and Important (`is:important`, `is:categorized`), Close Search.
   - **Follow Up:** flag for today, tomorrow, this week, next week or no date, Mark complete and
-    Clear flag (the ribbon's Flag ▾ and the right-click menu); the reading pane says when it's
+    Clear flag (the ribbon's Flag ▾ and the right-click menu); a flag shows filled in red, a
+    completed one as a green tick (the `$Completed` keyword over IMAP and JMAP, the flag's
+    status on Exchange). The reading pane says when it's
     due (red once overdue) and when mail came with high or low importance. The day is kept on
     this computer, as Outlook keeps it for IMAP accounts.
   - **Delay delivery** (held in the Outbox until its time, dated when it goes; MailCraft has to

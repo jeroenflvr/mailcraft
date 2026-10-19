@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use mailcraft_mime as mime;
-use mailcraft_model::{Flag, Flags, Folder, FolderRole, MessageKey, Op, Summary, sort_newest_first, utf7};
+use mailcraft_model::{COMPLETED, Flag, Flags, Folder, FolderRole, MessageKey, Op, Summary, sort_newest_first, utf7};
 use mailcraft_store::{FolderState, Store};
 use quick_xml::Reader;
 use quick_xml::events::Event as X;
@@ -1319,12 +1319,15 @@ fn extended(it: &El, tag: &str) -> Option<i64> {
 }
 
 fn flags(it: &El) -> Flags {
-    Flags {
+    let status = extended(it, "0x1090");
+    let mut f = Flags {
         seen: it.text_of("IsRead").is_some_and(|v| v == "true"),
-        flagged: extended(it, "0x1090") == Some(2),
+        flagged: status == Some(2),
         draft: extended(it, "0x0E07").is_some_and(|f| f & 8 != 0),
         ..Default::default()
-    }
+    };
+    f.set_keyword(COMPLETED, status == Some(1));
+    f
 }
 
 /// A mailbox element as an address (an Exchange-internal address keeps the name only).
@@ -1405,6 +1408,7 @@ pub fn sync_folder(c: &Client, st: &mut State, store: &Store, account: &str, fol
             next.seen = f.seen;
             next.flagged = f.flagged;
             next.draft = f.draft;
+            next.set_keyword(COMPLETED, f.has(COMPLETED));
             if next != m.flags {
                 m.flags = next;
                 report.changed += 1;
@@ -1520,6 +1524,15 @@ pub fn apply_remote(c: &Client, st: &State, op: &Op) -> Result<()> {
              <t:ExtendedFieldURI PropertyTag=\"0x1090\" PropertyType=\"Integer\"/><t:Value>2</t:Value></t:ExtendedProperty></t:Message></t:SetItemField>",
         ),
         Op::SetFlag { keys, flag: Flag::Flagged, on: false } => {
+            update(keys, "<t:DeleteItemField><t:ExtendedFieldURI PropertyTag=\"0x1090\" PropertyType=\"Integer\"/></t:DeleteItemField>")
+        }
+        // A completed flag is the flag's status (1); the engine sets the flag again after clearing it.
+        Op::SetKeyword { keys, keyword, on: true } if keyword.eq_ignore_ascii_case(COMPLETED) => update(
+            keys,
+            "<t:SetItemField><t:ExtendedFieldURI PropertyTag=\"0x1090\" PropertyType=\"Integer\"/><t:Message><t:ExtendedProperty>\
+             <t:ExtendedFieldURI PropertyTag=\"0x1090\" PropertyType=\"Integer\"/><t:Value>1</t:Value></t:ExtendedProperty></t:Message></t:SetItemField>",
+        ),
+        Op::SetKeyword { keys, keyword, on: false } if keyword.eq_ignore_ascii_case(COMPLETED) => {
             update(keys, "<t:DeleteItemField><t:ExtendedFieldURI PropertyTag=\"0x1090\" PropertyType=\"Integer\"/></t:DeleteItemField>")
         }
         // Answered and forwarded are Exchange's to set; categories stay on this computer.

@@ -27,6 +27,8 @@ pub struct Msg {
     pub raw: Vec<u8>,
     pub read: bool,
     pub flagged: bool,
+    /// The flag was marked complete.
+    pub complete: bool,
     pub draft: bool,
     pub received: String,
 }
@@ -77,6 +79,7 @@ impl Data {
             raw: raw.to_vec(),
             read,
             flagged: false,
+            complete: false,
             draft: false,
             received: received.into(),
         });
@@ -109,7 +112,7 @@ impl Data {
         let addr = |a: &mailcraft_model::EmailAddress| json!({"emailAddress": {"name": a.name, "address": a.email}});
         json!({
             "id": m.id, "parentFolderId": m.folder, "isRead": m.read, "isDraft": m.draft,
-            "flag": {"flagStatus": if m.flagged { "flagged" } else { "notFlagged" }},
+            "flag": {"flagStatus": if m.flagged { "flagged" } else if m.complete { "complete" } else { "notFlagged" }},
             "subject": p.as_ref().map(|p| p.subject.clone()),
             "from": p.as_ref().map(|p| addr(&p.from)),
             "toRecipients": p.as_ref().map(|p| p.to.iter().map(addr).collect::<Vec<_>>()),
@@ -226,6 +229,7 @@ impl Data {
                     }
                     if let Some(f) = input["flag"]["flagStatus"].as_str() {
                         m.flagged = f == "flagged";
+                        m.complete = f == "complete";
                     }
                     ok(json!({ "id": id }))
                 }
@@ -469,7 +473,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use mailcraft_model::job::Secret;
-    use mailcraft_model::{AccountConfig, Event, Flag, Job, Op, SyncStatus};
+    use mailcraft_model::{AccountConfig, Event, Flag, Job, MessageKey, Op, SyncStatus};
     use mailcraft_store::Store;
 
     use super::*;
@@ -755,6 +759,18 @@ mod tests {
         assert!(
             store.load_folder("a1", "Projects").unwrap().messages.iter().any(|m| m.subject == "Sound mix" && m.key.uid == key.uid && m.flags.flagged)
         );
+        // Mark complete: the flag's status on the server, and back here from it.
+        let moved = MessageKey { folder: "Projects".into(), ..key.clone() };
+        pool.submit(Job::Apply { account: "a1".into(), op: Op::SetFlag { keys: vec![moved.clone()], flag: Flag::Flagged, on: false } });
+        pool.submit(Job::Apply {
+            account: "a1".into(),
+            op: Op::SetKeyword { keys: vec![moved.clone()], keyword: mailcraft_model::COMPLETED.into(), on: true },
+        });
+        eventually("complete on the server", || data.lock().unwrap().message(&second).is_some_and(|m| m.complete && !m.flagged));
+        pool.submit(Job::SyncFolder { account: "a1".into(), folder: "Projects".into() });
+        eventually("complete here", || {
+            store.load_folder("a1", "Projects").unwrap().messages.iter().any(|m| m.key.uid == key.uid && m.flags.completed())
+        });
 
         // Folders: create inside Projects, rename and move it to the top, delete it.
         pool.submit(Job::Apply { account: "a1".into(), op: Op::CreateFolder { path: "Projects/Caf&AOk-".into() } });

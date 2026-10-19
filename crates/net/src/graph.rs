@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use mailcraft_mime as mime;
-use mailcraft_model::{Flag, Flags, Folder, FolderRole, MessageKey, Op, Summary, sort_newest_first, utf7};
+use mailcraft_model::{COMPLETED, Flag, Flags, Folder, FolderRole, MessageKey, Op, Summary, sort_newest_first, utf7};
 use mailcraft_store::{FolderState, Store};
 use serde_json::{Value, json};
 
@@ -367,8 +367,10 @@ fn flags(m: &Value) -> Flags {
     if m.get("isDraft").and_then(Value::as_bool) == Some(true) {
         names.push("\\Draft");
     }
-    if m.get("flag").and_then(|f| f.get("flagStatus")).and_then(Value::as_str) == Some("flagged") {
-        names.push("\\Flagged");
+    match m.get("flag").and_then(|f| f.get("flagStatus")).and_then(Value::as_str) {
+        Some("flagged") => names.push("\\Flagged"),
+        Some("complete") => names.push(COMPLETED),
+        _ => {}
     }
     Flags::from_imap(names)
 }
@@ -456,6 +458,7 @@ pub fn sync_folder(c: &Client, st: &mut State, store: &Store, account: &str, fol
             next.seen = f.seen;
             next.flagged = f.flagged;
             next.draft = f.draft;
+            next.set_keyword(COMPLETED, f.has(COMPLETED));
             if next != m.flags {
                 m.flags = next;
                 report.changed += 1;
@@ -549,6 +552,10 @@ pub fn apply_remote(c: &Client, st: &State, op: &Op) -> Result<()> {
     match op {
         Op::SetFlag { keys, flag: Flag::Seen, on } => patch_all(keys, json!({"isRead": on})),
         Op::SetFlag { keys, flag: Flag::Flagged, on } => patch_all(keys, json!({"flag": {"flagStatus": if *on { "flagged" } else { "notFlagged" }}})),
+        // A completed flag is the flag's status; the engine sets the flag again after clearing it.
+        Op::SetKeyword { keys, keyword, on } if keyword.eq_ignore_ascii_case(COMPLETED) => {
+            patch_all(keys, json!({"flag": {"flagStatus": if *on { "complete" } else { "notFlagged" }}}))
+        }
         // Answered and forwarded are Exchange's to set; categories stay on this computer.
         Op::SetFlag { .. } | Op::SetKeyword { .. } => Ok(()),
         Op::Move { keys, to } => {
@@ -639,6 +646,8 @@ mod tests {
         assert_eq!(String::from_utf8(header_block(&own)).unwrap(), "Subject: Own\r\n\r\n");
         let f = flags(&json!({"isRead": true, "flag": {"flagStatus": "flagged"}, "isDraft": false}));
         assert!(f.seen && f.flagged && !f.draft);
+        let f = flags(&json!({"isRead": false, "flag": {"flagStatus": "complete"}}));
+        assert!(f.completed() && !f.flagged);
     }
 
     #[test]

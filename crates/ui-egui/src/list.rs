@@ -290,7 +290,9 @@ fn message_row(
             marker(Icon::Pin, t.accent, &mut icons_w);
         }
         if m.flags.flagged {
-            marker(Icon::Flag, t.flag, &mut icons_w);
+            marker(Icon::FlagSet, t.flag, &mut icons_w);
+        } else if m.flags.completed() {
+            marker(Icon::Check, t.ok, &mut icons_w);
         }
         if m.has_attachments {
             marker(Icon::Attach, t.dim, &mut icons_w);
@@ -332,9 +334,16 @@ fn message_row(
     let mut clicked_action = false;
     if hovered {
         let mut bx = right - 22.0;
+        let flag_icon = if m.flags.flagged {
+            Icon::FlagSet
+        } else if m.flags.completed() {
+            Icon::Check
+        } else {
+            Icon::Flag
+        };
         let actions: [(Icon, &str, &'static str, serde_json::Value); 3] = [
             (Icon::Delete, "Delete", "mail.delete", json!({})),
-            (Icon::Flag, if m.flags.flagged { "Unflag" } else { "Flag" }, "mail.flag", json!({})),
+            (flag_icon, if m.flags.flagged { "Unflag" } else { "Flag" }, "mail.flag", json!({})),
             (
                 if m.flags.seen { Icon::Unread } else { Icon::Read },
                 tl!(if m.flags.seen { "Mark unread" } else { "Mark read" }),
@@ -348,7 +357,11 @@ fn message_row(
             if bresp.hovered() {
                 ui.painter().rect_filled(br, 4.0, t.border);
             }
-            let color = if cmd == "mail.flag" && m.flags.flagged { t.flag } else { t.dim };
+            let color = match cmd {
+                "mail.flag" if m.flags.flagged => t.flag,
+                "mail.flag" if m.flags.completed() => t.ok,
+                _ => t.dim,
+            };
             icons::paint(ui.painter(), icons::centered(br, 14.0), ic, color);
             if bresp.clicked() {
                 clicked_action = true;

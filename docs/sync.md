@@ -135,7 +135,8 @@ switched IMAP off.
 - **A folder sync** lists the newest messages' ids with `isRead`, `flag` and `isDraft`, then the
   details of those not cached yet (their internet headers when Exchange has them) in batches of
   20. Sources come from `/messages/{id}/$value`; mail with attachments downloads when opened.
-- **Changes** are `PATCH`es (`isRead`, `flag`), `move`, `DELETE` and folder calls, batched.
+- **Changes** are `PATCH`es (`isRead`, `flag`: `flagged`, `complete` for the `$Completed`
+  keyword, `notFlagged`), `move`, `DELETE` and folder calls, batched.
 - **Sending** posts the MIME source to `sendMail`, which files the copy in Sent Items; recipients
   only on the envelope go in a `Bcc:` header, which Exchange strips. Drafts are made from MIME and
   moved where they belong.
@@ -161,6 +162,7 @@ servers that don't offer IMAP. Every call is SOAP over HTTPS.
   time; sources are `GetItem` with the MIME content. Item ids are numbered like JMAP's; Exchange
   gives a moved item a new id, so it shows up as a new message in its new folder.
 - **Changes** are `UpdateItem`, `MoveItem`, `DeleteItem` and the folder calls, fifty items a call.
+  A flag is `PidTagFlagStatus` 2, a completed one (the `$Completed` keyword) 1.
 - **Sending** is `CreateItem` with the MIME source and `SendAndSaveCopy` (the copy goes to Sent
   Items); envelope-only recipients go in a `Bcc:` header. Drafts are `CreateItem` with `SaveOnly`,
   marked unsent.

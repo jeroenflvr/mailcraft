@@ -16,6 +16,10 @@ pub enum Icon {
     Read,
     Unread,
     Flag,
+    /// A flag set on a message: filled in.
+    FlagSet,
+    /// A tick: a flag marked complete.
+    Check,
     Sync,
     Inbox,
     Sent,
@@ -179,6 +183,16 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Flag => {
             pen.line(&[(3.5, 1.5), (3.5, 15.0)]);
             pen.closed(&[(3.5, 2.5), (13.0, 2.5), (10.5, 5.8), (13.0, 9.0), (3.5, 9.0)]);
+        }
+        Icon::FlagSet => {
+            pen.line(&[(3.5, 1.5), (3.5, 15.0)]);
+            // The notched cloth in two convex halves.
+            pen.filled(&[(3.5, 2.5), (13.0, 2.5), (10.5, 5.8), (3.5, 5.8)], color);
+            pen.filled(&[(3.5, 5.8), (10.5, 5.8), (13.0, 9.0), (3.5, 9.0)], color);
+            pen.closed(&[(3.5, 2.5), (13.0, 2.5), (10.5, 5.8), (13.0, 9.0), (3.5, 9.0)]);
+        }
+        Icon::Check => {
+            pen.line(&[(2.5, 8.5), (6.5, 12.5), (13.5, 3.5)]);
         }
         Icon::Sync => {
             pen.arc(8.0, 8.0, 5.5, -PI * 0.9, -PI * 0.05);

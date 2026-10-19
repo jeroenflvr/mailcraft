@@ -2028,6 +2028,10 @@ impl Session {
         let first = sel.first().ok_or_else(|| CmdError::Disabled("no message selected".into()))?;
         let current = flag.get(&first.flags);
         let on = on.unwrap_or(!current);
+        if flag == Flag::Flagged {
+            self.set_follow_up(&sel, if on { FollowUp::Flagged } else { FollowUp::None });
+            return Ok(serde_json::json!({ "on": on, "count": sel.len() }));
+        }
         let mut by_account: HashMap<String, Vec<MessageKey>> = HashMap::new();
         // Undo puts back only the ones that changed.
         let mut changed: HashMap<String, Vec<MessageKey>> = HashMap::new();
@@ -2043,23 +2047,44 @@ impl Session {
         for (a, keys) in by_account {
             self.apply_op(&a, Op::SetFlag { keys, flag, on });
         }
-        // Unflagged: no longer due.
-        if flag == Flag::Flagged && !on {
-            for m in &sel {
-                self.prefs.follow_up.remove(&follow_up_id(m));
-            }
-        }
         Ok(serde_json::json!({ "on": on, "count": sel.len() }))
     }
 
+    /// Take messages to a follow-up state: flagged, complete or neither. Undo puts each back.
+    fn set_follow_up(&mut self, sel: &[Summary], to: FollowUp) {
+        let mut groups: BTreeMap<(String, FollowUp), Vec<MessageKey>> = BTreeMap::new();
+        for m in sel {
+            let from = FollowUp::of(&m.flags);
+            if from != to {
+                groups.entry((m.key.account.clone(), from)).or_default().push(m.key.clone());
+            }
+        }
+        let mut undo: BTreeMap<String, Vec<Op>> = BTreeMap::new();
+        for ((account, from), keys) in groups {
+            undo.entry(account.clone()).or_default().extend(follow_up_ops(&keys, to, from));
+            for op in follow_up_ops(&keys, from, to) {
+                self.apply_op(&account, op);
+            }
+        }
+        for (account, ops) in undo {
+            self.remember(Undo::Ops { account, ops });
+        }
+        // No longer flagged: no longer due.
+        if to != FollowUp::Flagged {
+            for m in sel {
+                self.prefs.follow_up.remove(&follow_up_id(m));
+            }
+        }
+    }
+
     /// Flag the selection for follow-up by a day (`None`: no date), or (`complete`) mark it
-    /// done: unflagged, its date forgotten.
+    /// done: no longer flagged but ticked off, its date forgotten.
     pub fn follow_up_selection(&mut self, due: Option<i64>, complete: bool) -> CmdResult {
         let sel = self.selected();
         if sel.is_empty() {
             return Err(CmdError::Disabled("no message selected".into()));
         }
-        self.flag_selection(Flag::Flagged, Some(!complete))?;
+        self.set_follow_up(&sel, if complete { FollowUp::Complete } else { FollowUp::Flagged });
         for m in &sel {
             let id = follow_up_id(m);
             match due.filter(|_| !complete) {
@@ -2071,7 +2096,9 @@ impl Session {
                 }
             }
         }
-        Ok(serde_json::json!({ "flagged": !complete, "due": due.filter(|_| !complete).map(mailcraft_model::dates::day_string), "count": sel.len() }))
+        Ok(
+            serde_json::json!({ "flagged": !complete, "complete": complete, "due": due.filter(|_| !complete).map(mailcraft_model::dates::day_string), "count": sel.len() }),
+        )
     }
 
     /// When a flagged message is due, if a day was given.
@@ -3248,6 +3275,42 @@ pub fn parse_key(v: &Value) -> Option<MessageKey> {
 /// What a follow-up date is kept under: the Message-ID, or (without one) the message's place.
 fn follow_up_id(m: &Summary) -> String {
     if m.message_id.trim().is_empty() { m.key.to_id() } else { m.message_id.trim().to_string() }
+}
+
+/// Where a message stands on follow-up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum FollowUp {
+    None,
+    Flagged,
+    Complete,
+}
+
+impl FollowUp {
+    fn of(f: &mailcraft_model::Flags) -> FollowUp {
+        if f.flagged {
+            FollowUp::Flagged
+        } else if f.completed() {
+            FollowUp::Complete
+        } else {
+            FollowUp::None
+        }
+    }
+}
+
+/// The changes that take messages from one follow-up state to another. Exchange keeps a single
+/// flag status, which the last change sets, so the one that names the new state goes last.
+fn follow_up_ops(keys: &[MessageKey], from: FollowUp, to: FollowUp) -> Vec<Op> {
+    let flag = |on| Op::SetFlag { keys: keys.to_vec(), flag: Flag::Flagged, on };
+    let done = |on| Op::SetKeyword { keys: keys.to_vec(), keyword: mailcraft_model::COMPLETED.to_string(), on };
+    match (from, to) {
+        (FollowUp::Complete, FollowUp::Flagged) => vec![done(false), flag(true)],
+        (_, FollowUp::Flagged) => vec![flag(true)],
+        (FollowUp::Flagged, FollowUp::Complete) => vec![flag(false), done(true)],
+        (_, FollowUp::Complete) => vec![done(true)],
+        (FollowUp::Flagged, FollowUp::None) => vec![flag(false)],
+        (FollowUp::Complete, FollowUp::None) => vec![done(false)],
+        (FollowUp::None, FollowUp::None) => Vec::new(),
+    }
 }
 
 /// A signature as it goes into a message: after the usual `-- ` line (RFC 3676's delimiter).

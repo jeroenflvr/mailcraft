@@ -472,6 +472,10 @@ pub struct Flags {
 /// The keyword that pins a message to the top of its folder.
 pub const PINNED: &str = "$Pinned";
 
+/// The keyword on a message whose follow-up flag was marked complete (no longer `\Flagged`).
+/// Exchange keeps it as the flag's status (Graph's `complete`, EWS's `PidTagFlagStatus` 1).
+pub const COMPLETED: &str = "$Completed";
+
 /// Whether `k` can be sent as an IMAP keyword: an atom (no spaces, brackets, wildcards, quotes or
 /// controls), not a system flag, at most 64 characters.
 pub fn is_keyword(k: &str) -> bool {
@@ -540,6 +544,11 @@ impl Flags {
 
     pub fn pinned(&self) -> bool {
         self.has(PINNED)
+    }
+
+    /// Its follow-up flag was marked complete (a flag set again since wins).
+    pub fn completed(&self) -> bool {
+        !self.flagged && self.has(COMPLETED)
     }
 
     /// The flags as an IMAP flag list (without parentheses).

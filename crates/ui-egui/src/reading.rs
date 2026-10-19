@@ -93,9 +93,10 @@ fn message(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
                 ui.horizontal_wrapped(|ui| {
                     let subject = if p.subject.is_empty() { tl!("(no subject)") } else { p.subject.as_str() };
                     crate::bidi::label(ui, subject, theme::bold(21.0), t.text);
-                    if summary.as_ref().is_some_and(|m| m.flags.flagged) {
+                    if let Some(f) = summary.as_ref().map(|m| &m.flags).filter(|f| f.flagged || f.completed()) {
                         let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                        icons::paint(ui.painter(), ir, Icon::Flag, t.flag);
+                        let (icon, color) = if f.flagged { (Icon::FlagSet, t.flag) } else { (Icon::Check, t.ok) };
+                        icons::paint(ui.painter(), ir, icon, color);
                     }
                 });
                 if let Some(m) = &summary {
@@ -171,14 +172,21 @@ fn message(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
                 // What Outlook says above a message: its follow-up date, its importance.
                 let due = summary.as_ref().and_then(|m| s.follow_up_due(m));
                 let flagged = summary.as_ref().is_some_and(|m| m.flags.flagged);
+                let completed = summary.as_ref().is_some_and(|m| m.flags.completed());
                 let importance = summary.as_ref().map_or(0, |m| m.importance);
-                if flagged || importance != 0 {
+                if flagged || completed || importance != 0 {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
+                        if completed {
+                            let (ir, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                            icons::paint(ui.painter(), ir, Icon::Check, t.ok);
+                            ui.label(RichText::new(tl!("Completed.")).color(t.dim).small());
+                            ui.add_space(10.0);
+                        }
                         if flagged {
                             let today = dates::today(&s.clock);
                             let (ir, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                            icons::paint(ui.painter(), ir, Icon::Flag, t.flag);
+                            icons::paint(ui.painter(), ir, Icon::FlagSet, t.flag);
                             let text = match due {
                                 Some(d) if d < today => tf!("Follow up. Overdue: it was due {date}.", date = crate::i18n::date(&dates::day_label(d))),
                                 Some(d) if d == today => tl!("Follow up. Due today.").to_string(),
