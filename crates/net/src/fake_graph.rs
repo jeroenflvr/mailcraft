@@ -63,6 +63,9 @@ pub struct Data {
     pub throttled: u32,
     /// The most requests seen in one batch.
     pub largest_batch: usize,
+    /// The next this many requests for a later page of a folder's listing fail as a gateway
+    /// that gave up (504).
+    pub gateway_errors: u32,
     late: Vec<(std::time::Instant, Vec<u8>)>,
     next: u32,
 }
@@ -225,6 +228,10 @@ impl Data {
                 list.sort_by(|a, b| b.received.cmp(&a.received));
                 let top: usize = q("$top").and_then(|t| t.parse().ok()).unwrap_or(10);
                 let skip: usize = q("$skip").and_then(|t| t.parse().ok()).unwrap_or(0);
+                if skip > 0 && self.gateway_errors > 0 {
+                    self.gateway_errors -= 1;
+                    return (504, br#"{"error": {"code": "UnknownError", "message": "Gateway Timeout"}}"#.to_vec(), "application/json");
+                }
                 let more = list.len() > skip + top;
                 let list: Vec<Value> = list.into_iter().skip(skip).take(top).map(|m| self.message_json(m)).collect();
                 let mut v = json!({ "value": list });
@@ -440,7 +447,7 @@ pub struct Server {
 }
 
 fn respond(s: &mut impl Write, status: u16, body: &[u8], kind: &str) {
-    let wait = if status == 429 { "Retry-After: 0\r\n" } else { "" };
+    let wait = if status == 429 || (502..=504).contains(&status) { "Retry-After: 0\r\n" } else { "" };
     let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{wait}Connection: close\r\n\r\n", body.len());
     let _ = s.write_all(head.as_bytes());
     let _ = s.write_all(body);
@@ -923,8 +930,10 @@ mod tests {
         let fs = store.load_folder("a1", "INBOX").unwrap();
         assert_eq!(fs.messages.len(), 250, "every page read");
         assert_eq!(fs.messages[0].subject, "Note 249");
-        let calls = server.data.lock().unwrap().calls.len();
-        assert!(calls < 20, "a few pages, not one request a message ({calls})");
+        let d = server.data.lock().unwrap();
+        assert!(d.calls.len() < 20, "a few pages, not one request a message ({})", d.calls.len());
+        assert!(!d.calls.iter().any(|c| c.contains("internetMessageHeaders")), "no internet headers in a listing: Exchange is slow at them");
+        drop(d);
 
         // Two new ones: asked for by id.
         let raw = mail("Late", "late");
@@ -935,8 +944,37 @@ mod tests {
         assert_eq!(store.load_folder("a1", "INBOX").unwrap().messages.len(), 252);
         let d = server.data.lock().unwrap();
         assert!(d.calls.iter().any(|c| c.starts_with("POST /$batch")), "{:?}", d.calls);
-        assert!(!d.calls.iter().any(|c| c.contains("internetMessageHeaders") && c.contains("mailFolders")), "no full listing again");
+        assert!(!d.calls.iter().any(|c| c.contains("bodyPreview") && c.contains("mailFolders")), "no full listing again");
         drop(d);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// A gateway that gives up on a page is asked again; one that keeps failing fails the sync,
+    /// but the pages that came are kept and the next sync carries on from them.
+    #[test]
+    fn a_first_sync_survives_a_gateway_giving_up() {
+        let mut d = Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        for i in 0..250 {
+            d.deliver(&inbox, &mail(&format!("Note {i:03}"), &format!("n{i}")), true, &format!("2026-10-01T{:02}:{:02}:00Z", i / 60, i % 60));
+        }
+        d.gateway_errors = 1;
+        let server = serve(d);
+        let c = crate::graph::Client::connect(&server.base, TOKEN).unwrap();
+        let store = crate::fake::tests_store("graph-gateway");
+        let mut st = crate::jmap::State::default();
+        crate::graph::list_folders(&c, &mut st, "a1").unwrap();
+        let opts = crate::sync::SyncOptions { prefetch: 0, ..Default::default() };
+        crate::graph::sync_folder(&c, &mut st, &store, "a1", "INBOX", &opts).unwrap();
+        assert_eq!(store.load_folder("a1", "INBOX").unwrap().messages.len(), 250, "asked again");
+
+        store.clear_folder("a1", "INBOX").unwrap();
+        server.data.lock().unwrap().gateway_errors = 100;
+        assert!(crate::graph::sync_folder(&c, &mut st, &store, "a1", "INBOX", &opts).is_err());
+        assert_eq!(store.load_folder("a1", "INBOX").unwrap().messages.len(), 100, "the first page is kept");
+        server.data.lock().unwrap().gateway_errors = 0;
+        crate::graph::sync_folder(&c, &mut st, &store, "a1", "INBOX", &opts).unwrap();
+        assert_eq!(store.load_folder("a1", "INBOX").unwrap().messages.len(), 250, "and the next sync finishes");
         let _ = std::fs::remove_dir_all(store.root());
     }
 

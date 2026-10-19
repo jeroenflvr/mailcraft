@@ -46,7 +46,11 @@ const MAX_PAGES: usize = 200;
 /// Folders listed at most.
 const MAX_FOLDERS: usize = 5000;
 const FOLDER_FIELDS: &str = "id,displayName,parentFolderId,childFolderCount,totalItemCount,unreadItemCount";
-const HEADER_FIELDS: &str = "id,isRead,isDraft,flag,subject,from,sender,toRecipients,ccRecipients,replyTo,receivedDateTime,sentDateTime,bodyPreview,hasAttachments,internetMessageId,internetMessageHeaders";
+const HEADER_FIELDS: &str = "id,isRead,isDraft,flag,subject,from,sender,toRecipients,ccRecipients,replyTo,receivedDateTime,sentDateTime,bodyPreview,hasAttachments,internetMessageId,importance,internetMessageHeaders";
+/// The same for a folder's listing, without the internet headers: Exchange keeps them with each
+/// message rather than in the folder's index, and reading them for a page of 100 can take Graph
+/// long enough to give up (502, 504). The source fills in what they'd have said.
+const LIST_FIELDS: &str = "id,isRead,isDraft,flag,subject,from,sender,toRecipients,ccRecipients,replyTo,receivedDateTime,sentDateTime,bodyPreview,hasAttachments,internetMessageId,importance";
 
 /// A signed-in Graph session.
 pub struct Client {
@@ -83,10 +87,11 @@ fn status_error(status: u16, body: &[u8]) -> Result<()> {
     }
 }
 
-/// Whether an answer means "too busy, ask again": always for 429 (nothing was done); for 503
-/// only when asking again can't do a thing twice.
+/// Whether an answer means "too busy, ask again": always for 429 (nothing was done); for a
+/// gateway that gave up or a service that's unavailable (502, 503, 504) only when asking again
+/// can't do a thing twice.
 fn throttled(status: u16, method: &str) -> bool {
-    status == 429 || (status == 503 && method.eq_ignore_ascii_case("GET"))
+    status == 429 || (matches!(status, 502..=504) && method.eq_ignore_ascii_case("GET"))
 }
 
 /// How long to wait before the `attempt`th retry: what the server asked (seconds), or else
@@ -162,14 +167,27 @@ impl Client {
 
     /// Every item of a listing, following `@odata.nextLink` (on the same server only).
     pub(crate) fn all(&self, path: &str, limit: usize) -> Result<Vec<Value>> {
-        let origin = http::Url::parse(&self.base)?.origin();
         let mut out = Vec::new();
+        self.pages(path, limit, |page| {
+            out.extend(page);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// A listing a page at a time, up to `limit` items, following `@odata.nextLink` (on the same
+    /// server only).
+    pub(crate) fn pages(&self, path: &str, limit: usize, mut each: impl FnMut(Vec<Value>) -> Result<()>) -> Result<()> {
+        let origin = http::Url::parse(&self.base)?.origin();
+        let mut seen = 0usize;
         let mut url = format!("{}{path}", self.base);
         for _ in 0..MAX_PAGES {
             let v = self.request(Request::get(&url, MAX_JSON))?;
-            out.extend(v.get("value").and_then(Value::as_array).cloned().unwrap_or_default());
-            if out.len() >= limit {
-                out.truncate(limit);
+            let mut page = v.get("value").and_then(Value::as_array).cloned().unwrap_or_default();
+            page.truncate(limit.saturating_sub(seen));
+            seen += page.len();
+            each(page)?;
+            if seen >= limit {
                 break;
             }
             match v.get("@odata.nextLink").and_then(Value::as_str) {
@@ -177,7 +195,7 @@ impl Client {
                 _ => break,
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Run requests as JSON batches; each answer's (status, body), in order. Requests Graph
@@ -321,15 +339,6 @@ impl Client {
         let reqs: Vec<(&str, String, Option<Value>)> =
             ids.iter().map(|id| ("GET", format!("/me/messages/{}?$select={HEADER_FIELDS}", seg(id)), None)).collect();
         Ok(self.batch(&reqs)?.into_iter().filter(|(s, _)| *s == 200).map(|(_, b)| b).collect())
-    }
-
-    /// The details of a folder's newest `limit` messages, read from its listing a page at a time:
-    /// far fewer requests than one per message when most aren't here yet (a first sync).
-    fn headers_listed(&self, folder: &str, limit: usize) -> Result<Vec<Value>> {
-        self.all(
-            &format!("/me/mailFolders/{}/messages?$top={LIST_PAGE}&$orderby=receivedDateTime%20desc&$select={HEADER_FIELDS}", seg(folder)),
-            limit.min(100_000),
-        )
     }
 
     /// A message's MIME source.
@@ -493,6 +502,13 @@ fn header_block(m: &Value) -> Vec<u8> {
                 ("Reply-To", addresses(m.get("replyTo"))),
                 ("Subject", clean(m.get("subject").and_then(Value::as_str).unwrap_or_default())),
                 ("Message-ID", clean(m.get("internetMessageId").and_then(Value::as_str).unwrap_or_default())),
+                (
+                    "Importance",
+                    match m.get("importance").and_then(Value::as_str) {
+                        Some(i @ ("high" | "low")) => i.to_string(),
+                        _ => String::new(),
+                    },
+                ),
             ] {
                 if !value.trim().is_empty() {
                     out.push_str(&format!("{name}: {value}\r\n"));
@@ -545,29 +561,44 @@ pub fn sync_folder(c: &Client, st: &mut State, store: &Store, account: &str, fol
         }
     }
     let missing: Vec<String> = newest.iter().filter(|(id, _)| fs.find(st.number(id)).is_none()).map(|(id, _)| id.clone()).collect();
-    let details = if missing.len() > LIST_INSTEAD {
-        let wanted: std::collections::HashSet<&str> = missing.iter().map(String::as_str).collect();
-        let listed = c.headers_listed(&id, newest.len())?;
-        listed.into_iter().filter(|m| m.get("id").and_then(Value::as_str).is_some_and(|i| wanted.contains(i))).collect()
-    } else {
-        c.headers(&missing)?
-    };
-    for m in details {
-        let Some(id) = m.get("id").and_then(Value::as_str) else { continue };
-        let key = MessageKey { account: account.to_string(), folder: folder.to_string(), validity: VALIDITY, uid: st.number(id) };
-        if fs.find(key.uid).is_some() {
-            continue;
+    let mut add = |fs: &mut FolderState, st: &mut State, details: Vec<Value>, only: Option<&std::collections::HashSet<&str>>| -> Result<()> {
+        for m in details {
+            let Some(id) = m.get("id").and_then(Value::as_str) else { continue };
+            if only.is_some_and(|o| !o.contains(id)) {
+                continue;
+            }
+            let key = MessageKey { account: account.to_string(), folder: folder.to_string(), validity: VALIDITY, uid: st.number(id) };
+            if fs.find(key.uid).is_some() {
+                continue;
+            }
+            let received = m.get("receivedDateTime").and_then(Value::as_str).and_then(jmap::utc_date).unwrap_or(0);
+            let mut s = mime::summary_from_header(&header_block(&m), key, flags(&m), 0, received);
+            s.preview = m.get("bodyPreview").and_then(Value::as_str).map(mime::preview).unwrap_or_default();
+            s.has_attachments = m.get("hasAttachments").and_then(Value::as_bool).unwrap_or(false);
+            fs.messages.push(s);
+            report.new += 1;
         }
-        let received = m.get("receivedDateTime").and_then(Value::as_str).and_then(jmap::utc_date).unwrap_or(0);
-        let mut s = mime::summary_from_header(&header_block(&m), key, flags(&m), 0, received);
-        s.preview = m.get("bodyPreview").and_then(Value::as_str).map(mime::preview).unwrap_or_default();
-        s.has_attachments = m.get("hasAttachments").and_then(Value::as_bool).unwrap_or(false);
-        fs.messages.push(s);
-        report.new += 1;
+        sort_newest_first(&mut fs.messages);
+        fs.uid_next = fs.messages.iter().map(|m| m.key.uid).max().unwrap_or(0).saturating_add(1);
+        store.save_folder(account, folder, fs)?;
+        Ok(())
+    };
+    if missing.len() > LIST_INSTEAD {
+        // Many to fetch (a first sync): from the folder's listing, kept page by page so a
+        // failure later on doesn't lose what came.
+        let only: std::collections::HashSet<&str> = missing.iter().map(String::as_str).collect();
+        let path = format!("/me/mailFolders/{}/messages?$top={LIST_PAGE}&$orderby=receivedDateTime%20desc&$select={LIST_FIELDS}", seg(&id));
+        let mut listed = 0usize;
+        c.pages(&path, newest.len(), |page| {
+            listed += page.len();
+            add(&mut fs, st, page, Some(&only))?;
+            log::info!("{account}: {folder}: {listed} of {} messages listed", newest.len());
+            Ok(())
+        })?;
+    } else {
+        let details = c.headers(&missing)?;
+        add(&mut fs, st, details, None)?;
     }
-    sort_newest_first(&mut fs.messages);
-    fs.uid_next = fs.messages.iter().map(|m| m.key.uid).max().unwrap_or(0).saturating_add(1);
-    store.save_folder(account, folder, &fs)?;
     prefetch(c, st, store, account, folder, &mut fs, opts)?;
     report.total = total;
     report.unread = unread;

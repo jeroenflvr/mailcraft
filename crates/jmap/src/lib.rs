@@ -704,6 +704,17 @@ pub fn fill_from_source(m: &mut Summary, raw: &[u8]) {
     if m.size == 0 {
         m.size = u32::try_from(raw.len()).unwrap_or(u32::MAX);
     }
+    // What a listing without the message's headers couldn't say (Microsoft Graph's first sync).
+    if m.in_reply_to.is_empty() {
+        m.in_reply_to = full.in_reply_to;
+    }
+    if m.references.is_empty() {
+        m.references = full.references;
+    }
+    if m.importance == 0 {
+        m.importance = full.importance;
+    }
+    m.bulk |= full.bulk;
 }
 
 /// Refresh the folder list (and the mailbox ids behind it).
@@ -929,6 +940,15 @@ pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_fills_in_what_a_bare_listing_left_out() {
+        let raw = b"From: a@x.example\r\nSubject: Re: Plan\r\nMessage-ID: <b@x>\r\nIn-Reply-To: <a@x>\r\nReferences: <a@x>\r\n\
+Importance: high\r\nList-Id: <team.x.example>\r\n\r\nYes.\r\n";
+        let mut m = Summary { message_id: "b@x".into(), subject: "Re: Plan".into(), ..Default::default() };
+        fill_from_source(&mut m, raw);
+        assert_eq!((m.in_reply_to.as_str(), m.references.len(), m.importance, m.bulk), ("a@x", 1, 1, true));
+    }
 
     #[test]
     fn session_urls_dates_and_keywords() {
