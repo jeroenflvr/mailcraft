@@ -2745,3 +2745,43 @@ fn people_mail_is_sent_to_are_remembered() {
     assert!(s.run("contacts.suggest", &json!({"query": "z.park"})).unwrap().as_array().unwrap().is_empty(), "the alias isn't someone else");
     let _ = std::fs::remove_dir_all(store.root());
 }
+
+/// The list's flag goes round: flagged, complete, cleared, then flagged again; the clicked
+/// message decides for the selection, a date is forgotten once complete, and Undo puts it back.
+#[test]
+fn the_lists_flag_cycles_flagged_complete_cleared() {
+    let mut s = sample_session("flag-cycle");
+    let state = |s: &Session, subject: &str| {
+        let m = s.list.iter().find(|m| m.subject == subject).unwrap();
+        (m.flags.flagged, m.flags.completed())
+    };
+    let k = key_of(&s, "Character turnarounds");
+    let key = k["key"].clone();
+    s.run("list.select", &k).unwrap();
+    assert_eq!(state(&s, "Character turnarounds"), (false, false));
+    s.run("mail.flag", &json!({"cycle": true, "key": key})).unwrap();
+    assert_eq!(state(&s, "Character turnarounds"), (true, false), "flagged");
+    s.run("mail.flag", &json!({"due": "tomorrow"})).unwrap();
+    s.run("mail.flag", &json!({"cycle": true, "key": key})).unwrap();
+    assert_eq!(state(&s, "Character turnarounds"), (false, true), "complete");
+    assert!(s.prefs.follow_up.is_empty(), "its date is forgotten");
+    s.run("mail.flag", &json!({"cycle": true, "key": key})).unwrap();
+    assert_eq!(state(&s, "Character turnarounds"), (false, false), "cleared");
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(state(&s, "Character turnarounds"), (false, true), "Undo puts the tick back");
+    s.run("mail.flag", &json!({"cycle": true})).unwrap();
+    assert_eq!(state(&s, "Character turnarounds"), (false, false), "without a key: the first selected");
+    s.run("mail.flag", &json!({"cycle": true})).unwrap();
+    assert_eq!(state(&s, "Character turnarounds"), (true, false), "round again");
+
+    // Two selected: the clicked one (flagged) takes both on to complete.
+    let other = key_of(&s, "Storyboard review on Thursday");
+    s.run("list.select", &other).unwrap();
+    s.run("list.select", &json!({"key": key, "add": true})).unwrap();
+    s.run("mail.flag", &json!({"cycle": true, "key": key})).unwrap();
+    assert_eq!(state(&s, "Character turnarounds"), (false, true));
+    assert_eq!(state(&s, "Storyboard review on Thursday"), (false, true));
+    s.selection.clear();
+    assert!(s.run("mail.flag", &json!({"cycle": true})).is_err(), "nothing selected");
+    done(s);
+}

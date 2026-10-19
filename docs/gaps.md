@@ -455,3 +455,8 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   when a message (or a meeting invitation or reply) goes, in `recipients.json` in the app folder
   (5,000 at most, the longest unused going first), and suggested at once; mail in Sent Items
   counts as yours whichever address it's from.
+- **The list's flag goes round:** the flag on a message in the list only flagged and unflagged,
+  and a completed one flagged again, so Mark complete was only in the menus. A click now goes
+  flagged → complete → cleared (→ flagged), its tip naming what the next click does; the
+  message clicked decides for the whole selection, and Undo puts it back
+  (`mail.flag {"cycle": true, "key"?}`). The ribbon's Flag still flags and unflags.

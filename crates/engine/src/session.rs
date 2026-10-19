@@ -2230,6 +2230,21 @@ impl Session {
         )
     }
 
+    /// The list's flag: the next follow-up state after the one `key` (or the first selected
+    /// message) is in, for the whole selection: flagged, then complete, then cleared.
+    pub fn cycle_follow_up_selection(&mut self, key: Option<&MessageKey>) -> CmdResult {
+        let sel = self.selected();
+        let first = key.and_then(|k| sel.iter().find(|m| &m.key == k)).or_else(|| sel.first());
+        let Some(from) = first.map(|m| FollowUp::of(&m.flags)) else {
+            return Err(CmdError::Disabled("no message selected".into()));
+        };
+        match from {
+            FollowUp::None => self.flag_selection(Flag::Flagged, Some(true)),
+            FollowUp::Flagged => self.follow_up_selection(None, true),
+            FollowUp::Complete => self.flag_selection(Flag::Flagged, Some(false)),
+        }
+    }
+
     /// When a flagged message is due, if a day was given.
     pub fn follow_up_due(&self, m: &Summary) -> Option<i64> {
         if !m.flags.flagged {

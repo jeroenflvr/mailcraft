@@ -64,7 +64,7 @@ pub fn registry() -> Registry {
         CommandSpec::new("mail.toggleRead", "Read / Unread", "Home › Tags", |s, _| s.flag_selection(Flag::Seen, None)).when(has_selection),
         CommandSpec::new("mail.flag", "Flag / Unflag", "Home › Tags", flag)
             .key("Insert")
-            .params(r#"{"on"?: bool, "due"?: "today"|"tomorrow"|"thisWeek"|"nextWeek"|"none"|"YYYY-MM-DD" (Follow Up: flag, due then), "complete"?: true (Mark Complete: unflag, forget the date)}"#)
+            .params(r#"{"on"?: bool, "due"?: "today"|"tomorrow"|"thisWeek"|"nextWeek"|"none"|"YYYY-MM-DD" (Follow Up: flag, due then), "complete"?: true (Mark Complete: unflag, forget the date), "cycle"?: true (the list's flag: flagged, then complete, then cleared, following `key` or the first selected), "key"?: string}"#)
             .when(has_selection),
         CommandSpec::new("mail.markAllRead", "Mark all as read", "Folder", mark_all_read).when(has_account),
         CommandSpec::new("mail.categorize", "Categorize", "Home › Tags", |s, v| s.categorize_selection(p::req_str(v, "category")?, p::bool(v, "on")))
@@ -854,8 +854,11 @@ fn snooze(s: &mut Session, v: &Value) -> CmdResult {
     s.snooze_selection(until)
 }
 
-/// Flag or unflag; or Follow Up by a day, or Mark Complete.
+/// Flag or unflag; or Follow Up by a day, or Mark Complete; or the next follow-up state.
 fn flag(s: &mut Session, v: &Value) -> CmdResult {
+    if p::bool(v, "cycle") == Some(true) {
+        return s.cycle_follow_up_selection(parse_key(v).as_ref());
+    }
     if p::bool(v, "complete") == Some(true) {
         return s.follow_up_selection(None, true);
     }

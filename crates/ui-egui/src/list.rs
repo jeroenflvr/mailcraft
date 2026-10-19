@@ -341,9 +341,17 @@ fn message_row(
         } else {
             Icon::Flag
         };
+        // A click goes on to the next follow-up state: flagged, complete, cleared.
+        let flag_tip = if m.flags.flagged {
+            tl!("Mark complete")
+        } else if m.flags.completed() {
+            tl!("Clear flag")
+        } else {
+            tl!("Flag")
+        };
         let actions: [(Icon, &str, &'static str, serde_json::Value); 3] = [
             (Icon::Delete, "Delete", "mail.delete", json!({})),
-            (flag_icon, if m.flags.flagged { "Unflag" } else { "Flag" }, "mail.flag", json!({})),
+            (flag_icon, flag_tip, "mail.flag", json!({"cycle": true, "key": m.key.to_id()})),
             (
                 if m.flags.seen { Icon::Unread } else { Icon::Read },
                 tl!(if m.flags.seen { "Mark unread" } else { "Mark read" }),
