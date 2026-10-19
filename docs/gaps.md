@@ -448,3 +448,10 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   (`{"account"?}`). Each folder's flagged messages are kept apart, read again only when that
   folder changes, so a big mailbox isn't held in memory while it's shown. Not yet: search
   folders of your own (other criteria), or Outlook's search folders on the server.
+- **Everyone you send to is suggested:** suggestions came only from mail in the cache, so a new
+  address was remembered only once the sent copy came back into Sent Items (on Exchange a moment
+  after sending, and not at all if Sent Items wasn't kept), never for Bcc, and not when the copy
+  went from an alias. Now, as Outlook keeps its auto-complete list, To, Cc and Bcc are remembered
+  when a message (or a meeting invitation or reply) goes, in `recipients.json` in the app folder
+  (5,000 at most, the longest unused going first), and suggested at once; mail in Sent Items
+  counts as yours whichever address it's from.

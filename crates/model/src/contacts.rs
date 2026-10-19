@@ -1,10 +1,14 @@
 //! An address book built from mail already in the cache, for To/Cc suggestions.
 //!
-//! Every sender and recipient seen counts. People you write to (the recipients of your own
+//! Every sender and recipient seen counts, and everyone you sent mail to is remembered when it
+//! goes ([`SentTo`]), so they're suggested even when the copy in Sent Items isn't downloaded.
+//! People you write to (the recipients of your own
 //! messages) rank well above people who only write to you, and recent contact counts more than
 //! old: score = 4 · sent + received, halved for every year since the last message.
 
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 use crate::{EmailAddress, Summary};
 
@@ -30,6 +34,53 @@ impl Contact {
 /// Most addresses seen; a mailbox full of newsletters stays bounded.
 const MAX_CONTACTS: usize = 20_000;
 
+/// Most people remembered as written to ([`remember_sent_to`]); the longest unused go first.
+pub const MAX_SENT_TO: usize = 5_000;
+
+/// Someone you sent mail to, remembered when the message went (To, Cc and Bcc), apart from the
+/// cache: suggested whether or not the copy in Sent Items is ever downloaded.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SentTo {
+    pub address: EmailAddress,
+    /// The last time (Unix seconds).
+    pub last: i64,
+    /// How many messages.
+    pub times: u32,
+}
+
+/// Note the recipients of a message sent `now` in `list`, leaving out `mine` (the user's own
+/// addresses) and what isn't an address; what changed comes back, for a book already built.
+pub fn remember_sent_to(list: &mut Vec<SentTo>, recipients: &[EmailAddress], mine: &[String], now: i64) -> Vec<SentTo> {
+    let mut noted = Vec::new();
+    for a in recipients {
+        let email = a.email.trim().to_ascii_lowercase();
+        if !crate::addr::is_valid_email(&email) || mine.iter().any(|m| m.trim().eq_ignore_ascii_case(&email)) {
+            continue;
+        }
+        if noted.iter().any(|n: &SentTo| n.address.email == email) {
+            continue;
+        }
+        let name = a.name.trim().to_string();
+        match list.iter_mut().find(|s| s.address.email == email) {
+            Some(s) => {
+                if !name.is_empty() {
+                    s.address.name = name.clone();
+                }
+                s.last = s.last.max(now);
+                s.times = s.times.saturating_add(1);
+            }
+            None => list.push(SentTo { address: EmailAddress::new(name.clone(), email.clone()), last: now, times: 1 }),
+        }
+        noted.push(SentTo { address: EmailAddress::new(name, email), last: now, times: 1 });
+    }
+    if list.len() > MAX_SENT_TO {
+        list.sort_by_key(|s| std::cmp::Reverse(s.last));
+        list.truncate(MAX_SENT_TO);
+    }
+    noted
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ContactBook {
     by_email: HashMap<String, Contact>,
@@ -53,7 +104,7 @@ impl ContactBook {
         self.by_email.get(&email.trim().to_ascii_lowercase())
     }
 
-    fn note(&mut self, a: &EmailAddress, date: i64, sent: bool) {
+    fn note(&mut self, a: &EmailAddress, date: i64, sent: bool, times: u32) {
         let email = a.email.trim().to_ascii_lowercase();
         if !crate::addr::is_valid_email(&email) || email.contains("noreply") || email.contains("no-reply") || email.starts_with("mailer-daemon@") {
             return;
@@ -67,18 +118,21 @@ impl ContactBook {
             c.address.name = a.name.trim().to_string();
         }
         if sent {
-            c.sent = c.sent.saturating_add(1);
+            c.sent = c.sent.saturating_add(times);
         } else {
-            c.received = c.received.saturating_add(1);
+            c.received = c.received.saturating_add(times);
         }
         c.last = c.last.max(date);
     }
 
     /// Someone saved in an address book: ranked as if written to often.
     pub fn add_saved(&mut self, a: &EmailAddress, now: i64) {
-        for _ in 0..8 {
-            self.note(a, now, true);
-        }
+        self.note(a, now, true, 8);
+    }
+
+    /// Someone you sent mail to, as remembered when it went.
+    pub fn add_sent_to(&mut self, s: &SentTo) {
+        self.note(&s.address, s.last, true, s.times.max(1));
     }
 
     /// Count a message. `mine` are the user's own addresses: a message from one of them is one
@@ -86,13 +140,19 @@ impl ContactBook {
     pub fn add(&mut self, m: &Summary, mine: &[String]) {
         let from_me = mine.iter().any(|e| e.eq_ignore_ascii_case(m.from.email.trim()));
         if from_me {
-            for a in m.to.iter().chain(&m.cc) {
-                if !mine.iter().any(|e| e.eq_ignore_ascii_case(a.email.trim())) {
-                    self.note(a, m.date, true);
-                }
-            }
+            self.add_from_sent(m, mine);
         } else {
-            self.note(&m.from, m.date, false);
+            self.note(&m.from, m.date, false, 1);
+        }
+    }
+
+    /// Count a message you sent (one in Sent Items, whichever of your addresses or aliases it
+    /// went from): its recipients are people you write to.
+    pub fn add_from_sent(&mut self, m: &Summary, mine: &[String]) {
+        for a in m.to.iter().chain(&m.cc) {
+            if !mine.iter().any(|e| e.eq_ignore_ascii_case(a.email.trim())) {
+                self.note(a, m.date, true, 1);
+            }
         }
     }
 
@@ -261,6 +321,31 @@ mod tests {
         assert_eq!(b.suggest("news", 5, now).len(), 1);
         assert!(b.suggest("  ", 5, now).is_empty());
         assert!(b.suggest("q", 5, now).is_empty());
+    }
+
+    #[test]
+    fn people_sent_to_are_remembered_once_each_and_bounded() {
+        let mine = vec!["me@x.example".to_string()];
+        let mut list = Vec::new();
+        let r = [
+            EmailAddress::new("Ann", "Ann@Y.example"),
+            EmailAddress::new("", "ann@y.example"),
+            EmailAddress::new("Me", "ME@x.example"),
+            EmailAddress::new("", "not an address"),
+        ];
+        let noted = remember_sent_to(&mut list, &r, &mine, 10);
+        assert_eq!(noted.len(), 1);
+        assert_eq!(list, vec![SentTo { address: EmailAddress::new("Ann", "ann@y.example"), last: 10, times: 1 }]);
+        remember_sent_to(&mut list, &[EmailAddress::new("", "ann@y.example")], &mine, 20);
+        assert_eq!((list[0].address.name.as_str(), list[0].last, list[0].times), ("Ann", 20, 2), "the name stays when none is given");
+        let mut book = ContactBook::new();
+        book.add_sent_to(&list[0]);
+        assert_eq!(book.get("ann@y.example").map(|c| c.sent), Some(2));
+        for i in 0..MAX_SENT_TO + 10 {
+            remember_sent_to(&mut list, &[EmailAddress::new("", format!("p{i}@z.example"))], &mine, 100 + i as i64);
+        }
+        assert_eq!(list.len(), MAX_SENT_TO);
+        assert!(!list.iter().any(|s| s.address.email == "ann@y.example"), "the longest unused go first");
     }
 
     #[test]

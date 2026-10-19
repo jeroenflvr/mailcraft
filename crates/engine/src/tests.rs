@@ -2690,3 +2690,58 @@ fn flagged_mail_follows_changes_before_the_server_answers() {
     assert_eq!(s.list.len(), 3);
     let _ = std::fs::remove_dir_all(s.store.as_ref().unwrap().root());
 }
+
+/// Someone mail is sent to is suggested from then on, Bcc included, before (or without) the copy
+/// in Sent Items reaching the cache, and after a restart; mail in Sent Items counts as sent even
+/// from an alias that isn't the account's address.
+#[test]
+fn people_mail_is_sent_to_are_remembered() {
+    let store = temp("sent-to");
+    let mut s = Session::open(Some(store.clone()), mailcraft_model::dates::Clock::new(NOW, 0));
+    let id = s.run("account.add", &json!({"email": "zoe@example.org", "password": "pw"})).unwrap()["account"].as_str().unwrap().to_string();
+    let folders = vec![
+        mailcraft_model::Folder { account: id.clone(), path: "INBOX".into(), role: FolderRole::Inbox, selectable: true, ..Default::default() },
+        mailcraft_model::Folder { account: id.clone(), path: "Sent".into(), role: FolderRole::Sent, selectable: true, ..Default::default() },
+    ];
+    s.apply(Event::Folders { account: id.clone(), folders: folders.clone() });
+    // The book is built (and kept) before sending.
+    assert!(s.run("contacts.suggest", &json!({"query": "ann"})).unwrap().as_array().unwrap().is_empty());
+    s.take_jobs();
+    s.run("mail.new", &json!({})).unwrap();
+    s.run(
+        "compose.update",
+        &json!({"to": "Ann Lee <ann@newclient.example>, zoe@example.org", "bcc": "boss@elsewhere.example", "subject": "Hi", "body": "Hello"}),
+    )
+    .unwrap();
+    s.run("compose.send", &json!({})).unwrap();
+    assert!(s.take_jobs().iter().any(|j| matches!(j, Job::Send { .. })));
+    let r = s.run("contacts.suggest", &json!({"query": "ann"})).unwrap();
+    assert_eq!(r[0]["address"], "Ann Lee <ann@newclient.example>", "suggested at once, before Sent Items syncs");
+    assert!(r[0]["sent"].as_u64().unwrap() >= 1);
+    assert_eq!(s.run("contacts.suggest", &json!({"query": "boss"})).unwrap()[0]["email"], "boss@elsewhere.example", "Bcc too");
+
+    // After a restart, still there; your own address isn't.
+    drop(s);
+    let mut s = Session::open(Some(store.clone()), mailcraft_model::dates::Clock::new(NOW + 60, 0));
+    s.apply(Event::Folders { account: id.clone(), folders: folders.clone() });
+    assert_eq!(s.run("contacts.suggest", &json!({"query": "lee"})).unwrap()[0]["email"], "ann@newclient.example");
+    assert!(s.run("contacts.suggest", &json!({"query": "zoe"})).unwrap().as_array().unwrap().is_empty());
+
+    // A copy in Sent Items from an alias: its recipients are people written to.
+    let k = mailcraft_model::MessageKey { account: id.clone(), folder: "Sent".into(), validity: 9, uid: 1 };
+    let m = mailcraft_model::Summary {
+        key: k,
+        from: mailcraft_model::EmailAddress::new("Zoe", "z.park@alias.example"),
+        to: vec![mailcraft_model::EmailAddress::new("Pat Quill", "pat@agency.example")],
+        date: NOW - 60,
+        ..Default::default()
+    };
+    let st = mailcraft_store::FolderState { validity: 9, uid_next: 2, highest_modseq: 0, messages: vec![m], window: 0 };
+    store.save_folder(&id, "Sent", &st).unwrap();
+    s.apply(Event::FolderChanged { account: id.clone(), folder: "Sent".into() });
+    let r = s.run("contacts.suggest", &json!({"query": "pat"})).unwrap();
+    assert_eq!(r[0]["email"], "pat@agency.example");
+    assert!(r[0]["sent"].as_u64().unwrap() >= 1);
+    assert!(s.run("contacts.suggest", &json!({"query": "z.park"})).unwrap().as_array().unwrap().is_empty(), "the alias isn't someone else");
+    let _ = std::fs::remove_dir_all(store.root());
+}

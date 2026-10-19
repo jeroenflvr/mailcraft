@@ -285,6 +285,7 @@ impl Session {
         let now = self.clock.now;
         let mid = mime::new_message_id(&from.email, now, self.random());
         let raw = mime::build(&d, &from, now, &mid).map_err(CmdError::Failed)?;
+        self.remember_recipients(&d);
         if local {
             if let Some(folder) = &sent_folder {
                 self.file_locally(account, folder, &raw, true);

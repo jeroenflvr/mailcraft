@@ -551,6 +551,9 @@ struct SearchIndex {
 /// File for the Replied/Forwarded flags still owed by replies and forwards in the Outbox.
 const PENDING_MARKS: &str = "pending-marks.json";
 
+/// File for the people mail was sent to (the auto-complete list).
+const SENT_TO: &str = "recipients.json";
+
 /// A local account with more messages than this keeps the counts it saved when it opens, rather
 /// than reading every folder to count them.
 const RECOUNT_MAX: u64 = 50_000;
@@ -606,6 +609,9 @@ pub struct Session {
     flagged: HashMap<(String, String), Vec<Summary>>,
     /// Built on first use from the cached mail; dropped when mail arrives.
     contacts: Option<ContactBook>,
+    /// Everyone mail was sent to, remembered as it went (`recipients.json`): suggested even when
+    /// the copy in Sent Items never reaches the cache.
+    sent_to: Vec<mailcraft_model::contacts::SentTo>,
     /// The highest UID seen per Inbox, so only mail that arrives later is announced.
     seen_uid: HashMap<(String, String), u32>,
     /// New mail to announce (desktop notifications), oldest first.
@@ -689,6 +695,7 @@ impl Session {
             cache_limit: CACHE_MESSAGES,
             flagged: HashMap::new(),
             contacts: None,
+            sent_to: Vec::new(),
             seen_uid: HashMap::new(),
             new_mail: Vec::new(),
             rules: Vec::new(),
@@ -719,6 +726,7 @@ impl Session {
         if let Some(store) = &s.store {
             s.rules = store.load_doc("rules.json").unwrap_or_default();
             s.snoozes = store.load_doc("snoozes.json").unwrap_or_default();
+            s.sent_to = store.load_doc(SENT_TO).unwrap_or_default();
             s.pending_marks = store
                 .load_doc::<Vec<(u64, MessageKey, Flag)>>(PENDING_MARKS)
                 .unwrap_or_default()
@@ -1055,13 +1063,24 @@ impl Session {
     fn ensure_contacts(&mut self) {
         if self.contacts.is_none() {
             let mine: Vec<String> = self.accounts.iter().flat_map(|a| [a.config.email.clone(), a.config.username.clone()]).collect();
-            let folders: Vec<(String, String)> =
-                self.accounts.iter().flat_map(|a| a.folders.iter().filter(|f| f.selectable).map(|f| (a.config.id.clone(), f.path.clone()))).collect();
+            let folders: Vec<(String, String, bool)> = self
+                .accounts
+                .iter()
+                .flat_map(|a| a.folders.iter().filter(|f| f.selectable).map(|f| (a.config.id.clone(), f.path.clone(), f.role == FolderRole::Sent)))
+                .collect();
             let mut book = ContactBook::new();
-            for (a, f) in folders {
+            for (a, f, sent) in folders {
                 for m in &self.folder_state(&a, &f).messages {
-                    book.add(m, &mine);
+                    // Sent Items' mail is yours whichever address (an alias) it went from.
+                    if sent {
+                        book.add_from_sent(m, &mine);
+                    } else {
+                        book.add(m, &mine);
+                    }
                 }
+            }
+            for s in &self.sent_to {
+                book.add_sent_to(s);
             }
             // People saved in an address book come first.
             for p in self.pim.values() {
@@ -2530,6 +2549,7 @@ impl Session {
             return Err(CmdError::Params("the subject is empty (send with {\"allowEmptySubject\": true} to send anyway)".into()));
         }
         let (raw, from) = self.compose_bytes(&c, &d)?;
+        self.remember_recipients(&d);
         let local = self.account(&c.account).is_none_or(AccountState::is_local);
         let sent_folder = self.account(&c.account).and_then(|a| a.folder(FolderRole::Sent)).map(|f| f.path.clone());
         // Delay Delivery: into the Outbox, sent once it's time (the app has to be running then).
@@ -2566,6 +2586,27 @@ impl Session {
             cm.error = None;
         }
         Ok(serde_json::json!({ "sending": c.id }))
+    }
+
+    /// Remember who a message goes to (To, Cc and Bcc), as Outlook keeps its auto-complete list:
+    /// suggested from now on, whether or not its copy in Sent Items is ever downloaded.
+    fn remember_recipients(&mut self, d: &mime::Draft) {
+        let mine: Vec<String> = self.accounts.iter().flat_map(|a| [a.config.email.clone(), a.config.username.clone()]).collect();
+        let recipients: Vec<EmailAddress> = d.to.iter().chain(&d.cc).chain(&d.bcc).cloned().collect();
+        let noted = mailcraft_model::contacts::remember_sent_to(&mut self.sent_to, &recipients, &mine, self.clock.now);
+        if noted.is_empty() {
+            return;
+        }
+        if let Some(book) = self.contacts.as_mut() {
+            for s in &noted {
+                book.add_sent_to(s);
+            }
+        }
+        if let Some(store) = &self.store
+            && let Err(e) = store.save_doc(SENT_TO, &self.sent_to)
+        {
+            log::warn!("{SENT_TO}: {e}");
+        }
     }
 
     fn save_pending_marks(&self) {
