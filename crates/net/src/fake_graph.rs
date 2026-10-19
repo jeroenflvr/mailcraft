@@ -138,6 +138,8 @@ impl Data {
     /// One request: (status, body, content type).
     fn route(&mut self, method: &str, target: &str, body: &[u8], base: &str) -> (u16, Vec<u8>, &'static str) {
         self.calls.push(format!("{method} {target}"));
+        // Either kind of id finds a message.
+        let target = &target.replace(&format!("messages/{REGULAR}"), "messages/");
         let now = std::time::Instant::now();
         for (_, raw) in self.late.extract_if(.., |(at, _)| *at <= now).collect::<Vec<_>>() {
             let sent = self.resolve("sentitems").unwrap_or_default();
@@ -167,8 +169,19 @@ impl Data {
                         continue;
                     }
                     let b = serde_json::to_vec(&r["body"]).unwrap_or_default();
-                    let (status, rb, _) = self.route(r["method"].as_str().unwrap_or("GET"), r["url"].as_str().unwrap_or("/"), &b, base);
-                    let rbody: Value = serde_json::from_slice(&rb).unwrap_or(Value::Null);
+                    let url = r["url"].as_str().unwrap_or("/");
+                    let (status, rb, _) = self.route(r["method"].as_str().unwrap_or("GET"), url, &b, base);
+                    let mut rbody: Value = serde_json::from_slice(&rb).unwrap_or(Value::Null);
+                    // Ids come back immutable only when the request asks: the header goes with the
+                    // request it's in, and a batch's requests are each their own. Without it, the
+                    // regular kind, which changes when the message moves.
+                    let immutable = r["headers"]["Prefer"].as_str().is_some_and(|p| p.contains("IdType=\"ImmutableId\""));
+                    if !immutable
+                        && url.trim_start_matches('/').starts_with("me/messages/")
+                        && let Some(id) = rbody["id"].as_str().map(str::to_string)
+                    {
+                        rbody["id"] = json!(format!("{REGULAR}{id}"));
+                    }
                     out.push(json!({"id": r["id"], "status": status, "body": rbody}));
                 }
                 ok(json!({ "responses": out }))
@@ -507,6 +520,9 @@ pub fn serve(data: Data) -> Server {
     Server { base, data }
 }
 
+/// What a message's regular id (as opposed to its immutable one) starts with here.
+const REGULAR: &str = "rest-";
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -543,6 +559,99 @@ mod tests {
     fn mail(subject: &str, id: &str) -> Vec<u8> {
         format!("From: Zoe Park <zoe@contoso.example>\r\nTo: me@contoso.example\r\nSubject: {subject}\r\nMessage-ID: <{id}@x>\r\n\r\nHello about {subject}.\r\n")
             .into_bytes()
+    }
+
+    /// A flag set elsewhere (on a phone) and cleared here is cleared on the server, and stays
+    /// cleared here when the folder is read again. The change goes in a batch, whose requests
+    /// each have to ask for immutable ids: without that it found no message, and the 404 was
+    /// taken for "already gone", so the flag came back at the next sync.
+    #[test]
+    fn a_flag_set_elsewhere_is_cleared_on_the_server() {
+        let mut d = Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        let id = d.deliver(&inbox, &mail("Contract", "c1"), true, "2026-10-01T09:00:00Z");
+        let server = serve(d);
+        let data = server.data.clone();
+        let store = crate::fake::tests_store("graph-flag-elsewhere");
+        let mut pool = crate::worker::Pool::new(store.clone(), Arc::new(crate::worker::MemoryCredentials::default()));
+        let account = AccountConfig {
+            id: "a1".into(),
+            email: "me@contoso.example".into(),
+            username: "me@contoso.example".into(),
+            graph: Some(server.base.clone()),
+            ..Default::default()
+        };
+        pool.submit(Job::Start { account, password: Some(Secret(TOKEN.into())) });
+        until(&pool, "online", |e| matches!(e, Event::Status { status: SyncStatus::Online { .. }, .. }));
+
+        // Flagged on the phone: the next sync brings it here.
+        if let Some(m) = data.lock().unwrap().messages.iter_mut().find(|m| m.id == id) {
+            m.flagged = true;
+        }
+        let flagged_here = || store.load_folder("a1", "INBOX").unwrap().messages.first().is_some_and(|m| m.flags.flagged);
+        pool.submit(Job::SyncFolder { account: "a1".into(), folder: "INBOX".into() });
+        eventually("flagged here", flagged_here);
+
+        // Cleared here: cleared on the server, and still cleared after the next sync.
+        let key = store.load_folder("a1", "INBOX").unwrap().messages[0].key.clone();
+        pool.submit(Job::Apply { account: "a1".into(), op: Op::SetFlag { keys: vec![key], flag: Flag::Flagged, on: false } });
+        eventually("cleared on the server", || data.lock().unwrap().message(&id).is_some_and(|m| !m.flagged));
+        data.lock().unwrap().calls.clear();
+        pool.submit(Job::SyncFolder { account: "a1".into(), folder: "INBOX".into() });
+        eventually("read again", || data.lock().unwrap().calls.iter().any(|c| c.contains("/messages?")));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!flagged_here(), "the flag doesn't come back");
+        drop(pool);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// A change made while the connection is busy (a sync Graph is holding up) is kept at once,
+    /// so quitting then doesn't lose it: the next start makes it on the server before reading
+    /// anything back. It used to wait in the connection's queue, gone at quitting, and the next
+    /// sync brought the flag back.
+    #[test]
+    fn a_change_made_while_busy_survives_quitting() {
+        let mut d = Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        let id = d.deliver(&inbox, &mail("Contract", "c1"), true, "2026-10-01T09:00:00Z");
+        if let Some(m) = d.messages.iter_mut().find(|m| m.id == id) {
+            m.flagged = true;
+        }
+        let server = serve(d);
+        let data = server.data.clone();
+        let store = crate::fake::tests_store("graph-busy-quit");
+        let account = AccountConfig {
+            id: "a1".into(),
+            email: "me@contoso.example".into(),
+            username: "me@contoso.example".into(),
+            graph: Some(server.base.clone()),
+            ..Default::default()
+        };
+        let mut pool = crate::worker::Pool::new(store.clone(), Arc::new(crate::worker::MemoryCredentials::default()));
+        pool.submit(Job::Start { account: account.clone(), password: Some(Secret(TOKEN.into())) });
+        until(&pool, "online", |e| matches!(e, Event::Status { status: SyncStatus::Online { .. }, .. }));
+        let key = store.load_folder("a1", "INBOX").unwrap().messages[0].key.clone();
+
+        // Graph holds up the next sync (it waits seconds before asking again)…
+        data.lock().unwrap().throttle = 2;
+        pool.submit(Job::SyncFolder { account: "a1".into(), folder: "INBOX".into() });
+        eventually("held up", || data.lock().unwrap().throttled > 0);
+        // …while the flag is cleared here: kept at once, then the app quits.
+        let clear = Op::SetFlag { keys: vec![key], flag: Flag::Flagged, on: false };
+        pool.submit(Job::Apply { account: "a1".into(), op: clear.clone() });
+        assert_eq!(store.load_ops("a1").unwrap(), vec![clear], "kept as it's made");
+        drop(pool);
+        assert!(data.lock().unwrap().message(&id).is_some_and(|m| m.flagged), "not on the server yet");
+
+        // The next start makes it on the server first, and the sync after keeps it.
+        let mut pool = crate::worker::Pool::new(store.clone(), Arc::new(crate::worker::MemoryCredentials::default()));
+        pool.submit(Job::Start { account, password: Some(Secret(TOKEN.into())) });
+        until(&pool, "online again", |e| matches!(e, Event::Status { status: SyncStatus::Online { .. }, .. }));
+        assert!(data.lock().unwrap().message(&id).is_some_and(|m| !m.flagged), "cleared on the server");
+        assert!(store.load_folder("a1", "INBOX").unwrap().messages.iter().all(|m| !m.flags.flagged), "and here");
+        assert!(store.load_ops("a1").unwrap().is_empty());
+        drop(pool);
+        let _ = std::fs::remove_dir_all(store.root());
     }
 
     /// Someone else's calendar: editable when they let this account edit it (events added, changed
@@ -946,6 +1055,15 @@ mod tests {
         assert!(d.calls.iter().any(|c| c.starts_with("POST /$batch")), "{:?}", d.calls);
         assert!(!d.calls.iter().any(|c| c.contains("bodyPreview") && c.contains("mailFolders")), "no full listing again");
         drop(d);
+        // Numbered by their immutable ids (each request in the batch asks for them), so the next
+        // sync finds them where they are rather than dropping and fetching them again.
+        for m in store.load_folder("a1", "INBOX").unwrap().messages {
+            assert!(st.id(m.key.uid).is_some_and(|id| !id.starts_with(REGULAR)), "{} by its immutable id", m.subject);
+        }
+        server.data.lock().unwrap().calls.clear();
+        crate::graph::sync_folder(&c, &mut st, &store, "a1", "INBOX", &opts).unwrap();
+        assert_eq!(store.load_folder("a1", "INBOX").unwrap().messages.len(), 252);
+        assert!(!server.data.lock().unwrap().calls.iter().any(|c| c.starts_with("POST /$batch")), "nothing fetched again");
         let _ = std::fs::remove_dir_all(store.root());
     }
 

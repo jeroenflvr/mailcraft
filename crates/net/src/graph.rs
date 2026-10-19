@@ -38,6 +38,9 @@ const RETRIES: u32 = 5;
 const MAX_WAIT_SECS: u64 = 30;
 /// Messages a page when details are read from a folder's listing.
 const LIST_PAGE: usize = 100;
+/// What every request asks for: ids in their immutable form, times in UTC. It applies to the
+/// request it's sent with only, so each request in a batch carries it too.
+const PREFER: &str = "IdType=\"ImmutableId\", outlook.timezone=\"UTC\"";
 /// More messages than this to fetch details for, and they're read from the folder's listing
 /// instead of one request each.
 const LIST_INSTEAD: usize = 40;
@@ -138,10 +141,7 @@ impl Client {
     }
 
     fn request(&self, mut r: Request) -> Result<Value> {
-        r = r
-            .header("Authorization", &self.auth)
-            .header("Accept", "application/json")
-            .header("Prefer", "IdType=\"ImmutableId\", outlook.timezone=\"UTC\"");
+        r = r.header("Authorization", &self.auth).header("Accept", "application/json").header("Prefer", PREFER);
         let resp = send_patiently(&r)?;
         check(&resp)?;
         if resp.body.iter().all(u8::is_ascii_whitespace) {
@@ -210,10 +210,11 @@ impl Client {
                     .iter()
                     .filter_map(|&i| {
                         let (method, url, body) = chunk.get(i)?;
-                        let mut r = json!({"id": (i + 1).to_string(), "method": method, "url": url});
+                        // Each request in a batch is its own: the batch's headers aren't its.
+                        let mut r = json!({"id": (i + 1).to_string(), "method": method, "url": url, "headers": {"Prefer": PREFER}});
                         if let Some(b) = body {
                             r["body"] = b.clone();
-                            r["headers"] = json!({"Content-Type": "application/json"});
+                            r["headers"]["Content-Type"] = json!("application/json");
                         }
                         Some(r)
                     })
@@ -262,9 +263,10 @@ impl Client {
 
     /// Run requests as batches and fail on the first refusal.
     fn batch_ok(&self, requests: &[(&str, String, Option<Value>)]) -> Result<()> {
-        for (status, body) in self.batch(requests)? {
+        for ((method, url, _), (status, body)) in requests.iter().zip(self.batch(requests)?) {
             // Already gone is fine for a delete or a move.
             if status == 404 {
+                log::info!("Graph: {method} {}: not found, so nothing to change", url.split('?').next().unwrap_or_default());
                 continue;
             }
             let bytes = serde_json::to_vec(&body).unwrap_or_default();

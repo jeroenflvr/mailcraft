@@ -73,6 +73,18 @@ struct Handle {
     /// replies): it never waits behind a sync. `None` where it can't be used (POP, JMAP sends).
     quick: Option<Sender<Job>>,
     quick_thread: Option<JoinHandle<()>>,
+    /// The account's changes still to make on the server, shared with its main connection.
+    ops: Pending,
+}
+
+/// Changes still to make on the server, oldest first (RFC 4549's pending actions), kept in
+/// `ops.json`. The pool adds to them as a change is made, and saves them then, so a change
+/// survives quitting while the connection is busy with a sync; the connection works through
+/// them.
+type Pending = Arc<Mutex<Vec<Op>>>;
+
+fn pending(p: &Pending) -> std::sync::MutexGuard<'_, Vec<Op>> {
+    p.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// What an account signs in with, shared by its connections: the password or refresh token, and
@@ -431,6 +443,15 @@ impl Pool {
                 let quick = self.configs.get(&id).is_some_and(|c| quick_job(&other, c));
                 match self.workers.get(&id) {
                     Some(h) => {
+                        // Kept now, not when the connection gets to it (a sync can take a minute):
+                        // quitting meanwhile mustn't lose it.
+                        if let Job::Apply { op, .. } = &other {
+                            let mut ops = pending(&h.ops);
+                            ops.push(op.clone());
+                            if let Err(e) = self.store.save_ops(&id, &ops) {
+                                self.sink.emit(Event::Notice { account: id.clone(), message: e.to_string() });
+                            }
+                        }
                         // Sending and automatic replies go on the second connection; if it has
                         // stopped, the main one does it (after its sync).
                         let other = match h.quick.as_ref().filter(|_| quick) {
@@ -490,9 +511,10 @@ impl Pool {
         let quick_thread = std::thread::Builder::new().name(format!("mail-{}-quick", account.id)).spawn(move || q.run_quick(qrx)).ok();
         let quick = quick_thread.is_some().then_some(qtx);
         let name = format!("mail-{}", account.id);
+        let ops = w.ops.clone();
         match std::thread::Builder::new().name(name).spawn(move || w.run(rx)) {
             Ok(thread) => {
-                self.workers.insert(account.id.clone(), Handle { tx, thread: Some(thread), quick, quick_thread });
+                self.workers.insert(account.id.clone(), Handle { tx, thread: Some(thread), quick, quick_thread, ops });
             }
             Err(e) => self.sink.emit(Event::Status { account: account.id.clone(), status: SyncStatus::Error { error: e.to_string() } }),
         }
@@ -563,7 +585,7 @@ struct Worker {
     /// JMAP and Graph accounts: message numbers and mailbox ids.
     jstate: jmap::State,
     folders: Vec<Folder>,
-    ops: Vec<Op>,
+    ops: Pending,
     queue: VecDeque<Job>,
     backoff: Duration,
     next_attempt: Instant,
@@ -587,7 +609,7 @@ struct Worker {
 
 impl Worker {
     fn new(acc: AccountConfig, auth: Arc<Mutex<Auth>>, store: Store, sink: Sink, opts: SyncOptions) -> Worker {
-        let ops = store.load_ops(&acc.id).unwrap_or_default();
+        let ops = Arc::new(Mutex::new(store.load_ops(&acc.id).unwrap_or_default()));
         let folders = store.load_folders(&acc.id).unwrap_or_default();
         let jstate = if acc.is_api() { jmap::State::load(&store, &acc.id) } else { jmap::State::default() };
         Worker {
@@ -1163,9 +1185,10 @@ impl Worker {
         let paths: Vec<String> = self.folders.iter().filter(|f| f.selectable).map(|f| f.path.clone()).collect();
         for path in paths {
             self.drain(rx);
-            // Opened messages jump the queue.
-            let urgent: Vec<Job> = self.queue.iter().filter(|j| matches!(j, Job::FetchBody { .. })).cloned().collect();
-            self.queue.retain(|j| !matches!(j, Job::FetchBody { .. }));
+            // Opened messages and changes made here jump the queue: a change left until the
+            // whole sync is done would be undone on screen by every folder read meanwhile.
+            let urgent: Vec<Job> = self.queue.iter().filter(|j| matches!(j, Job::FetchBody { .. } | Job::Apply { .. })).cloned().collect();
+            self.queue.retain(|j| !matches!(j, Job::FetchBody { .. } | Job::Apply { .. }));
             for j in urgent {
                 self.handle(j);
             }
@@ -1193,7 +1216,8 @@ impl Worker {
         if !matches!(self.conn, Some(Conn::Jmap(_) | Conn::Graph(_) | Conn::Ews(_))) {
             return;
         }
-        let mut keep: std::collections::HashSet<u32> = self.ops.iter().flat_map(|o| o.keys().iter().map(|k| k.uid).collect::<Vec<_>>()).collect();
+        let mut keep: std::collections::HashSet<u32> =
+            pending(&self.ops).iter().flat_map(|o| o.keys().iter().map(|k| k.uid).collect::<Vec<_>>()).collect();
         for f in &self.folders {
             if let Ok(st) = self.store.load_folder(&self.acc.id, &f.path) {
                 keep.extend(st.messages.iter().map(|m| m.key.uid));
@@ -1314,8 +1338,7 @@ impl Worker {
                     }
                     Err(e) => self.notice(e.to_string()),
                 }
-                self.ops.push(op);
-                let _ = self.store.save_ops(&self.acc.id, &self.ops);
+                // Kept in the pending changes by the pool already: sent from there.
                 if self.conn.is_some() {
                     self.replay();
                 }
@@ -1704,12 +1727,25 @@ impl Worker {
         }
     }
 
+    /// A change made on the server (or refused there): no longer pending.
+    fn done_with(&self, op: &Op) {
+        let mut ops = pending(&self.ops);
+        // Only this connection takes changes off the front; the pool adds them at the end.
+        if ops.first() == Some(op) {
+            ops.remove(0);
+        }
+        if let Err(e) = self.store.save_ops(&self.acc.id, &ops) {
+            log::warn!("{}: the changes still to make couldn't be saved: {e}", self.acc.id);
+        }
+    }
+
     /// Replay offline changes on the server, oldest first.
     fn replay(&mut self) {
         let mut destinations: Vec<String> = Vec::new();
         let mut relist = false;
         let trash = self.folders.iter().find(|f| f.role == FolderRole::Trash).map(|f| f.path.clone());
-        while let Some(op) = self.ops.first().cloned() {
+        loop {
+            let Some(op) = pending(&self.ops).first().cloned() else { break };
             let r = match self.conn.as_mut() {
                 Some(Conn::Imap(c)) => apply_remote_with(c, &op, trash.as_deref()),
                 Some(Conn::Jmap(c)) => jmap::apply_remote(c, &self.jstate, &op),
@@ -1731,16 +1767,15 @@ impl Worker {
                         Op::EmptyFolder { path } => destinations.push(path.clone()),
                         Op::SetFlag { .. } | Op::SetKeyword { .. } | Op::Expunge { .. } => {}
                     }
-                    self.ops.remove(0);
+                    self.done_with(&op);
                 }
-                Err(e) if e.is_fatal() => {
-                    let _ = self.store.save_ops(&self.acc.id, &self.ops);
-                    return self.failed(e);
-                }
+                // Kept for the next connection.
+                Err(e) if e.is_fatal() => return self.failed(e),
                 Err(e) => {
                     // The server refused: drop the change and resync so the cache matches the
                     // server again (forcing a full flag check).
-                    self.ops.remove(0);
+                    log::warn!("{}: a change was refused, so it's undone here: {e}", self.acc.id);
+                    self.done_with(&op);
                     let mut folders: Vec<String> = op.keys().iter().map(|k| k.folder.clone()).collect();
                     folders.dedup();
                     for f in &folders {
@@ -1756,7 +1791,6 @@ impl Worker {
                 }
             }
         }
-        let _ = self.store.save_ops(&self.acc.id, &self.ops);
         if relist {
             self.relist();
         }

@@ -48,8 +48,9 @@ Message sources live next to it as `<validity>/<uid>.eml`. A message is identifi
   with SASL-IR when offered, else `LOGIN`; non-ASCII credentials go as literals), `ENABLE QRESYNC`
   (or `ENABLE CONDSTORE` without it).
 - Replay pending offline changes, then **sync all**: `LIST` (special-use roles from RFC 6154
-  attributes, or the usual names), then every selectable folder, Inbox first. Opened messages jump
-  the queue between folders, so the UI stays responsive during a long first sync.
+  attributes, or the usual names), then every selectable folder, Inbox first. Opened messages and
+  changes made here jump the queue between folders, so the UI stays responsive during a long first
+  sync and a change isn't undone on screen by folders read before it's made.
 - Then **wait for mail**: `IDLE` on the Inbox (RFC 2177) in half-second slices, so new jobs interrupt
   it at once; re-issued every 10 minutes (servers drop IDLE after 30). Without IDLE, poll every 2
   minutes. A full sync runs every 15 minutes.
@@ -60,8 +61,10 @@ Message sources live next to it as `<validity>/<uid>.eml`. A message is identifi
 ## Offline changes (RFC 4549 "pending actions")
 
 Flag changes, moves and deletes are applied to the cache immediately (the UI updates before the
-server answers) and recorded in `<account>/ops.json`. When connected, the worker replays them
-oldest first:
+server answers) and recorded in `<account>/ops.json` the moment they're made: the pool adds them
+there before handing them to the account's connection, so quitting while it's busy (a sync can
+take a minute) doesn't lose them. When connected, the worker replays them oldest first, before
+reading anything from the server, and takes each off the list once the server has it:
 
 - flags: `UID STORE <set> +FLAGS.SILENT (…)` / `-FLAGS.SILENT`;
 - move: `UID MOVE` (RFC 6851), else `UID COPY` + `\Deleted` + `UID EXPUNGE` (RFC 4315; plain
@@ -70,7 +73,7 @@ oldest first:
 
 Keys whose UIDVALIDITY no longer matches are skipped rather than applied to whatever now has that
 UID. If the server refuses a change, it is dropped, the folder's sync state is reset (forcing a full
-flag comparison) and the user is told.
+flag comparison), the user is told and `mailcraft.log` says why.
 
 Folder changes (create, rename, move, delete) are pending actions too: `CREATE` + `SUBSCRIBE`,
 `RENAME` (subfolders follow; the cache directories move with them), `DELETE`. Deleting a folder
@@ -127,7 +130,10 @@ Microsoft Graph REST API, signed in with an OAuth token that asks for Graph's ma
 switched IMAP off.
 
 - **Ids** are asked for in their immutable form (`Prefer: IdType="ImmutableId"`), so a message
-  keeps its id when it moves; they are numbered like JMAP's, with the same folder paths.
+  keeps its id when it moves; they are numbered like JMAP's, with the same folder paths. The
+  header applies only to the request it's sent with, so each request inside a JSON batch carries
+  it too (without it, a message fetched by id came back under its other id and was dropped and
+  fetched again at every sync).
 - **Folders** come from `/me/mailFolders` and each one's `childFolders`, following
   `@odata.nextLink` pages on the same server only. The well-known folders (`inbox`, `sentitems`,
   `deleteditems`…) are looked up in one JSON batch for their roles; the Outbox and Exchange's own

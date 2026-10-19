@@ -460,3 +460,15 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   flagged → complete → cleared (→ flagged), its tip naming what the next click does; the
   message clicked decides for the whole selection, and Undo puts it back
   (`mail.flag {"cycle": true, "key"?}`). The ribbon's Flag still flags and unflags.
+- **A change made during a sync was lost on quitting, and undone on screen meanwhile:** a flag
+  cleared (or any change) waited in the account connection's queue behind a full sync (80 s for
+  a tester's Exchange mailbox at start-up, then every 15 minutes); folders read meanwhile showed
+  the server's flag again, and quitting before the sync ended dropped the change, so the next
+  sync brought the flag back for good. Changes now go into `ops.json` as they're made (shared by
+  the pool and the connection) and jump the queue between folders; the next start makes them on
+  the server before reading anything back. Refused changes are written to `mailcraft.log`.
+- **Graph batches asked for immutable ids only on the outside:** the `Prefer` header applies to
+  the request it's sent with, and a batch's requests are each their own, so a message fetched by
+  id in a batch came back under its regular id, was numbered again, and was dropped and fetched
+  again at every sync. Every request in a batch now carries it; the fake Graph answers
+  without it as Graph does.
