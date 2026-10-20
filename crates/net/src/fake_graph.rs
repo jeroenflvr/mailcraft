@@ -182,7 +182,12 @@ impl Data {
                     {
                         rbody["id"] = json!(format!("{REGULAR}{id}"));
                     }
-                    out.push(json!({"id": r["id"], "status": status, "body": rbody}));
+                    // As a request on its own: a busy or timed-out answer says to ask again at once.
+                    if status == 429 || (502..=504).contains(&status) {
+                        out.push(json!({"id": r["id"], "status": status, "headers": {"Retry-After": "0"}, "body": rbody}));
+                    } else {
+                        out.push(json!({"id": r["id"], "status": status, "body": rbody}));
+                    }
                 }
                 ok(json!({ "responses": out }))
             }
@@ -689,8 +694,10 @@ mod tests {
         st.messages.truncate(120);
         store.save_folder("a1", "INBOX", &st).unwrap();
         data.lock().unwrap().calls.clear();
+        data.lock().unwrap().largest_batch = 0;
         pool.submit(Job::SyncFolder { account: "a1".into(), folder: "INBOX".into() });
         eventually("all here again", || store.load_folder("a1", "INBOX").unwrap().messages.len() == 300);
+        assert_eq!(data.lock().unwrap().largest_batch, 2, "the pages side by side, in one batch");
         let calls = data.lock().unwrap().calls.clone();
         let listed: Vec<&String> = calls.iter().filter(|c| c.contains("$select=id,isRead,isDraft,flag,subject")).collect();
         assert!(listed.first().is_some_and(|c| c.contains("$skip=120")), "from where it stopped: {listed:?}");

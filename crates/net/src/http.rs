@@ -176,9 +176,43 @@ pub fn get(url: &str, max: usize) -> Result<Response> {
 }
 
 fn once(req: &Request, url: &Url) -> Result<Response> {
+    let began = std::time::Instant::now();
     let sock = stream::tcp(&url.host, url.port)?;
     let mut s = if url.https { stream::tls(sock, &url.host)? } else { Stream::Plain(sock) };
-    exchange(&mut s, req, url)
+    let ready = began.elapsed();
+    write_request(&mut s, req, url, false)?;
+    let asked = std::time::Instant::now();
+    let mut timed = Timed { s: &mut s, first: None, bytes: 0 };
+    let resp = read_response(&mut timed, req.max, req.method == "HEAD")?;
+    // Where the time went: connecting, the server working it out, or the answer coming down.
+    let first = timed.first.unwrap_or(asked);
+    log::debug!(
+        "{}: connected in {} ms; the answer began {} ms after asking; {} KB in {} ms",
+        url.host,
+        ready.as_millis(),
+        first.saturating_duration_since(asked).as_millis(),
+        timed.bytes / 1024,
+        first.elapsed().as_millis()
+    );
+    Ok(resp)
+}
+
+/// A reader that notes when the first bytes came and how many came.
+struct Timed<'a, S> {
+    s: &'a mut S,
+    first: Option<std::time::Instant>,
+    bytes: usize,
+}
+
+impl<S: Read> Read for Timed<'_, S> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.s.read(buf)?;
+        if n > 0 && self.first.is_none() {
+            self.first = Some(std::time::Instant::now());
+        }
+        self.bytes = self.bytes.saturating_add(n);
+        Ok(n)
+    }
 }
 
 /// Write the request and read the response on an open connection.

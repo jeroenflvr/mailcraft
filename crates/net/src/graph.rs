@@ -655,13 +655,28 @@ pub fn sync_folder(c: &Client, st: &mut State, store: &Store, account: &str, fol
             continue;
         }
         let only: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
-        let skip = if first > 0 { format!("&$skip={first}") } else { String::new() };
-        let path = format!("/me/mailFolders/{}/messages?$top={LIST_PAGE}&$orderby=receivedDateTime%20desc&$select={LIST_FIELDS}{skip}", seg(&id));
-        c.pages(&path, last - first + 1, |page| {
-            add(&mut fs, st, page, Some(&only))?;
+        // The stretch's pages side by side, as many at once as the account sends (Exchange
+        // takes seconds to make each page of a big mailbox: one after another, a first sync of
+        // 20,000 messages took half an hour).
+        let skips: Vec<usize> = (first..=last).step_by(LIST_PAGE).collect();
+        for group in skips.chunks(c.at_once.max(1)) {
+            let reqs: Vec<(&str, String, Option<Value>)> = group
+                .iter()
+                .map(|k| {
+                    let path = format!(
+                        "/me/mailFolders/{}/messages?$top={LIST_PAGE}&$orderby=receivedDateTime%20desc&$select={LIST_FIELDS}&$skip={k}",
+                        seg(&id)
+                    );
+                    ("GET", path, None)
+                })
+                .collect();
+            for (status, body) in c.batch(&reqs)? {
+                status_error(status, &serde_json::to_vec(&body).unwrap_or_default())?;
+                let page = body.get("value").and_then(Value::as_array).cloned().unwrap_or_default();
+                add(&mut fs, st, page, Some(&only))?;
+            }
             log::info!("{account}: {folder}: {} of {} messages here ({to_list} were missing)", fs.messages.len(), newest.len());
-            Ok(())
-        })?;
+        }
     }
     prefetch(c, st, store, account, folder, &mut fs, opts)?;
     report.total = total;
