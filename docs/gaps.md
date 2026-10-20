@@ -480,6 +480,12 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   connection's start and stop. The account says it's up to date once its mail folders are, before
   the calendars and contacts are read (every event of every calendar on Microsoft 365, minutes
   on a big one, at every full sync: "Updating…" all along); the log says how long they took.
+- **A big Microsoft 365 folder never finished syncing:** with all mail kept, a folder listing
+  stopped at 200 pages (20,000 messages), so a 21,000-message Inbox's oldest never came and every
+  full sync listed it from the top again (half an hour on a slow line, every 15 minutes); a first
+  sync cut short started over too. Missing messages are now listed from where they start in the
+  folder, a few by id, for as many pages as it takes. Connections try IPv6 and IPv4 in turn and
+  keep to IPv4 once IPv6 fails; the detailed log times finding the name, connecting and TLS.
 - **A change made during a sync was lost on quitting, and undone on screen meanwhile:** a flag
   cleared (or any change) waited in the account connection's queue behind a full sync (80 s for
   a tester's Exchange mailbox at start-up, then every 15 minutes); folders read meanwhile showed

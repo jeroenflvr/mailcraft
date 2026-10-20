@@ -48,8 +48,12 @@ const PREFER: &str = "IdType=\"ImmutableId\", outlook.timezone=\"UTC\"";
 /// More messages than this to fetch details for, and they're read from the folder's listing
 /// instead of one request each.
 const LIST_INSTEAD: usize = 40;
-/// Pages followed for one listing.
+/// Pages followed for one listing, at least: more when the listing is meant to be longer
+/// ([`Client::pages`]). A fixed 200 pages of 100 cut a 21,000-message Inbox short, so its oldest
+/// messages never came and every sync listed it again from the top.
 const MAX_PAGES: usize = 200;
+/// Pages followed for one listing, at most.
+const MOST_PAGES: usize = 5_000;
 /// Folders listed at most.
 const MAX_FOLDERS: usize = 5000;
 const FOLDER_FIELDS: &str = "id,displayName,parentFolderId,childFolderCount,totalItemCount,unreadItemCount";
@@ -229,7 +233,8 @@ impl Client {
         let origin = http::Url::parse(&self.base)?.origin();
         let mut seen = 0usize;
         let mut url = format!("{}{path}", self.base);
-        for _ in 0..MAX_PAGES {
+        let most = MAX_PAGES.max(limit / LIST_PAGE + 2).min(MOST_PAGES);
+        for _ in 0..most {
             let v = self.request(Request::get(&url, MAX_JSON))?;
             let mut page = v.get("value").and_then(Value::as_array).cloned().unwrap_or_default();
             page.truncate(limit.saturating_sub(seen));
@@ -610,7 +615,6 @@ pub fn sync_folder(c: &Client, st: &mut State, store: &Store, account: &str, fol
             }
         }
     }
-    let missing: Vec<String> = newest.iter().filter(|(id, _)| fs.find(st.number(id)).is_none()).map(|(id, _)| id.clone()).collect();
     let mut add = |fs: &mut FolderState, st: &mut State, details: Vec<Value>, only: Option<&std::collections::HashSet<&str>>| -> Result<()> {
         for m in details {
             let Some(id) = m.get("id").and_then(Value::as_str) else { continue };
@@ -633,26 +637,49 @@ pub fn sync_folder(c: &Client, st: &mut State, store: &Store, account: &str, fol
         store.save_folder(account, folder, fs)?;
         Ok(())
     };
-    if missing.len() > LIST_INSTEAD {
-        // Many to fetch (a first sync): from the folder's listing, kept page by page so a
-        // failure later on doesn't lose what came.
-        let only: std::collections::HashSet<&str> = missing.iter().map(String::as_str).collect();
-        let path = format!("/me/mailFolders/{}/messages?$top={LIST_PAGE}&$orderby=receivedDateTime%20desc&$select={LIST_FIELDS}", seg(&id));
-        let mut listed = 0usize;
-        c.pages(&path, newest.len(), |page| {
-            listed += page.len();
+    // Where in the folder (newest first) the missing ones are, in stretches: a few (new mail,
+    // a gap) are read one by one; a long one (a first sync, or one cut short) from the folder's
+    // listing, from where it starts rather than from the top again, kept page by page so a
+    // failure later on doesn't lose what came.
+    let at: Vec<usize> = newest.iter().enumerate().filter(|(_, (id, _))| fs.find(st.number(id)).is_none()).map(|(i, _)| i).collect();
+    let to_list: usize = at.len();
+    if at.is_empty() {
+        // Nothing new: the flags read above are saved all the same.
+        add(&mut fs, st, Vec::new(), None)?;
+    }
+    for (first, last) in stretches(&at) {
+        let ids: Vec<String> = at.iter().filter(|i| (first..=last).contains(*i)).filter_map(|&i| newest.get(i)).map(|(id, _)| id.clone()).collect();
+        if ids.len() <= LIST_INSTEAD {
+            let details = c.headers(&ids)?;
+            add(&mut fs, st, details, None)?;
+            continue;
+        }
+        let only: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let skip = if first > 0 { format!("&$skip={first}") } else { String::new() };
+        let path = format!("/me/mailFolders/{}/messages?$top={LIST_PAGE}&$orderby=receivedDateTime%20desc&$select={LIST_FIELDS}{skip}", seg(&id));
+        c.pages(&path, last - first + 1, |page| {
             add(&mut fs, st, page, Some(&only))?;
-            log::info!("{account}: {folder}: {listed} of {} messages listed", newest.len());
+            log::info!("{account}: {folder}: {} of {} messages here ({to_list} were missing)", fs.messages.len(), newest.len());
             Ok(())
         })?;
-    } else {
-        let details = c.headers(&missing)?;
-        add(&mut fs, st, details, None)?;
     }
     prefetch(c, st, store, account, folder, &mut fs, opts)?;
     report.total = total;
     report.unread = unread;
     Ok(report)
+}
+
+/// Positions (ascending) as stretches `(first, last)`, joined across gaps shorter than a page
+/// (listing those few again costs less than another request).
+fn stretches(at: &[usize]) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for &i in at {
+        match out.last_mut() {
+            Some((_, last)) if i <= last.saturating_add(LIST_PAGE) => *last = i,
+            _ => out.push((i, i)),
+        }
+    }
+    out
 }
 
 fn prefetch(c: &Client, st: &State, store: &Store, account: &str, folder: &str, fs: &mut FolderState, opts: &SyncOptions) -> Result<()> {
@@ -800,6 +827,15 @@ pub fn send(c: &Client, raw: &[u8], recipients: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Missing messages in stretches: gaps shorter than a page are listed through.
+    #[test]
+    fn missing_messages_in_stretches() {
+        assert!(stretches(&[]).is_empty());
+        assert_eq!(stretches(&[0, 1, 2]), vec![(0, 2)]);
+        assert_eq!(stretches(&[0, 1, 50, 5000, 5001]), vec![(0, 50), (5000, 5001)]);
+        assert_eq!(stretches(&[3, 3 + LIST_PAGE, 4 + 2 * LIST_PAGE]), vec![(3, 3 + LIST_PAGE), (4 + 2 * LIST_PAGE, 4 + 2 * LIST_PAGE)]);
+    }
 
     #[test]
     fn headers_from_fields() {

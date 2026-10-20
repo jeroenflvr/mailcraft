@@ -44,6 +44,10 @@ Message sources live next to it as `<validity>/<uid>.eml`. A message is identifi
 
 ## The worker loop
 
+- **Connecting** tries a server's IPv6 and IPv4 addresses in turn (RFC 8305's order), giving each
+  4 s while others are left; once an IPv6 connection fails, IPv4 goes first for the rest of the
+  run (a broken IPv6 route made every request wait). The detailed log times each step: finding
+  the name, connecting (to which address), the secure connection, and each request.
 - On start: connect (TLS, or STARTTLS with a fresh capability list), authenticate (`AUTHENTICATE PLAIN`
   with SASL-IR when offered, else `LOGIN`; non-ASCII credentials go as literals), `ENABLE QRESYNC`
   (or `ENABLE CONDSTORE` without it).
@@ -153,7 +157,10 @@ switched IMAP off.
 - **A folder sync** lists the newest messages' ids with `isRead`, `flag` and `isDraft`, then the
   details of those not cached yet (their internet headers when Exchange has them) in batches of
   4; when there are many (a first sync), they're read from the folder's listing instead, 100 a
-  page and kept page by page. The listing leaves out the internet headers (Exchange keeps them
+  page and kept page by page, starting where the missing stretch starts (`$skip`), so a sync cut
+  short goes on where it stopped rather than listing the folder from the top again; a listing
+  follows as many pages as it's meant to have (it stopped at 200, 20,000 messages, so the rest
+  of a bigger "keep all" folder never came and every sync listed it all again). The listing leaves out the internet headers (Exchange keeps them
   with each message, and reading them for a page can take Graph long enough to give up), so
   replies' threading, importance and list headers come from the source when it downloads.
   Sources come from `/messages/{id}/$value`; mail with attachments downloads when opened.

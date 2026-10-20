@@ -659,6 +659,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(store.root());
     }
 
+    /// A first sync cut short (quitting, a dropped connection) goes on where it stopped: the
+    /// messages still missing are listed from where they start in the folder, not from the top
+    /// again (21,000 messages at seconds a page: half an hour, every 15 minutes).
+    #[test]
+    fn a_sync_cut_short_goes_on_where_it_stopped() {
+        let mut d = Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        for i in 0..300 {
+            d.deliver(&inbox, &mail(&format!("Note {i}"), &format!("n{i}")), true, &format!("2026-10-01T{:02}:{:02}:00Z", i / 60, i % 60));
+        }
+        let server = serve(d);
+        let data = server.data.clone();
+        let store = crate::fake::tests_store("graph-cut-short");
+        let mut pool = crate::worker::Pool::new(store.clone(), Arc::new(crate::worker::MemoryCredentials::default()));
+        let account = AccountConfig {
+            id: "a1".into(),
+            email: "me@contoso.example".into(),
+            username: "me@contoso.example".into(),
+            graph: Some(server.base.clone()),
+            ..Default::default()
+        };
+        pool.submit(Job::Start { account, password: Some(Secret(TOKEN.into())) });
+        until(&pool, "online", |e| matches!(e, Event::Status { status: SyncStatus::Online { .. }, .. }));
+        assert_eq!(store.load_folder("a1", "INBOX").unwrap().messages.len(), 300);
+
+        // Cut short: only the newest 120 came.
+        let mut st = store.load_folder("a1", "INBOX").unwrap();
+        st.messages.truncate(120);
+        store.save_folder("a1", "INBOX", &st).unwrap();
+        data.lock().unwrap().calls.clear();
+        pool.submit(Job::SyncFolder { account: "a1".into(), folder: "INBOX".into() });
+        eventually("all here again", || store.load_folder("a1", "INBOX").unwrap().messages.len() == 300);
+        let calls = data.lock().unwrap().calls.clone();
+        let listed: Vec<&String> = calls.iter().filter(|c| c.contains("$select=id,isRead,isDraft,flag,subject")).collect();
+        assert!(listed.first().is_some_and(|c| c.contains("$skip=120")), "from where it stopped: {listed:?}");
+        assert_eq!(listed.len(), 2, "two pages for the 180 missing: {listed:?}");
+        drop(pool);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
     /// The mail is said to be up to date when its folders are, not after the calendars and
     /// contacts (every event of every calendar, which on a big Microsoft 365 calendar takes
     /// minutes): the account stayed "Updating…" all that time, at every full sync.
