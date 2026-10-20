@@ -78,8 +78,8 @@ Before every commit: `cargo xtask ci`. Commit after every arc of work that build
 ## Packaging and releases
 - `packaging/` holds the installer scripts (Linux AppImage/deb/rpm/Flatpak, macOS dmg, Windows
   MSI, FreeBSD). Releases are **unsigned**, by choice: `release-wip.yml` ("Release (unsigned)",
-  run by hand) builds every platform on free runners and publishes the release `v<version>`
-  (a test pre-release when asked); `release.yml` (a push to the `release` branch) calls it. In
+  run by hand) builds the platforms ticked on free runners and publishes the release
+  `v<version>`, adding to it when it exists (a test pre-release when asked); `release.yml` (a push to the `release` branch) calls it. In
   this fork only that workflow is enabled; the others are switched off in the Actions settings. The checks (FreeBSD, Windows ARM64,
   packaging lint) use `storytold/craft-common-actions`. Keep app ids
   (`ai.storyteller.mailcraft`), binary names and the WiX `UpgradeCode` stable.
