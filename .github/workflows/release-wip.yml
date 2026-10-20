@@ -1,14 +1,14 @@
-# Unsigned test builds for every platform the Craft release covers, published as a pre-release
-# of this repository so people can try MailCraft. Run by hand only (Actions › Release (unsigned
-# test build) › Run workflow); nothing starts it on a push.
+# Unsigned builds for every platform the Craft release covers, published on this repository's
+# Releases. Run by hand (Actions › Release (unsigned test build) › Run workflow) it publishes a
+# pre-release `v<version>-test.<run>` so people can try MailCraft; release.yml calls it with
+# `final: true` on a push to the `release` branch, which publishes the release `v<version>`.
 #
 # The same platforms as release.yml (storytold/craft-common-actions): macOS universal, Windows
 # x64/x86/arm64, Linux x86_64/aarch64 (AppImage, deb, rpm, tar.gz), Flatpak x86_64/aarch64, Linux
 # riscv64, FreeBSD and the web. Differences: free GitHub-hosted runners only (macos-15, not
 # macos-15-xlarge), no `release` environment and no signing secrets, so Windows installers are
 # unsigned and the macOS app is ad-hoc signed and not notarized (the packaging scripts fall back
-# to that by themselves); and the result is a published pre-release `v<version>-test.<run>`,
-# never the `v<version>` tag a signed release uses.
+# to that by themselves).
 name: Release (unsigned test build)
 
 on:
@@ -18,12 +18,22 @@ on:
         description: "Version override, e.g. 0.8.1 (empty: Cargo.toml)"
         type: string
         default: ""
+  workflow_call:
+    inputs:
+      version:
+        description: "Version override (empty: Cargo.toml)"
+        type: string
+        default: ""
+      final:
+        description: "Publish the release v<version> rather than a test pre-release"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-wip
+  group: release-wip-${{ inputs.final && 'final' || 'test' }}
   cancel-in-progress: false
 
 env:
@@ -60,7 +70,13 @@ jobs:
           app-title: MailCraft (unsigned test build)
       - id: tag
         name: Tag
-        run: echo "tag=v${{ steps.v.outputs.version }}-test.${{ github.run_number }}" >>"$GITHUB_OUTPUT"
+        env:
+          FINAL: ${{ inputs.final && '1' || '' }}
+          VERSION: ${{ steps.v.outputs.version }}
+          RUN: ${{ github.run_number }}
+        run: |
+          if [ -n "$FINAL" ]; then tag="v$VERSION"; else tag="v$VERSION-test.$RUN"; fi
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
 
   macos:
     name: macOS universal
@@ -348,7 +364,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish the test pre-release
+    name: Publish the release
     if: "!cancelled() && !contains(needs.*.result, 'failure')"
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, freebsd, web]
     runs-on: ubuntu-latest
@@ -370,9 +386,19 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.version.outputs.tag }}
           VERSION: ${{ needs.version.outputs.version }}
+          FINAL: ${{ inputs.final && '1' || '' }}
         run: |
+          if [ -n "$FINAL" ]; then
+            what="**Unsigned build** of MailCraft $VERSION"
+            title="MailCraft $VERSION"
+            kind=()
+          else
+            what="**Unsigned test build** of MailCraft $VERSION, for trying it out"
+            title="MailCraft $VERSION (unsigned test build ${{ github.run_number }})"
+            kind=(--prerelease)
+          fi
           cat >../notes.md <<EOF
-          **Unsigned test build** of MailCraft $VERSION (\`${GITHUB_SHA::9}\`), for trying it out.
+          $what (\`${GITHUB_SHA::9}\`).
 
           These builds aren't code-signed:
           - **Windows:** SmartScreen may say "Windows protected your PC": choose *More info › Run anyway*.
@@ -390,9 +416,8 @@ jobs:
 
           Check a download against \`SHA256SUMS.txt\`.
           EOF
-          gh release create "$TAG" --prerelease --target "$GITHUB_SHA" \
-            --title "MailCraft $VERSION (unsigned test build ${{ github.run_number }})" \
-            --notes-file ../notes.md -- *
+          gh release create "$TAG" "${kind[@]}" --target "$GITHUB_SHA" \
+            --title "$title" --notes-file ../notes.md -- *
           {
             echo "Published **$TAG**:"
             echo

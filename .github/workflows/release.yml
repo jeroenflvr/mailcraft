@@ -1,12 +1,13 @@
-# Builds, signs and packages MailCraft for every platform, then drafts a GitHub Release:
-# macOS universal (.dmg + CLI zip), Windows x64/x86/arm64 (.msi + portable zip), Linux
-# x86_64/aarch64 (AppImage, deb, rpm, tar.gz, Flatpak), Linux riscv64, FreeBSD and the web. Runs on a
-# push to the `release` branch, or by hand with an optional version override for a test run.
-# The scripts it calls live in packaging/; the version comes from Cargo.toml.
-# Browser sign-in (MAILCRAFT_MICROSOFT_CLIENT_ID, MAILCRAFT_GOOGLE_CLIENT_ID/_SECRET) isn't passed
-# here: the shared workflow takes only the secrets it declares, and passing others fails the run.
-# Whoever ships this build registers their own app and adds a pass-through there (docs/oauth.md);
-# release-wip.yml, which builds in this repository, passes them already.
+# The release: unsigned builds for every platform (macOS universal .dmg, Windows x64/x86/arm64
+# .msi + portable zip, Linux x86_64/aarch64 AppImage/deb/rpm/tar.gz/Flatpak, Linux riscv64,
+# FreeBSD and the web), published as the GitHub Release `v<version>`. Runs on a push to the
+# `release` branch, or by hand with an optional version override. The version comes from
+# Cargo.toml; the jobs are release-wip.yml's (free GitHub-hosted runners, no signing secrets).
+#
+# Unsigned on purpose: Windows SmartScreen asks before the first run, and macOS needs a
+# right-click › Open the first time (the release notes say how). Browser sign-in
+# (MAILCRAFT_MICROSOFT_CLIENT_ID, MAILCRAFT_GOOGLE_CLIENT_ID/_SECRET) is built in when the
+# repository has those secrets (docs/oauth.md).
 name: Release
 
 on:
@@ -15,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version override for a test run, e.g. 0.2.0-rc.1 (empty: Cargo.toml)"
+        description: "Version override, e.g. 0.2.0-rc.1 (empty: Cargo.toml)"
         type: string
         default: ""
 
@@ -28,30 +29,8 @@ concurrency:
 
 jobs:
   release:
-    # Intentionally tracked at @main (not SHA-pinned) so org-wide CI improvements, security fixes, and build optimizations propagate without PR churn across all craftapp repos.
-    uses: storytold/craft-common-actions/.github/workflows/release.yml@main
+    uses: ./.github/workflows/release-wip.yml
     with:
-      app-name: mailcraft
-      app-title: MailCraft
-      version: ${{ inputs.version }}
-      # storytold/craft-fonts, pinned (bump deliberately): Arabic, Japanese, Chinese and Thai
-      # fallback fonts, built in through CRAFT_FONTS_DIR (crates/ui-egui/build.rs). The web job
-      # fetches the same commit itself (CRAFT_FONTS_REF in packaging/web/package.sh).
-      craft-fonts-ref: 3d9ab3a132ed0eff457e424226a435a901da30d3
-      # The browser app (apps/mailcraft-web, JMAP over fetch): packaging/web/package.sh.
-      has-web: true
-    secrets:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-      AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
-      AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
-      AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+      version: ${{ inputs.version || '' }}
+      final: true
+    secrets: inherit

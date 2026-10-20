@@ -77,9 +77,11 @@ Before every commit: `cargo xtask ci`. Commit after every arc of work that build
 
 ## Packaging and releases
 - `packaging/` holds the installer scripts (Linux AppImage/deb/rpm/Flatpak, macOS dmg, Windows
-  MSI, FreeBSD); `.github/workflows/` calls them through `storytold/craft-common-actions`
-  (`release.yml` on the `release` branch). Keep app ids (`ai.storyteller.mailcraft`), binary
-  names and the WiX `UpgradeCode` stable.
+  MSI, FreeBSD). Releases are **unsigned**, by choice: `release-wip.yml` builds every platform
+  on free runners and publishes a test pre-release when run by hand; `release.yml` (a push to
+  the `release` branch) calls it to publish `v<version>`. The checks (FreeBSD, Windows ARM64,
+  packaging lint) use `storytold/craft-common-actions`. Keep app ids
+  (`ai.storyteller.mailcraft`), binary names and the WiX `UpgradeCode` stable.
 - The version lives only in `[workspace.package]` (`cargo xtask version [set X.Y.Z]`).
 - After touching workflows, run `npx actions-up` to keep pinned actions current; the
   `craft-common-actions@main` references stay on `main` on purpose.
