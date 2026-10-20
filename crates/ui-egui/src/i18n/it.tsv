@@ -879,3 +879,14 @@ folder	Archive	Archivio
 
 # A month's full name, where it differs from its short form.
 month	May	maggio
+	Connections	Connessioni
+	How each account uses its server. Fewer requests at once are slower but less often held up by a busy server.	Come ogni account usa il proprio server. Meno richieste alla volta è più lento, ma un server occupato lo rallenta meno spesso.
+	Requests at once (Microsoft 365)	Richieste alla volta (Microsoft 365)
+	Send on a connection of its own	Invia con una connessione separata
+	Check for new mail every	Controlla la nuova posta ogni
+	Where the server can't tell at once	Quando il server non lo segnala subito
+	Read every folder every	Leggi tutte le cartelle ogni
+	minutes	minuti
+	Troubleshooting	Risoluzione dei problemi
+	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log, nella cartella dell'app MailCraft, indica cosa ha fatto ogni account. Non contiene mai password né il contenuto dei messaggi.
+	Detailed log (every request to the server)	Registro dettagliato (ogni richiesta al server)

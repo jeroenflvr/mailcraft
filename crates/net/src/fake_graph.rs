@@ -640,8 +640,13 @@ mod tests {
         let clear = Op::SetFlag { keys: vec![key], flag: Flag::Flagged, on: false };
         pool.submit(Job::Apply { account: "a1".into(), op: clear.clone() });
         assert_eq!(store.load_ops("a1").unwrap(), vec![clear], "kept as it's made");
+        // In the cache at once too: reading the folder (or the next start, before connecting)
+        // shows it. It showed the server's state until the connection got to it.
+        let cleared_here = || store.load_folder("a1", "INBOX").unwrap().messages.iter().all(|m| !m.flags.flagged);
+        assert!(cleared_here(), "in the cache at once");
         drop(pool);
         assert!(data.lock().unwrap().message(&id).is_some_and(|m| m.flagged), "not on the server yet");
+        assert!(cleared_here(), "still in the cache after quitting");
 
         // The next start makes it on the server first, and the sync after keeps it.
         let mut pool = crate::worker::Pool::new(store.clone(), Arc::new(crate::worker::MemoryCredentials::default()));
@@ -650,6 +655,37 @@ mod tests {
         assert!(data.lock().unwrap().message(&id).is_some_and(|m| !m.flagged), "cleared on the server");
         assert!(store.load_folder("a1", "INBOX").unwrap().messages.iter().all(|m| !m.flags.flagged), "and here");
         assert!(store.load_ops("a1").unwrap().is_empty());
+        drop(pool);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// A folder the server refuses to read (gone there since the folder list was read) is said,
+    /// and the account is up to date again after: it stayed "Updating…" for good.
+    #[test]
+    fn a_folder_refused_doesnt_leave_the_account_updating() {
+        let mut d = Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        let plans = d.folder("Plans", None, None);
+        d.deliver(&inbox, &mail("Contract", "c1"), true, "2026-10-01T09:00:00Z");
+        let server = serve(d);
+        let data = server.data.clone();
+        let store = crate::fake::tests_store("graph-folder-refused");
+        let mut pool = crate::worker::Pool::new(store.clone(), Arc::new(crate::worker::MemoryCredentials::default()));
+        let account = AccountConfig {
+            id: "a1".into(),
+            email: "me@contoso.example".into(),
+            username: "me@contoso.example".into(),
+            graph: Some(server.base.clone()),
+            ..Default::default()
+        };
+        pool.submit(Job::Start { account, password: Some(Secret(TOKEN.into())) });
+        until(&pool, "online", |e| matches!(e, Event::Status { status: SyncStatus::Online { .. }, .. }));
+
+        data.lock().unwrap().folders.retain(|f| f.id != plans);
+        pool.submit(Job::SyncFolder { account: "a1".into(), folder: "Plans".into() });
+        let seen = until(&pool, "up to date again", |e| matches!(e, Event::Status { status: SyncStatus::Online { .. }, .. }));
+        assert!(seen.iter().any(|e| matches!(e, Event::Status { status: SyncStatus::Syncing { folder }, .. } if folder == "Plans")), "{seen:?}");
+        assert!(seen.iter().any(|e| matches!(e, Event::Notice { .. })), "said: {seen:?}");
         drop(pool);
         let _ = std::fs::remove_dir_all(store.root());
     }

@@ -419,6 +419,35 @@ pub fn registry() -> Registry {
             Ok(json!({"messages": s.prefs.keep_messages, "offline": s.prefs.keep_offline}))
         })
         .params(r#"{"messages"?: number (the newest of each folder kept; 0: all), "offline"?: number (of those, the newest downloaded in full)}"#),
+        CommandSpec::new("account.connections", "Connections", "File › Options › Mail", |s, v| {
+            let mut c = s.prefs.connections;
+            if let Some(n) = p::u64(v, "requests") {
+                c.requests = u32::try_from(n).unwrap_or(u32::MAX);
+            }
+            if let Some(on) = p::bool(v, "second") {
+                c.second = on;
+            }
+            if let Some(n) = p::u64(v, "checkMinutes") {
+                c.check_minutes = u32::try_from(n).unwrap_or(u32::MAX);
+            }
+            if let Some(n) = p::u64(v, "syncAllMinutes") {
+                c.sync_all_minutes = u32::try_from(n).unwrap_or(u32::MAX);
+            }
+            let c = c.clamped();
+            if c != s.prefs.connections {
+                s.prefs.connections = c;
+                s.apply_sync_prefs();
+            }
+            Ok(json!({"requests": c.requests, "second": c.second, "checkMinutes": c.check_minutes, "syncAllMinutes": c.sync_all_minutes}))
+        })
+        .params(
+            r#"{"requests"?: number (sent at once to Microsoft 365, 1 to 20; default 4), "second"?: bool (a connection of its own for sending), "checkMinutes"?: number (for new mail where the server can't say at once, 1 to 60), "syncAllMinutes"?: number (every folder, 5 to 1440)}"#,
+        ),
+        CommandSpec::new("app.detailedLog", "Detailed log", "File › Options › Advanced", |s, v| {
+            s.prefs.detailed_log = p::bool(v, "on").unwrap_or(!s.prefs.detailed_log);
+            Ok(json!({"on": s.prefs.detailed_log}))
+        })
+        .params(r#"{"on"?: bool (every request and folder read in mailcraft.log; default: the other way)}"#),
         CommandSpec::new("note.arrange", "Arrange notes", "Notes › Arrange by", |s, v| {
             s.prefs.notes_order = match p::req_str(v, "by")? {
                 "modified" => crate::session::NotesOrder::Modified,

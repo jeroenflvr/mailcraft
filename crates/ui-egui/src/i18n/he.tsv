@@ -875,3 +875,14 @@ month	May	מאי
 	Search Folders	תיקיות חיפוש
 	Flagged mail from every folder but Deleted Items and Junk Email	דואר מסומן מכל התיקיות מלבד פריטים שנמחקו ודואר זבל
 	Flagged mail from every account's folders but Deleted Items and Junk Email	דואר מסומן מהתיקיות של כל החשבונות מלבד פריטים שנמחקו ודואר זבל
+	Connections	חיבורים
+	How each account uses its server. Fewer requests at once are slower but less often held up by a busy server.	איך כל חשבון משתמש בשרת שלו. פחות בקשות בו-זמנית איטי יותר, אבל שרת עמוס מעכב אותו בתדירות נמוכה יותר.
+	Requests at once (Microsoft 365)	בקשות בו-זמנית (Microsoft 365)
+	Send on a connection of its own	שליחה בחיבור נפרד
+	Check for new mail every	בדיקת דואר חדש כל
+	Where the server can't tell at once	כשהשרת לא מודיע מיד
+	Read every folder every	קריאת כל התיקיות כל
+	minutes	דקות
+	Troubleshooting	פתרון בעיות
+	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log, בתיקיית היישום של MailCraft, מתאר מה כל חשבון עשה. הוא אף פעם לא מכיל סיסמאות או את תוכן ההודעות.
+	Detailed log (every request to the server)	יומן מפורט (כל בקשה לשרת)

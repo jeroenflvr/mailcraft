@@ -2344,12 +2344,36 @@ fn how_much_mail_is_kept_is_a_setting() {
     s.jobs_push_for_test(Job::SyncAll { account: "sample".into() });
     s.run("account.keepMail", &json!({"messages": 0, "offline": 200})).unwrap();
     let jobs = s.take_jobs();
-    assert!(matches!(jobs.first(), Some(Job::SetSync { messages: 0, offline: 200 })), "{jobs:?}");
+    assert!(matches!(jobs.first(), Some(Job::SetSync { messages: 0, offline: 200, .. })), "{jobs:?}");
     s.run("account.keepMail", &json!({"messages": 5000})).unwrap();
     s.run("account.keepMail", &json!({"messages": 20000})).unwrap();
     let jobs = s.take_jobs();
     assert_eq!(jobs.iter().filter(|j| matches!(j, Job::SetSync { .. })).count(), 1, "the last one only");
-    assert!(matches!(jobs.first(), Some(Job::SetSync { messages: 20000, offline: 200 })));
+    assert!(matches!(jobs.first(), Some(Job::SetSync { messages: 20000, offline: 200, .. })));
+}
+
+/// How accounts use their servers is a setting too (requests at once, a second connection, how
+/// often to check), kept within sense and told to the network side; and the log can be detailed.
+#[test]
+fn how_accounts_use_their_servers_is_a_setting() {
+    let mut s = sample_session("connections");
+    assert_eq!(s.prefs.connections, mailcraft_model::Connections::default());
+    let r = s.run("account.connections", &json!({"requests": 99, "second": false, "checkMinutes": 0, "syncAllMinutes": 30})).unwrap();
+    assert_eq!(r, json!({"requests": 20, "second": false, "checkMinutes": 1, "syncAllMinutes": 30}));
+    let jobs = s.take_jobs();
+    assert!(
+        matches!(jobs.first(), Some(Job::SetSync { connections, .. }) if connections.requests == 20 && !connections.second && connections.check_minutes == 1),
+        "{jobs:?}"
+    );
+    // The same again: nothing to tell.
+    s.run("account.connections", &json!({"requests": 20})).unwrap();
+    assert!(!s.take_jobs().iter().any(|j| matches!(j, Job::SetSync { .. })));
+    // Kept with the preferences.
+    let back: crate::session::Prefs = serde_json::from_value(serde_json::to_value(&s.prefs).unwrap()).unwrap();
+    assert_eq!(back.connections.sync_all_minutes, 30);
+    assert!(!s.prefs.detailed_log);
+    assert_eq!(s.run("app.detailedLog", &json!({})).unwrap(), json!({"on": true}));
+    assert!(s.prefs.detailed_log);
 }
 
 /// Issue #1: an organisation's shared contacts (Exchange public folders) can be read, not

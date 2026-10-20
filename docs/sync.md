@@ -53,17 +53,27 @@ Message sources live next to it as `<validity>/<uid>.eml`. A message is identifi
   sync and a change isn't undone on screen by folders read before it's made.
 - Then **wait for mail**: `IDLE` on the Inbox (RFC 2177) in half-second slices, so new jobs interrupt
   it at once; re-issued every 10 minutes (servers drop IDLE after 30). Without IDLE, poll every 2
-  minutes. A full sync runs every 15 minutes.
+  minutes. A full sync runs every 15 minutes. Both are settings (File › Options › Connections,
+  `account.connections`).
+- **Connections per account:** the main one (syncing, changes, opened messages) and, unless turned
+  off, a second one for sending and automatic replies that connects when there's something to
+  send and lets go after 5 idle minutes. Graph keeps no connection open: each request is its own
+  HTTPS connection. A connection that replaces another (signing in again, a changed setting)
+  waits up to 30 s for the old one to stop, which it does at its next chance (a Graph wait ends
+  at once), so two never save the same cache.
 - **Failures:** a broken connection is retried with exponential back-off (5 s → 5 min). A refused
   password stops retrying and asks the user (`NeedsPassword`). A refused command is reported and
-  the cache is resynced.
+  the cache is resynced. A folder the server refuses is said, and the account is up to date again
+  after; a folder list it refuses is asked for again after a wait that grows (5 s → 5 min).
 
 ## Offline changes (RFC 4549 "pending actions")
 
 Flag changes, moves and deletes are applied to the cache immediately (the UI updates before the
 server answers) and recorded in `<account>/ops.json` the moment they're made: the pool adds them
-there before handing them to the account's connection, so quitting while it's busy (a sync can
-take a minute) doesn't lose them. When connected, the worker replays them oldest first, before
+there, and makes them in the cache, before handing them to the account's connection, so quitting
+while it's busy (a sync can take a minute) doesn't lose them. A folder sync saves the server's
+state, which doesn't have them yet: the changes still waiting go back on top of it before
+anything reads the folder, and again whenever a connection starts. When connected, the worker replays them oldest first, before
 reading anything from the server, and takes each off the list once the server has it:
 
 - flags: `UID STORE <set> +FLAGS.SILENT (…)` / `-FLAGS.SILENT`;
@@ -148,7 +158,8 @@ switched IMAP off.
 - **Changes** are `PATCH`es (`isRead`, `flag`: `flagged`, `complete` for the `$Completed`
   keyword, `notFlagged`), `move`, `DELETE` and folder calls, batched.
 - **Throttling:** Exchange Online runs at most 4 requests at once for an app on a mailbox, and
-  Graph runs a batch's requests side by side, so batches hold 4. A request turned away as too
+  Graph runs a batch's requests side by side, so batches hold 4 (a setting: requests at once, 1
+  to 20). A request turned away as too
   busy (429, or for a read 502–504, a gateway that gave up) goes again after the server's `Retry-After` (at most 30 s, five
   times), on its own or as the throttled part of a batch; only then does the account back off.
 - **Sending** posts the MIME source to `sendMail`, which files the copy in Sent Items; recipients
@@ -247,3 +258,13 @@ order over JMAP and `fetch`. New mail comes by push: the session's event stream 
 and the Inbox syncs once whenever the stream opens. Without push the Inbox is polled every two
 minutes; everything syncs every eight checks either way. Passwords stay in the tab; after a
 reload the account asks for its password again.
+
+## The log
+
+`mailcraft.log` in the app folder (the last run's is `mailcraft.old.log`) says what each account
+did: each status change once (connecting, up to date, an error), a line for each folder read
+that changed something or took over 5 s (what was new, changed and removed, how long), each change
+waiting for the server, made there (and how long it took) or refused, and when each connection
+starts and stops. The detailed log (File › Options › Troubleshooting, or `--log-level debug` /
+`MAILCRAFT_LOG=debug` for one run) adds every folder read and every Graph request (method, path
+without the query, status, time). Never a password, a token or what a message says.

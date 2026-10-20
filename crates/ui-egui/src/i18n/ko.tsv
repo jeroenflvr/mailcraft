@@ -879,3 +879,14 @@ folder	Archive	보관함
 
 # A month's full name, where it differs from its short form.
 month	May	5월
+	Connections	연결
+	How each account uses its server. Fewer requests at once are slower but less often held up by a busy server.	각 계정이 서버를 사용하는 방식입니다. 동시 요청 수를 줄이면 느려지지만 바쁜 서버 때문에 지연되는 일이 줄어듭니다.
+	Requests at once (Microsoft 365)	동시 요청 수 (Microsoft 365)
+	Send on a connection of its own	별도 연결로 보내기
+	Check for new mail every	새 메일 확인 간격
+	Where the server can't tell at once	서버가 바로 알려 주지 않을 때
+	Read every folder every	모든 폴더 읽기 간격
+	minutes	분
+	Troubleshooting	문제 해결
+	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	MailCraft 앱 폴더의 mailcraft.log에는 각 계정이 한 일이 기록됩니다. 암호나 메시지 내용은 절대 기록되지 않습니다.
+	Detailed log (every request to the server)	자세한 로그 (서버에 대한 모든 요청)

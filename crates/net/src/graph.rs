@@ -12,6 +12,9 @@
 //! Graph turns away as too busy (429) go again after the wait it asks for (`Retry-After`).
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use mailcraft_mime as mime;
 use mailcraft_model::{COMPLETED, Flag, Flags, Folder, FolderRole, MessageKey, Op, Summary, sort_newest_first, utf7};
@@ -29,8 +32,9 @@ pub const DEFAULT_URL: &str = "https://graph.microsoft.com/v1.0";
 const MAX_JSON: usize = 32 << 20;
 /// Largest message source downloaded.
 const MAX_MIME: usize = 64 << 20;
-/// Requests in one batch. Graph takes 20, but runs them side by side, and Exchange Online lets an
-/// app run only 4 requests at once on a mailbox: the rest would come back throttled (429).
+/// Requests in one batch unless the account says otherwise (File › Options › Connections). Graph
+/// takes 20, but runs them side by side, and Exchange Online lets an app run only 4 requests at
+/// once on a mailbox: the rest would come back throttled (429).
 const BATCH: usize = 4;
 /// Times a throttled request is sent again, waiting what the server asks (`Retry-After`).
 const RETRIES: u32 = 5;
@@ -59,6 +63,10 @@ const LIST_FIELDS: &str = "id,isRead,isDraft,flag,subject,from,sender,toRecipien
 pub struct Client {
     base: String,
     auth: String,
+    /// Requests in one JSON batch (the account's "requests at once").
+    at_once: usize,
+    /// Set when the account's connection is being let go: waits end and no request starts.
+    stop: Option<Arc<AtomicBool>>,
 }
 
 /// Turn an HTTP failure into the error the worker knows how to handle.
@@ -99,9 +107,9 @@ fn throttled(status: u16, method: &str) -> bool {
 
 /// How long to wait before the `attempt`th retry: what the server asked (seconds), or else
 /// 1, 2, 4… seconds; never more than [`MAX_WAIT_SECS`].
-fn retry_wait(retry_after: Option<&str>, attempt: u32) -> std::time::Duration {
+fn retry_wait(retry_after: Option<&str>, attempt: u32) -> Duration {
     let secs = retry_after.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(1u64 << attempt.min(5));
-    std::time::Duration::from_secs(secs.min(MAX_WAIT_SECS))
+    Duration::from_secs(secs.min(MAX_WAIT_SECS))
 }
 
 fn json_body(body: &[u8]) -> Result<Value> {
@@ -112,18 +120,58 @@ fn seg(id: &str) -> String {
     http::pct(id)
 }
 
-/// Send, and when Graph says it's too busy, wait as long as it asks and send again.
-fn send_patiently(r: &Request) -> Result<Response> {
-    let mut attempt = 0;
-    loop {
-        let resp = http::send(r)?;
-        if attempt >= RETRIES || !throttled(resp.status, &r.method) {
-            return Ok(resp);
+/// The path of a request, for the log: without the server or the query (ids are opaque).
+fn log_path(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let path = rest.find('/').and_then(|i| rest.get(i..)).unwrap_or(rest);
+    path.split('?').next().unwrap_or(path)
+}
+
+impl Client {
+    /// How many requests go at once, and the flag that tells this session to stop.
+    pub fn with_pacing(mut self, requests: usize, stop: Arc<AtomicBool>) -> Client {
+        self.at_once = requests.clamp(1, 20);
+        self.stop = Some(stop);
+        self
+    }
+
+    /// `Err` once the connection is being let go.
+    fn stopped(&self) -> Result<()> {
+        match &self.stop {
+            Some(s) if s.load(Ordering::Relaxed) => Err(NetError::Closed("the connection was let go".into())),
+            _ => Ok(()),
         }
-        let wait = retry_wait(resp.header("Retry-After"), attempt);
-        log::info!("Graph is busy (HTTP {}): asking again in {}s", resp.status, wait.as_secs());
-        std::thread::sleep(wait);
-        attempt += 1;
+    }
+
+    /// Wait (Graph asked to), ending early when the connection is let go.
+    fn nap(&self, wait: Duration) -> Result<()> {
+        let end = Instant::now() + wait;
+        loop {
+            self.stopped()?;
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(());
+            }
+            std::thread::sleep(left.min(Duration::from_millis(250)));
+        }
+    }
+
+    /// Send, and when Graph says it's too busy, wait as long as it asks and send again.
+    fn send_patiently(&self, r: &Request) -> Result<Response> {
+        let mut attempt = 0;
+        loop {
+            self.stopped()?;
+            let began = Instant::now();
+            let resp = http::send(r)?;
+            log::debug!("Graph {} {}: HTTP {} in {} ms", r.method, log_path(&r.url), resp.status, began.elapsed().as_millis());
+            if attempt >= RETRIES || !throttled(resp.status, &r.method) {
+                return Ok(resp);
+            }
+            let wait = retry_wait(resp.header("Retry-After"), attempt);
+            log::info!("Graph is busy (HTTP {}): asking again in {}s", resp.status, wait.as_secs());
+            self.nap(wait)?;
+            attempt += 1;
+        }
     }
 }
 
@@ -135,14 +183,14 @@ impl Client {
         if !url.https && !matches!(url.host.as_str(), "127.0.0.1" | "localhost") {
             return Err(NetError::Tls("the Graph address isn't https".into()));
         }
-        let c = Client { base, auth: format!("Bearer {token}") };
+        let c = Client { base, at_once: BATCH, stop: None, auth: format!("Bearer {token}") };
         c.get("/me/mailFolders/inbox?$select=id")?;
         Ok(c)
     }
 
     fn request(&self, mut r: Request) -> Result<Value> {
         r = r.header("Authorization", &self.auth).header("Accept", "application/json").header("Prefer", PREFER);
-        let resp = send_patiently(&r)?;
+        let resp = self.send_patiently(&r)?;
         check(&resp)?;
         if resp.body.iter().all(u8::is_ascii_whitespace) {
             return Ok(Value::Null);
@@ -202,7 +250,7 @@ impl Client {
     /// turns away as too busy go again, after the wait it asks for.
     fn batch(&self, requests: &[(&str, String, Option<Value>)]) -> Result<Vec<(u16, Value)>> {
         let mut out = Vec::with_capacity(requests.len());
-        for (n, chunk) in requests.chunks(BATCH).enumerate() {
+        for (n, chunk) in requests.chunks(self.at_once.max(1)).enumerate() {
             let mut answers: Vec<Option<(u16, Value)>> = vec![None; chunk.len()];
             let mut pending: Vec<usize> = (0..chunk.len()).collect();
             for attempt in 0..=RETRIES {
@@ -222,7 +270,7 @@ impl Client {
                 let v = self.post("/$batch", &json!({ "requests": reqs }))?;
                 let got = v.get("responses").and_then(Value::as_array).cloned().unwrap_or_default();
                 let mut again = Vec::new();
-                let mut wait = std::time::Duration::ZERO;
+                let mut wait = Duration::ZERO;
                 for &i in &pending {
                     let id = (i + 1).to_string();
                     let a = got.iter().find(|a| a.get("id").and_then(Value::as_str) == Some(id.as_str()));
@@ -251,7 +299,7 @@ impl Client {
                     break;
                 }
                 log::info!("Graph is busy: asking again for {} of a batch in {}s", again.len(), wait.as_secs());
-                std::thread::sleep(wait);
+                self.nap(wait)?;
                 pending = again;
             }
             for a in answers {
@@ -348,7 +396,7 @@ impl Client {
         let r = Request::get(&format!("{}/me/messages/{}/$value", self.base, seg(id)), MAX_MIME)
             .header("Authorization", &self.auth)
             .header("Prefer", "IdType=\"ImmutableId\"");
-        let resp = send_patiently(&r)?;
+        let resp = self.send_patiently(&r)?;
         check(&resp)?;
         Ok(resp.body)
     }
@@ -661,7 +709,13 @@ pub fn fetch_body(c: &Client, st: &State, store: &Store, key: &MessageKey) -> Re
 /// Apply one change on the server.
 pub fn apply_remote(c: &Client, st: &State, op: &Op) -> Result<()> {
     let ids = |keys: &[MessageKey]| -> Vec<(String, String)> {
-        keys.iter().filter(|k| k.validity == VALIDITY).filter_map(|k| Some((st.id(k.uid)?.to_string(), k.folder.clone()))).collect()
+        let found: Vec<(String, String)> =
+            keys.iter().filter(|k| k.validity == VALIDITY).filter_map(|k| Some((st.id(k.uid)?.to_string(), k.folder.clone()))).collect();
+        if found.len() < keys.len() {
+            // Not made on the server for those: the next sync shows the server's state again.
+            log::warn!("Graph: {} of {} messages have no Graph id here; the change isn't made for them", keys.len() - found.len(), keys.len());
+        }
+        found
     };
     let patch_all = |keys: &[MessageKey], patch: Value| -> Result<()> {
         let reqs: Vec<(&str, String, Option<Value>)> =

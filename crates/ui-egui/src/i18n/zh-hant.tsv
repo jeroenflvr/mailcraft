@@ -879,3 +879,14 @@ folder	Archive	封存
 
 # A month's full name, where it differs from its short form.
 month	May	5月
+	Connections	連線
+	How each account uses its server. Fewer requests at once are slower but less often held up by a busy server.	每個帳戶如何使用其伺服器。同時發出的要求越少越慢，但較少被忙碌的伺服器拖住。
+	Requests at once (Microsoft 365)	同時要求數 (Microsoft 365)
+	Send on a connection of its own	使用獨立的連線傳送
+	Check for new mail every	檢查新郵件的間隔
+	Where the server can't tell at once	伺服器無法立即通知時
+	Read every folder every	讀取所有資料夾的間隔
+	minutes	分鐘
+	Troubleshooting	疑難排解
+	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	MailCraft 應用程式資料夾中的 mailcraft.log 記錄每個帳戶做了什麼。它從不包含密碼或郵件內容。
+	Detailed log (every request to the server)	詳細記錄 (傳往伺服器的每個要求)

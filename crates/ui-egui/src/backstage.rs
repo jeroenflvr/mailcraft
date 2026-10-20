@@ -698,6 +698,47 @@ fn options(s: &Session, st: &UiState, ui: &mut Ui, acts: &mut Vec<Action>) {
         },
     );
 
+    // How each account uses its server; most never need changing.
+    let c = s.prefs.connections;
+    group(
+        ui,
+        tl!("Connections"),
+        Some(tl!("How each account uses its server. Fewer requests at once are slower but less often held up by a busy server.")),
+        &mut |ui| {
+            setting(ui, true, tl!("Requests at once (Microsoft 365)"), None, &mut |ui| {
+                let mut n = c.requests;
+                let max = mailcraft_engine::model::Connections::MAX_REQUESTS;
+                if ui.add(egui::DragValue::new(&mut n).range(1..=max).speed(0.1)).changed() {
+                    acts.push(Action::Run("account.connections", json!({"requests": n})));
+                }
+            });
+            setting(ui, false, tl!("Send on a connection of its own"), None, &mut |ui| {
+                let mut on = c.second;
+                if widgets::switch(ui, &t, &mut on, tl!("Send on a connection of its own")).changed() {
+                    acts.push(Action::Run("account.connections", json!({"second": on})));
+                }
+            });
+            setting(ui, false, tl!("Check for new mail every"), Some(tl!("Where the server can't tell at once")), &mut |ui| {
+                ui.horizontal(|ui| {
+                    let mut n = c.check_minutes;
+                    if ui.add(egui::DragValue::new(&mut n).range(1..=60).speed(0.1)).changed() {
+                        acts.push(Action::Run("account.connections", json!({"checkMinutes": n})));
+                    }
+                    ui.label(tl!("minutes"));
+                });
+            });
+            setting(ui, false, tl!("Read every folder every"), None, &mut |ui| {
+                ui.horizontal(|ui| {
+                    let mut n = c.sync_all_minutes;
+                    if ui.add(egui::DragValue::new(&mut n).range(5..=1440).speed(0.5)).changed() {
+                        acts.push(Action::Run("account.connections", json!({"syncAllMinutes": n})));
+                    }
+                    ui.label(tl!("minutes"));
+                });
+            });
+        },
+    );
+
     group(ui, tl!("Inbox and notifications"), None, &mut |ui| {
         setting(ui, true, tl!("Show a desktop notification when new mail arrives"), None, &mut |ui| {
             switch(ui, s.prefs.notify, tl!("Show a desktop notification when new mail arrives"), "view.notifications", acts);
@@ -724,6 +765,17 @@ fn options(s: &Session, st: &UiState, ui: &mut Ui, acts: &mut Vec<Action>) {
             });
         }
     });
+
+    group(
+        ui,
+        tl!("Troubleshooting"),
+        Some(tl!("mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.")),
+        &mut |ui| {
+            setting(ui, true, tl!("Detailed log (every request to the server)"), None, &mut |ui| {
+                switch(ui, s.prefs.detailed_log, tl!("Detailed log (every request to the server)"), "app.detailedLog", acts);
+            });
+        },
+    );
 }
 
 fn about(t: &Tokens, ui: &mut Ui, acts: &mut Vec<Action>) {

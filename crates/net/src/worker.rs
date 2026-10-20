@@ -7,13 +7,14 @@
 //! password stops retrying until the user enters a new one.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mailcraft_model::job::Secret;
-use mailcraft_model::{AccountConfig, Event, Flag, Folder, FolderRole, Job, MessageKey, Op, SyncStatus, sort_folders};
+use mailcraft_model::{AccountConfig, Connections, Event, Flag, Folder, FolderRole, Job, MessageKey, Op, SyncStatus, sort_folders};
 use mailcraft_store::{OutboxItem, Store};
 
 use crate::imap::{Client, uid_set};
@@ -75,6 +76,11 @@ struct Handle {
     quick_thread: Option<JoinHandle<()>>,
     /// The account's changes still to make on the server, shared with its main connection.
     ops: Pending,
+    /// Set when the account's connections are let go: they stop at the next chance (a Graph
+    /// wait ends at once) rather than finishing a sync.
+    stop: Arc<AtomicBool>,
+    /// Which start of the account this is, for the log.
+    generation: u64,
 }
 
 /// Changes still to make on the server, oldest first (RFC 4549's pending actions), kept in
@@ -134,7 +140,12 @@ pub struct Pool {
     fetcher: Option<Sender<String>>,
     /// Working offline: no account connects until it's turned off.
     offline: bool,
+    /// How accounts use their servers (requests at once, a second connection, how often).
+    pub connections: Connections,
 }
+
+/// Workers started so far, numbering them in the log.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Drafts that couldn't be saved to the server (offline, or it failed), kept with the account
 /// until it connects again.
@@ -192,6 +203,7 @@ impl Pool {
             sieve_port: crate::sieve::PORT,
             fetcher: None,
             offline: false,
+            connections: Connections::default(),
         }
     }
 
@@ -339,11 +351,20 @@ impl Pool {
             }
             Job::ImportPst { account, path } => self.import_pst(account, path),
             Job::ExportPst { account, path, name } => self.export_pst(account, path, name),
-            Job::SetSync { messages, offline } => {
+            Job::SetSync { messages, offline, connections } => {
                 let opts =
                     SyncOptions { window: if messages == 0 { usize::MAX } else { messages as usize }, prefetch: offline as usize, ..self.opts };
-                if opts.window != self.opts.window || opts.prefetch != self.opts.prefetch {
+                let connections = connections.clamped();
+                if opts.window != self.opts.window || opts.prefetch != self.opts.prefetch || connections != self.connections {
+                    log::info!(
+                        "sync settings: {messages} messages a folder, {offline} downloaded; {} requests at once, second connection {}, new mail every {} min, every folder every {} min",
+                        connections.requests,
+                        if connections.second { "on" } else { "off" },
+                        connections.check_minutes,
+                        connections.sync_all_minutes
+                    );
                     self.opts = opts;
+                    self.connections = connections;
                     // Connected accounts start again with it (a rare change, from Options).
                     let running: Vec<AccountConfig> = self.workers.keys().filter_map(|id| self.configs.get(id).cloned()).collect();
                     for c in running {
@@ -441,6 +462,7 @@ impl Pool {
             other => {
                 let id = other.account().to_string();
                 let quick = self.configs.get(&id).is_some_and(|c| quick_job(&other, c));
+                let pop = self.configs.get(&id).is_some_and(|c| c.pop.is_some());
                 match self.workers.get(&id) {
                     Some(h) => {
                         // Kept now, not when the connection gets to it (a sync can take a minute):
@@ -451,6 +473,18 @@ impl Pool {
                             if let Err(e) = self.store.save_ops(&id, &ops) {
                                 self.sink.emit(Event::Notice { account: id.clone(), message: e.to_string() });
                             }
+                            let waiting = ops.len();
+                            drop(ops);
+                            // And in the cache at once: reading a folder from it meanwhile (or
+                            // after quitting) shows the change, not the server's state before it.
+                            // POP moves are the connection's to make (they file a copy).
+                            if op.is_message_op()
+                                && !pop
+                                && let Err(e) = self.store.apply_op(&id, op)
+                            {
+                                log::warn!("{id}: the change couldn't be kept in the cache: {e}");
+                            }
+                            log::info!("{id}: change waiting for the server: {} ({waiting} waiting)", op.describe());
                         }
                         // Sending and automatic replies go on the second connection; if it has
                         // stopped, the main one does it (after its sync).
@@ -485,7 +519,7 @@ impl Pool {
     }
 
     fn start(&mut self, account: AccountConfig, password: Option<Secret>) {
-        self.stop(&account.id);
+        let previous = self.release(&account.id);
         if let Some(p) = &password
             && let Err(e) = self.creds.set(&account, &p.0)
         {
@@ -494,45 +528,72 @@ impl Pool {
         let pw = password.map(|p| p.0).or_else(|| self.creds.get(&account));
         let Some(pw) = pw else {
             self.sink.emit(Event::Status { account: account.id.clone(), status: SyncStatus::NeedsPassword { error: String::new() } });
+            Self::forget(previous);
             return;
         };
+        let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+        let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         let auth = Auth::shared(pw);
         let mut w = Worker::new(account.clone(), auth.clone(), self.store.clone(), self.sink.clone(), self.opts);
         w.creds = Some(self.creds.clone());
         w.sieve_port = self.sieve_port;
+        w.connections = self.connections;
+        w.stop = stop.clone();
+        w.generation = generation;
         // The second connection: quiet (the account's status is the main one's), connecting
-        // only when there's something to do.
-        let (qtx, qrx) = mpsc::channel();
-        let mut q = Worker::new(account.clone(), auth, self.store.clone(), self.sink.clone(), self.opts);
-        q.creds = Some(self.creds.clone());
-        q.sieve_port = self.sieve_port;
-        q.main = Some(tx.clone());
-        let quick_thread = std::thread::Builder::new().name(format!("mail-{}-quick", account.id)).spawn(move || q.run_quick(qrx)).ok();
-        let quick = quick_thread.is_some().then_some(qtx);
+        // only when there's something to do. Turned off, the main one sends too.
+        let (quick, quick_thread) = if self.connections.second {
+            let (qtx, qrx) = mpsc::channel();
+            let mut q = Worker::new(account.clone(), auth, self.store.clone(), self.sink.clone(), self.opts);
+            q.creds = Some(self.creds.clone());
+            q.sieve_port = self.sieve_port;
+            q.main = Some(tx.clone());
+            q.connections = self.connections;
+            q.stop = stop.clone();
+            q.generation = generation;
+            let t = std::thread::Builder::new().name(format!("mail-{}-quick", account.id)).spawn(move || q.run_quick(qrx)).ok();
+            (t.is_some().then_some(qtx), t)
+        } else {
+            (None, None)
+        };
+        // The connections this one replaces finish first: two at once would save older state
+        // over newer.
+        w.previous = previous;
         let name = format!("mail-{}", account.id);
         let ops = w.ops.clone();
         match std::thread::Builder::new().name(name).spawn(move || w.run(rx)) {
             Ok(thread) => {
-                self.workers.insert(account.id.clone(), Handle { tx, thread: Some(thread), quick, quick_thread, ops });
+                self.workers.insert(account.id.clone(), Handle { tx, thread: Some(thread), quick, quick_thread, ops, stop, generation });
             }
             Err(e) => self.sink.emit(Event::Status { account: account.id.clone(), status: SyncStatus::Error { error: e.to_string() } }),
         }
         self.configs.insert(account.id.clone(), account);
     }
 
-    fn stop(&mut self, account: &str) {
-        if let Some(mut h) = self.workers.remove(account) {
-            drop(h.tx);
-            drop(h.quick.take());
-            // The thread notices the closed channel within half a second (IDLE slices); don't
-            // block the UI waiting for a slow network call to finish.
-            for t in [h.thread.take(), h.quick_thread.take()].into_iter().flatten() {
-                std::thread::spawn(move || {
-                    let _ = t.join();
-                });
-            }
+    /// Tell an account's connections to stop, and hand back their threads.
+    fn release(&mut self, account: &str) -> Vec<JoinHandle<()>> {
+        let Some(mut h) = self.workers.remove(account) else { return Vec::new() };
+        log::info!("{account}: letting go of connection {}", h.generation);
+        h.stop.store(true, Ordering::Relaxed);
+        drop(h.tx);
+        drop(h.quick.take());
+        [h.thread.take(), h.quick_thread.take()].into_iter().flatten().collect()
+    }
+
+    /// The threads notice within half a second (IDLE slices, Graph waits); don't block the UI
+    /// waiting for a slow network call to finish.
+    fn forget(threads: Vec<JoinHandle<()>>) {
+        for t in threads {
+            std::thread::spawn(move || {
+                let _ = t.join();
+            });
         }
+    }
+
+    fn stop(&mut self, account: &str) {
+        let threads = self.release(account);
+        Self::forget(threads);
     }
 
     pub fn shutdown(&mut self) {
@@ -552,9 +613,11 @@ impl Drop for Pool {
 /// Largest picture downloaded for a message.
 const MAX_PICTURE: usize = 8 << 20;
 
-const FULL_SYNC_EVERY: Duration = Duration::from_secs(15 * 60);
 const IDLE_FOR: Duration = Duration::from_secs(10 * 60);
-const POLL_EVERY: Duration = Duration::from_secs(120);
+/// How long a new connection waits for the one it replaces to finish.
+const REPLACED_WAIT: Duration = Duration::from_secs(30);
+/// A folder sync that took longer than this is logged even when nothing changed.
+const SLOW_SYNC: Duration = Duration::from_secs(5);
 /// When Sent Items is read again after Graph or Exchange took a message (its copy is filed a
 /// moment later), and once more in case that was too soon.
 const SENT_SOON: Duration = Duration::from_secs(3);
@@ -605,6 +668,19 @@ struct Worker {
     /// Folders to look at again soon: Graph and Exchange file a sent message's copy a moment
     /// after taking it, so Sent Items is read again then rather than at the next poll.
     soon: Vec<(Instant, String)>,
+    /// Requests at once, a second connection, how often to check.
+    connections: Connections,
+    /// Set by the pool when this connection is let go.
+    stop: Arc<AtomicBool>,
+    /// Which start of the account this is, for the log.
+    generation: u64,
+    /// The connections this one replaces, waited for before connecting.
+    previous: Vec<JoinHandle<()>>,
+    /// The last status logged (each change is logged once).
+    logged: std::cell::Cell<Option<std::mem::Discriminant<SyncStatus>>>,
+    /// The wait before trying again after the folder list couldn't be read (not reset by
+    /// connecting, only by a whole sync going through).
+    relist_backoff: Duration,
 }
 
 impl Worker {
@@ -634,7 +710,28 @@ impl Worker {
             no_push: false,
             pushed: false,
             soon: Vec::new(),
+            connections: Connections::default(),
+            stop: Arc::new(AtomicBool::new(false)),
+            generation: 0,
+            previous: Vec::new(),
+            logged: std::cell::Cell::new(None),
+            relist_backoff: Duration::from_secs(5),
         }
+    }
+
+    /// Minutes between checks for new mail where the server can't say at once.
+    fn poll_every(&self) -> Duration {
+        Duration::from_secs(u64::from(self.connections.check_minutes.max(1)) * 60)
+    }
+
+    /// Minutes between reads of every folder.
+    fn full_sync_every(&self) -> Duration {
+        Duration::from_secs(u64::from(self.connections.sync_all_minutes.max(1)) * 60)
+    }
+
+    /// The pool let go of this connection.
+    fn stopping(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
     }
 
     /// What to sign in with: the password, or for OAuth accounts a current access token
@@ -677,13 +774,21 @@ impl Worker {
     }
 
     fn status(&self, status: SyncStatus) {
-        // The second connection's comings and goings aren't the account's.
-        if self.main.is_none() {
+        // The second connection's comings and goings aren't the account's; nor are those of a
+        // connection let go (the pool said Offline, or a new connection has the account).
+        if self.main.is_none() && !self.stopping() {
+            let kind = std::mem::discriminant(&status);
+            let changed = self.logged.replace(Some(kind)) != Some(kind);
+            let id = &self.acc.id;
             match &status {
-                SyncStatus::Error { error } => log::warn!("{}: {error}", self.acc.id),
-                SyncStatus::NeedsPassword { error } => log::warn!("{}: needs signing in again: {error}", self.acc.id),
-                SyncStatus::Online { .. } | SyncStatus::Syncing { .. } => {}
-                s => log::info!("{}: {s:?}", self.acc.id),
+                SyncStatus::Error { error } => log::warn!("{id}: {error}"),
+                SyncStatus::NeedsPassword { error } => log::warn!("{id}: needs signing in again: {error}"),
+                // Each folder has a line of its own when it's done.
+                SyncStatus::Syncing { folder } => log::debug!("{id}: reading {folder}"),
+                SyncStatus::Online { .. } if changed => log::info!("{id}: up to date"),
+                SyncStatus::Online { .. } => {}
+                s if changed => log::info!("{id}: {s:?}"),
+                _ => {}
             }
             self.sink.emit(Event::Status { account: self.id(), status });
         }
@@ -708,9 +813,16 @@ impl Worker {
 
     fn run(mut self, rx: Receiver<Job>) {
         self.status(SyncStatus::Connecting);
-        while !self.closed {
+        self.wait_for_previous();
+        log::info!("{}: connection {} started", self.acc.id, self.generation);
+        // Changes still waiting for the server, kept over what the cache has (it may predate
+        // them: an older version, or quitting at the wrong moment).
+        for folder in self.keep_pending(None) {
+            self.sink.emit(Event::FolderChanged { account: self.id(), folder });
+        }
+        while !self.closed && !self.stopping() {
             self.drain(&rx);
-            if self.closed {
+            if self.closed || self.stopping() {
                 break;
             }
             if let Some(job) = self.queue.pop_front() {
@@ -737,7 +849,7 @@ impl Worker {
                 self.connect_and_sync();
                 continue;
             }
-            if self.last_full.is_none_or(|t| t.elapsed() >= FULL_SYNC_EVERY) {
+            if self.last_full.is_none_or(|t| t.elapsed() >= self.full_sync_every()) {
                 self.sync_all(&rx);
                 continue;
             }
@@ -746,6 +858,49 @@ impl Worker {
         if let Some(Conn::Imap(c)) = self.conn.as_mut() {
             c.logout();
         }
+        log::info!("{}: connection {} stopped", self.acc.id, self.generation);
+    }
+
+    /// Wait (a while, not for good) for the connections this one replaces to finish.
+    fn wait_for_previous(&mut self) {
+        let end = Instant::now() + REPLACED_WAIT;
+        for t in std::mem::take(&mut self.previous) {
+            while !t.is_finished() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if t.is_finished() {
+                let _ = t.join();
+            } else {
+                log::warn!("{}: the connection replaced is still busy after {} s; starting anyway", self.acc.id, REPLACED_WAIT.as_secs());
+            }
+        }
+    }
+
+    /// Make the changes still waiting for the server in the cache again (all of them, or those
+    /// touching `folder`): a sync reads the server's state, which doesn't have them yet
+    /// (RFC 4549). The folders changed.
+    fn keep_pending(&self, folder: Option<&str>) -> Vec<String> {
+        if self.acc.pop.is_some() {
+            return Vec::new();
+        }
+        let ops: Vec<Op> = pending(&self.ops)
+            .iter()
+            .filter(|op| op.is_message_op() && folder.is_none_or(|f| op.keys().iter().any(|k| k.folder == f)))
+            .cloned()
+            .collect();
+        let mut changed = Vec::new();
+        for op in &ops {
+            match self.store.apply_op(&self.acc.id, op) {
+                Ok(c) => changed.extend(c),
+                Err(e) => log::warn!("{}: a waiting change couldn't be kept in the cache: {e}", self.acc.id),
+            }
+        }
+        if !ops.is_empty() {
+            log::debug!("{}: {} waiting change(s) kept over what the server said", self.acc.id, ops.len());
+        }
+        changed.sort();
+        changed.dedup();
+        changed
     }
 
     /// The account's second connection: sends mail and reads or changes the automatic replies,
@@ -861,7 +1016,8 @@ impl Worker {
         let idle = matches!(&self.conn, Some(Conn::Imap(c)) if c.has("IDLE"));
         if !idle || inbox.is_none() {
             let next_soon = self.soon.iter().map(|(at, _)| *at).min();
-            let wait = next_soon.map_or(POLL_EVERY, |at| at.saturating_duration_since(Instant::now()).min(POLL_EVERY));
+            let every = self.poll_every();
+            let wait = next_soon.map_or(every, |at| at.saturating_duration_since(Instant::now()).min(every));
             match rx.recv_timeout(wait) {
                 Ok(j) => push_job(&mut self.queue, j),
                 Err(RecvTimeoutError::Disconnected) => self.closed = true,
@@ -891,7 +1047,11 @@ impl Worker {
             }
             let queue = &mut self.queue;
             let closed = &mut self.closed;
+            let stop = self.stop.clone();
             c.idle(IDLE_FOR, || {
+                if stop.load(Ordering::Relaxed) {
+                    *closed = true;
+                }
                 loop {
                     match rx.try_recv() {
                         Ok(j) => push_job(queue, j),
@@ -945,7 +1105,7 @@ impl Worker {
         let mut changed = false;
         while Instant::now() < end && !changed {
             self.drain(rx);
-            if self.closed || !self.queue.is_empty() {
+            if self.closed || self.stopping() || !self.queue.is_empty() {
                 return true;
             }
             match es.next(Duration::from_millis(500)) {
@@ -971,7 +1131,23 @@ impl Worker {
 
     /// Note a failure; drop the connection when it is unusable.
     fn failed(&mut self, e: NetError) {
-        log::warn!("{}: {e}", self.acc.id);
+        self.failed_in("", e);
+    }
+
+    /// [`Worker::failed`], saying in the log what was being done (a folder's name, "sending"…).
+    fn failed_in(&mut self, what: &str, e: NetError) {
+        // Let go: whatever failed failed because of that.
+        if self.stopping() {
+            log::debug!("{}: {what}: stopped: {e}", self.acc.id);
+            self.conn = None;
+            return;
+        }
+        let kind = if e.is_fatal() { "connection lost" } else { "refused" };
+        if what.is_empty() {
+            log::warn!("{}: {kind}: {e}", self.acc.id);
+        } else {
+            log::warn!("{}: {what}: {kind}: {e}", self.acc.id);
+        }
         match e {
             // Microsoft took the token but won't open the mailbox: nothing to retry until changed.
             NetError::Auth(m) | NetError::Bad(m) | NetError::No(m)
@@ -1010,7 +1186,8 @@ impl Worker {
         let secret = self.secret()?;
         let user = if self.acc.username.is_empty() { self.acc.email.clone() } else { self.acc.username.clone() };
         if let Some(url) = &self.acc.graph {
-            self.conn = Some(Conn::Graph(crate::graph::Client::connect(url, &secret)?));
+            let c = crate::graph::Client::connect(url, &secret)?.with_pacing(self.connections.requests as usize, self.stop.clone());
+            self.conn = Some(Conn::Graph(c));
             self.backoff = Duration::from_secs(5);
             return Ok(());
         }
@@ -1100,6 +1277,19 @@ impl Worker {
         }
     }
 
+    /// Something every sync needs failed though the connection works (the folder list): let go
+    /// and try again after a wait that grows each time, rather than at once and for good.
+    fn retry_later(&mut self, what: &str) {
+        let wait = self.relist_backoff;
+        self.relist_backoff = (wait * 2).min(Duration::from_secs(300));
+        if let Some(Conn::Imap(c)) = self.conn.as_mut() {
+            c.logout();
+        }
+        self.conn = None;
+        self.next_attempt = Instant::now() + wait;
+        self.status(SyncStatus::Error { error: format!("{what} failed; trying again in {} s", wait.as_secs()) });
+    }
+
     fn connect_and_sync(&mut self) {
         if let Err(e) = self.connect() {
             self.connect_failed(e);
@@ -1179,7 +1369,13 @@ impl Worker {
 
     fn sync_all(&mut self, rx: &Receiver<Job>) {
         let began = Instant::now();
+        log::debug!("{}: reading every folder", self.acc.id);
         if !self.relist() {
+            // Refused rather than cut off: without a folder list there's no sync, and asking
+            // again at once looped (showing "Updating…" for good).
+            if self.conn.is_some() {
+                self.retry_later("reading the folder list");
+            }
             return;
         }
         let paths: Vec<String> = self.folders.iter().filter(|f| f.selectable).map(|f| f.path.clone()).collect();
@@ -1192,7 +1388,7 @@ impl Worker {
             for j in urgent {
                 self.handle(j);
             }
-            if self.closed || self.conn.is_none() {
+            if self.closed || self.stopping() || self.conn.is_none() {
                 return;
             }
             self.sync_one(&path);
@@ -1206,6 +1402,7 @@ impl Worker {
             self.last_full = Some(Instant::now());
             // Anything left from a failed attempt gets another try every full sync.
             self.flush_outbox();
+            self.relist_backoff = Duration::from_secs(5);
             log::info!("{}: synced {} folders in {:.1} s", self.acc.id, self.folders.len(), began.elapsed().as_secs_f32());
             self.status(SyncStatus::Online { at: now() });
         }
@@ -1233,6 +1430,7 @@ impl Worker {
     }
 
     fn sync_one(&mut self, path: &str) {
+        let began = Instant::now();
         self.status(SyncStatus::Syncing { folder: path.to_string() });
         let (store, opts, id) = (self.store.clone(), self.opts, self.id());
         let result = match self.conn.as_mut() {
@@ -1265,6 +1463,32 @@ impl Worker {
             Some(Conn::Pop) => Ok(crate::pop::local_counts(&store, &id, path)),
             None => Err(NetError::Closed("not connected".into())),
         };
+        // What the sync saved is the server's state: changes still on their way there go back on
+        // top, before anything reads the folder (they were lost to the next start otherwise).
+        let kept = if result.is_ok() { self.keep_pending(Some(path)) } else { Vec::new() };
+        let took = began.elapsed();
+        match &result {
+            Ok(r) => {
+                let line = format!(
+                    "{}: {path}: read in {:.1} s ({} new, {} changed, {} removed{}; {} messages, {} unread){}",
+                    self.acc.id,
+                    took.as_secs_f32(),
+                    r.new,
+                    r.changed,
+                    r.removed,
+                    if r.reset { ", cache reset" } else { "" },
+                    r.total,
+                    r.unread,
+                    if kept.is_empty() { "" } else { "; waiting changes kept" }
+                );
+                if r.touched() || took >= SLOW_SYNC {
+                    log::info!("{line}");
+                } else {
+                    log::debug!("{line}");
+                }
+            }
+            Err(_) => log::debug!("{}: {path}: failed after {:.1} s", self.acc.id, took.as_secs_f32()),
+        }
         match result {
             Ok(r) => {
                 let first = self.folders.iter().find(|f| f.path == path).is_some_and(|f| f.total == 0 && r.total > 0);
@@ -1276,14 +1500,21 @@ impl Worker {
                         self.publish_folders();
                     }
                 }
-                if r.touched() || first {
+                if r.touched() || first || !kept.is_empty() {
                     self.sink.emit(Event::FolderChanged { account: id, folder: path.to_string() });
                 }
                 if self.last_full.is_some() {
                     self.status(SyncStatus::Online { at: now() });
                 }
             }
-            Err(e) => self.failed(e),
+            Err(e) => {
+                self.failed_in(path, e);
+                // Refused, not cut off (the connection still works): said as a notice, and the
+                // account is up to date otherwise. It stayed "Updating…" for good.
+                if self.conn.is_some() && self.last_full.is_some() {
+                    self.status(SyncStatus::Online { at: now() });
+                }
+            }
         }
     }
 
@@ -1567,6 +1798,8 @@ impl Worker {
         })();
         match r {
             Ok(raw) => {
+                // The download saved the folder's list again: changes waiting stay in it.
+                self.keep_pending(Some(&key.folder));
                 self.sink.emit(Event::Body { key: key.clone(), raw });
                 self.sink.emit(Event::FolderChanged { account: key.account.clone(), folder: key.folder.clone() });
             }
@@ -1746,6 +1979,7 @@ impl Worker {
         let trash = self.folders.iter().find(|f| f.role == FolderRole::Trash).map(|f| f.path.clone());
         loop {
             let Some(op) = pending(&self.ops).first().cloned() else { break };
+            let began = Instant::now();
             let r = match self.conn.as_mut() {
                 Some(Conn::Imap(c)) => apply_remote_with(c, &op, trash.as_deref()),
                 Some(Conn::Jmap(c)) => jmap::apply_remote(c, &self.jstate, &op),
@@ -1757,6 +1991,7 @@ impl Worker {
             };
             match r {
                 Ok(()) => {
+                    log::info!("{}: made on the server in {} ms: {}", self.acc.id, began.elapsed().as_millis(), op.describe());
                     match &op {
                         Op::Move { to, .. } => destinations.push(to.clone()),
                         Op::RenameFolder { to, .. } => {
@@ -1770,11 +2005,14 @@ impl Worker {
                     self.done_with(&op);
                 }
                 // Kept for the next connection.
-                Err(e) if e.is_fatal() => return self.failed(e),
+                Err(e) if e.is_fatal() => {
+                    log::info!("{}: kept for the next connection: {}", self.acc.id, op.describe());
+                    return self.failed_in("making a change on the server", e);
+                }
                 Err(e) => {
                     // The server refused: drop the change and resync so the cache matches the
                     // server again (forcing a full flag check).
-                    log::warn!("{}: a change was refused, so it's undone here: {e}", self.acc.id);
+                    log::warn!("{}: a change was refused, so it's undone here: {}: {e}", self.acc.id, op.describe());
                     self.done_with(&op);
                     let mut folders: Vec<String> = op.keys().iter().map(|k| k.folder.clone()).collect();
                     folders.dedup();
@@ -1974,6 +2212,62 @@ mod tests {
         assert!(seen.iter().any(|e| matches!(e, Event::Folders { folders, .. } if folders.len() == 1)));
         assert_eq!(store.load_folder("p1", "INBOX").unwrap().messages[0].key.account, "p1");
         let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// A sync reads the server's state, which doesn't have the changes still on their way there:
+    /// they stay in the cache over it (RFC 4549). Flagged here while the connection was busy, the
+    /// flag was gone after the next sync until the change reached the server, and for good if
+    /// the app quit before then.
+    #[test]
+    fn a_sync_keeps_changes_still_waiting_for_the_server() {
+        let mut d = crate::fake_graph::Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        let id = d.deliver(
+            &inbox,
+            b"From: zoe@contoso.example\r\nSubject: Contract\r\nMessage-ID: <c1@x>\r\n\r\nHello.\r\n",
+            true,
+            "2026-10-01T09:00:00Z",
+        );
+        let server = crate::fake_graph::serve(d);
+        let store = crate::fake::tests_store("worker-keeps-waiting");
+        let pool = Pool::new(store.clone(), Arc::new(MemoryCredentials::default()));
+        let acc = AccountConfig { id: "a1".into(), email: "me@contoso.example".into(), graph: Some(server.base.clone()), ..Default::default() };
+        let mut w = Worker::new(acc, Auth::shared(crate::fake_graph::TOKEN), store.clone(), pool.sink.clone(), SyncOptions::default());
+        w.connect().unwrap();
+        assert!(w.relist());
+        w.sync_one("INBOX");
+        let flagged = || store.load_folder("a1", "INBOX").unwrap().messages.first().is_some_and(|m| m.flags.flagged);
+        let key = store.load_folder("a1", "INBOX").unwrap().messages[0].key.clone();
+        assert!(!flagged());
+
+        // Flagged here; not made on the server yet (the connection hasn't got to it).
+        pending(&w.ops).push(Op::SetFlag { keys: vec![key], flag: Flag::Flagged, on: true });
+        w.sync_one("INBOX");
+        assert!(flagged(), "kept over what the server said");
+        assert!(server.data.lock().unwrap().message(&id).is_some_and(|m| !m.flagged), "the server doesn't have it yet");
+        // Once the server has it, nothing's waiting and the server's state is the cache's.
+        w.replay();
+        assert!(pending(&w.ops).is_empty());
+        assert!(server.data.lock().unwrap().message(&id).is_some_and(|m| m.flagged));
+        w.sync_one("INBOX");
+        assert!(flagged());
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// A connection the pool let go (Work offline, a new connection for the account) says nothing
+    /// of the failures that causes: its "Error" came after the pool's "Offline", and stayed.
+    #[test]
+    fn a_connection_let_go_says_nothing() {
+        let store = crate::fake::tests_store("let-go-quiet");
+        let pool = Pool::new(store.clone(), Arc::new(MemoryCredentials::default()));
+        let acc = AccountConfig { id: "a1".into(), ..Default::default() };
+        let mut w = Worker::new(acc, Auth::shared("pw"), store.clone(), pool.sink.clone(), SyncOptions::default());
+        w.stop.store(true, Ordering::Relaxed);
+        w.failed_in("INBOX", NetError::Closed("the connection was let go".into()));
+        w.status(SyncStatus::Connecting);
+        assert!(pool.poll().is_empty());
+        assert!(w.conn.is_none() && !w.auth_failed);
+        let _ = std::fs::remove_dir_all(store.root());
     }
 
     #[test]

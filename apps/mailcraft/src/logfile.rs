@@ -2,18 +2,32 @@
 //! servers' errors, its statuses, how long syncing took). `mailcraft.log` in the data folder:
 //! a new one each time MailCraft starts (the last run's renamed `mailcraft.old.log`), up to
 //! [`MAX`] a run. MailCraft's own lines from Info up, other
-//! libraries' warnings. Lines name accounts, folders and errors; never a message's content or a
-//! password (MailCraft doesn't log either anywhere).
+//! libraries' warnings. Detailed (File › Options › Troubleshooting, `--log-level debug` or
+//! `MAILCRAFT_LOG=debug`): MailCraft's Debug lines too (each request to a server, each folder
+//! read), up to [`MAX_DETAILED`]. Lines name accounts, folders and errors; never a message's
+//! content or a password (MailCraft doesn't log either anywhere).
 
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use log::{Level, LevelFilter, Metadata, Record};
 
 /// Most written in one run (the rest of the run goes unlogged, and says so).
 const MAX: u64 = 4 << 20;
+/// The same with the detailed log on.
+const MAX_DETAILED: u64 = 32 << 20;
+
+/// MailCraft's Debug lines are written.
+static DETAILED: AtomicBool = AtomicBool::new(false);
+/// Asked for at start-up (`--log-level debug`, `MAILCRAFT_LOG`): on whatever the setting says.
+static FORCED: AtomicBool = AtomicBool::new(false);
+
+fn most() -> u64 {
+    if DETAILED.load(Ordering::Relaxed) { MAX_DETAILED } else { MAX }
+}
 
 pub const NAME: &str = "mailcraft.log";
 const OLD: &str = "mailcraft.old.log";
@@ -32,7 +46,8 @@ impl FileLog {
         }
         let mut out = self.out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some((file, written)) = out.as_mut() else { return };
-        if *written >= MAX {
+        let max = most();
+        if *written >= max {
             return;
         }
         let bytes = line.as_bytes();
@@ -40,7 +55,7 @@ impl FileLog {
         *written = written.saturating_add(bytes.len() as u64);
         if !ok {
             *out = None;
-        } else if *written >= MAX {
+        } else if *written >= max {
             let _ = file.write_all(b"... the log is full: the rest of this run isn't written\n");
             let _ = file.flush();
         }
@@ -66,9 +81,25 @@ impl log::Log for FileLog {
     }
 }
 
-/// Whether a line is kept: MailCraft's from Info up, everyone else's warnings.
+/// Whether a line is kept: MailCraft's from Info up (Debug too when detailed), everyone else's
+/// warnings.
 fn enabled(target: &str, level: Level) -> bool {
-    if target.starts_with("mailcraft") { level <= Level::Info } else { level <= Level::Warn }
+    let own = if DETAILED.load(Ordering::Relaxed) { Level::Debug } else { Level::Info };
+    if target.starts_with("mailcraft") { level <= own } else { level <= Level::Warn }
+}
+
+/// Whether a level name asks for the detailed log (`debug`, `trace`).
+pub fn wants_detail(level: &str) -> bool {
+    matches!(level.trim().to_ascii_lowercase().as_str(), "debug" | "trace")
+}
+
+/// Follow the setting (on regardless when asked for at start-up); says when it changes.
+pub fn follow(setting: bool) {
+    let on = setting || FORCED.load(Ordering::Relaxed);
+    if DETAILED.swap(on, Ordering::Relaxed) != on {
+        log::set_max_level(if on { LevelFilter::Debug } else { LevelFilter::Info });
+        log::info!("detailed log {}", if on { "on" } else { "off" });
+    }
 }
 
 /// One line as written: when (UTC), how serious, where from, what (a message over several lines
@@ -88,8 +119,11 @@ fn stamp() -> String {
 }
 
 /// Start logging into `dir` (the previous run's log kept as the old one). Without a folder, or
-/// when the file can't be made, lines go to the terminal only if `echo`.
-pub fn start(dir: Option<&Path>, echo: bool) -> Option<PathBuf> {
+/// when the file can't be made, lines go to the terminal only if `echo`. `detailed`: the detailed
+/// log for this whole run.
+pub fn start(dir: Option<&Path>, echo: bool, detailed: bool) -> Option<PathBuf> {
+    FORCED.store(detailed, Ordering::Relaxed);
+    DETAILED.store(detailed, Ordering::Relaxed);
     let path = dir.map(|d| d.join(NAME));
     let file = path.as_ref().and_then(|p| {
         if let Some(d) = p.parent() {
@@ -101,7 +135,7 @@ pub fn start(dir: Option<&Path>, echo: bool) -> Option<PathBuf> {
     let opened = file.is_some();
     let logger: &'static FileLog = Box::leak(Box::new(FileLog { out: Mutex::new(file.map(|f| (f, 0))), echo }));
     if log::set_logger(logger).is_ok() {
-        log::set_max_level(LevelFilter::Info);
+        log::set_max_level(if detailed { LevelFilter::Debug } else { LevelFilter::Info });
     }
     path.filter(|_| opened)
 }
@@ -114,6 +148,7 @@ mod tests {
     fn lines_and_levels() {
         assert!(enabled("mailcraft_net::worker", Level::Info));
         assert!(!enabled("mailcraft_net::worker", Level::Debug));
+        assert!(wants_detail("debug") && wants_detail(" TRACE") && !wants_detail("info") && !wants_detail(""));
         assert!(!enabled("rustls::client", Level::Info));
         assert!(enabled("rustls::client", Level::Warn));
         assert_eq!(line("2026-10-19 14:03:07", Level::Warn, "x", "a\r\nb\n"), "2026-10-19 14:03:07 WARN  x: a\n    b\n");

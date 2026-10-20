@@ -1,7 +1,9 @@
 //! MailCraft desktop app.
 //!
-//! Usage: `mailcraft [--version] [--sample] [--data <folder>] [--light | --dark] [--cmd <id>[=<json>]]…`
+//! Usage: `mailcraft [--version] [--sample] [--data <folder>] [--light | --dark] [--log] [--log-level debug] [--cmd <id>[=<json>]]…`
 //!
+//! `--log` also writes the log to the terminal; `--log-level debug` (or `MAILCRAFT_LOG=debug`)
+//! makes it detailed for the run (every request to a server).
 //! `--sample` opens a separate, local-only sample mailbox (no server needed). `--data` (or the
 //! `MAILCRAFT_DATA` environment variable) chooses where mail is cached. `--cmd` runs engine
 //! commands at start-up (`--cmd 'list.open={"key":"sample:1:1:INBOX"}'`); `ui.file` (or
@@ -429,6 +431,7 @@ struct App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui);
+        logfile::follow(self.app.session.prefs.detailed_log);
         if let Some(path) = self.app.take_drag_out() {
             drag_out(frame, path);
         }
@@ -473,7 +476,8 @@ fn main() -> eframe::Result {
         (!sample).then(|| root.as_ref().map(|r| base.as_deref().map_or_else(|| r.join(location::FILES_FOLDER), location::files_dir))).flatten();
     // Diagnostics go to `mailcraft.log` in the data folder.
     let echo = cfg!(debug_assertions) || args.iter().any(|a| a == "--log");
-    if let Some(path) = logfile::start(root.as_deref(), echo) {
+    let level = args.iter().position(|a| a == "--log-level").and_then(|i| args.get(i + 1)).cloned().or_else(|| std::env::var("MAILCRAFT_LOG").ok());
+    if let Some(path) = logfile::start(root.as_deref(), echo, level.as_deref().is_some_and(logfile::wants_detail)) {
         log::info!("{} started; log at {}", version_line(), path.display());
     }
 

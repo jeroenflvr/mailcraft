@@ -320,7 +320,9 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   anywhere on a row takes it.
 - **A log file:** `mailcraft.log` in the data folder (the previous run's kept as
   `mailcraft.old.log`, at most 4 MB a run): accounts' statuses and errors, how long a sync took,
-  what a calendar or public folder said; never a message's content or a password.
+  what a calendar or public folder said; never a message's content or a password. A detailed log
+  (File › Options › Troubleshooting, `app.detailedLog`, or `--log-level debug` /
+  `MAILCRAFT_LOG=debug` for one run; up to 32 MB) adds every request to Graph and every folder read.
 - **French:** a value filled in at run time never comes straight after « de », « le », « que » or
   another word French elides before a vowel (« de Anna »); a test checks the catalog.
 - **Public folders on Exchange 2013 and later:** listing is routed to the account's hierarchy
@@ -460,6 +462,22 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   flagged → complete → cleared (→ flagged), its tip naming what the next click does; the
   message clicked decides for the whole selection, and Undo puts it back
   (`mail.flag {"cycle": true, "key"?}`). The ribbon's Flag still flags and unflags.
+- **A flag set, a sync, quitting: the flag was gone; and "Updating…" for good:** a change went
+  into `ops.json` at once but into the cache only when the account's connection got to it, and a
+  folder sync saved the server's state over the cache, so a folder read meanwhile (or the next
+  start) showed the change undone until the server had it. The pool now makes a change in the
+  cache as it's made, every folder sync (and every start) puts the changes still waiting back on
+  top (RFC 4549), and a connection that replaces another (signing in again, changing a setting)
+  waits for the old one to finish rather than saving older state over newer; a Graph change for
+  a message with no known id is logged rather than taken as made. A folder the server refused
+  left the account "Updating…" for good, and a folder list it refused was asked for again at once,
+  in a loop: the first is said and the account is up to date again, the second waits longer each
+  time (5 s to 5 min). **Connections** (File › Options, `account.connections`): requests sent at
+  once (Microsoft 365 batches, 4 by default, 1 to 20), a connection of its own for sending (on by
+  default; off, one connection per account), how often to check for new mail where the server
+  can't say (2 min) and to read every folder (15 min). The log says each status change once, a
+  line per folder read (what changed, how long), each change waiting, made or refused, and each
+  connection's start and stop.
 - **A change made during a sync was lost on quitting, and undone on screen meanwhile:** a flag
   cleared (or any change) waited in the account connection's queue behind a full sync (80 s for
   a tester's Exchange mailbox at start-up, then every 15 minutes); folders read meanwhile showed

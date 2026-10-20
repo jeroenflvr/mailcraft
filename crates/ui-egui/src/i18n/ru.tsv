@@ -879,3 +879,14 @@ folder	Archive	Архив
 
 # A month's full name, where it differs from its short form.
 month	May	Май
+	Connections	Подключения
+	How each account uses its server. Fewer requests at once are slower but less often held up by a busy server.	Как каждая учётная запись использует свой сервер. Меньше одновременных запросов — медленнее, но загруженный сервер реже задерживает работу.
+	Requests at once (Microsoft 365)	Одновременных запросов (Microsoft 365)
+	Send on a connection of its own	Отправлять через отдельное подключение
+	Check for new mail every	Проверять новую почту каждые
+	Where the server can't tell at once	Если сервер не сообщает сразу
+	Read every folder every	Читать все папки каждые
+	minutes	мин
+	Troubleshooting	Устранение неполадок
+	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log в папке приложения MailCraft показывает, что делала каждая учётная запись. В нём никогда нет паролей и содержимого писем.
+	Detailed log (every request to the server)	Подробный журнал (каждый запрос к серверу)

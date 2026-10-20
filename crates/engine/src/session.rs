@@ -217,6 +217,12 @@ pub struct Prefs {
     pub keep_messages: u32,
     /// Of those, the newest downloaded in full ahead of reading (the rest when opened).
     pub keep_offline: u32,
+    /// How each account uses its server: requests at once, a second connection for sending,
+    /// how often to check.
+    pub connections: mailcraft_model::Connections,
+    /// The log file has every step (each request to the server, each folder read), for working
+    /// out what went wrong; it's cleared at the next start.
+    pub detailed_log: bool,
     /// With `ReadInPane::Shown`: after it's been shown this many seconds (0: at once).
     pub read_after_secs: u32,
     /// Show the first line of text under each message.
@@ -404,6 +410,8 @@ impl Default for Prefs {
             address_book: "all".into(),
             keep_messages: 1000,
             keep_offline: 40,
+            connections: mailcraft_model::Connections::default(),
+            detailed_log: false,
             read_after_secs: 0,
             show_preview: true,
             compact: false,
@@ -3205,11 +3213,14 @@ impl Session {
         self.jobs.push(j);
     }
 
-    /// Tell the network side how much mail to keep (ahead of anything queued, so accounts
-    /// start with it).
+    /// Tell the network side how much mail to keep and how to use the servers (ahead of
+    /// anything queued, so accounts start with it).
     pub fn apply_sync_prefs(&mut self) {
         self.jobs.retain(|j| !matches!(j, Job::SetSync { .. }));
-        self.jobs.insert(0, Job::SetSync { messages: self.prefs.keep_messages, offline: self.prefs.keep_offline });
+        self.jobs.insert(
+            0,
+            Job::SetSync { messages: self.prefs.keep_messages, offline: self.prefs.keep_offline, connections: self.prefs.connections.clamped() },
+        );
     }
 
     pub fn set_work_offline(&mut self, on: bool) {

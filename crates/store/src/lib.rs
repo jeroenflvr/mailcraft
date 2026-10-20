@@ -453,6 +453,10 @@ impl Files {
 pub struct Store {
     root: PathBuf,
     files: Files,
+    /// Held while a folder's list is saved, and across a change's read-change-save
+    /// ([`Store::apply_op`]): the UI and an account's connection both save folders, and one
+    /// mustn't save what it read before the other's save over it.
+    writing: Arc<Mutex<()>>,
 }
 
 impl Store {
@@ -460,7 +464,7 @@ impl Store {
     pub fn open(root: impl Into<PathBuf>) -> Result<Store> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(io_err(&root))?;
-        Ok(Store { root, files: Files::Disk })
+        Ok(Store { root, files: Files::Disk, writing: Arc::default() })
     }
 
     /// A cache whose accounts are each one data file in `files` (as Outlook keeps a `.pst` per
@@ -471,7 +475,7 @@ impl Store {
         let root = root.into();
         fs::create_dir_all(&root).map_err(io_err(&root))?;
         let packs = packed::Packs::open(&root, files.as_ref())?;
-        Ok(Store { root, files: Files::Packed(Arc::new(packs)) })
+        Ok(Store { root, files: Files::Packed(Arc::new(packs)), writing: Arc::default() })
     }
 
     /// The data file an account is kept in, when the cache keeps them so.
@@ -496,7 +500,7 @@ impl Store {
 
     /// A cache kept in memory only (clones share it).
     pub fn memory() -> Store {
-        Store { root: PathBuf::from("memory"), files: Files::Memory(Arc::default(), Arc::default()) }
+        Store { root: PathBuf::from("memory"), files: Files::Memory(Arc::default(), Arc::default()), writing: Arc::default() }
     }
 
     /// A memory cache holding files from an earlier [`Store::snapshot`].
@@ -715,13 +719,20 @@ impl Store {
     /// the pages that changed are written: one message marked read in a folder of hundreds of
     /// thousands rewrote all of it (hundreds of megabytes, held in memory twice over).
     pub fn save_folder(&self, account: &str, folder: &str, state: &FolderState) -> Result<()> {
+        let _held = self.hold();
         self.save_folder_counted(account, folder, state, None).map(drop)
+    }
+
+    /// The lock folder saves take (a poisoned one is still a lock: saving never panics).
+    fn hold(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.writing.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// [`Store::save_folder`] after only these messages' flags changed (the same messages, in
     /// number): only their pages are made again (a big folder's other pages aren't even turned
     /// into text to see they're the same).
     pub fn save_folder_changed(&self, account: &str, folder: &str, state: &FolderState, changed: &std::collections::HashSet<u32>) -> Result<()> {
+        let _held = self.hold();
         self.save_folder_counted(account, folder, state, Some(changed)).map(drop)
     }
 
@@ -900,13 +911,15 @@ impl Store {
         if op.is_folder_op() {
             return self.apply_folder_op(account, op);
         }
+        // Read, changed and saved with no other save in between (the saves below don't lock).
+        let _held = self.hold();
         if let Op::EmptyFolder { path } = op {
             let mut st = self.load_folder(account, path)?;
             for m in &st.messages {
                 self.remove_body(&m.key);
             }
             st.messages.clear();
-            self.save_folder(account, path, &st)?;
+            self.save_folder_counted(account, path, &st, None)?;
             let mut list = self.load_folders(account)?;
             for f in list.iter_mut().filter(|f| &f.path == path) {
                 f.total = 0;
@@ -954,7 +967,7 @@ impl Store {
                 }
                 Op::CreateFolder { .. } | Op::RenameFolder { .. } | Op::DeleteFolder { .. } | Op::EmptyFolder { .. } => {}
             }
-            self.save_folder(account, folder, &st)?;
+            self.save_folder_counted(account, folder, &st, None)?;
         }
         Ok(folders)
     }
@@ -1069,12 +1082,15 @@ pub fn default_root() -> Option<PathBuf> {
     location::base_root()
 }
 
-/// Write `bytes` to `path` via a temporary file and a rename.
+/// Write `bytes` to `path` via a temporary file and a rename. The temporary name is this write's
+/// own: the UI and an account's connection may save the same file at once.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io_err(parent))?;
     }
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp{}-{n}", std::process::id()));
     fs::write(&tmp, bytes).map_err(io_err(&tmp))?;
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);

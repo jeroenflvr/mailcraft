@@ -19,6 +19,42 @@ impl fmt::Debug for Secret {
     }
 }
 
+/// How each account uses its server (File › Options › Mail › Connections).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Connections {
+    /// Requests sent at once (Microsoft 365 batches; Exchange Online runs 4 at a time for an app
+    /// on a mailbox, more come back throttled).
+    pub requests: u32,
+    /// Sending and automatic replies get a connection of their own, so they never wait behind a
+    /// sync. Off: one connection per account.
+    pub second: bool,
+    /// Minutes between checks for new mail when the server can't say at once (no IDLE or push).
+    pub check_minutes: u32,
+    /// Minutes between reads of every folder.
+    pub sync_all_minutes: u32,
+}
+
+impl Connections {
+    pub const MAX_REQUESTS: u32 = 20;
+
+    /// The same within the ranges that make sense.
+    pub fn clamped(self) -> Connections {
+        Connections {
+            requests: self.requests.clamp(1, Self::MAX_REQUESTS),
+            second: self.second,
+            check_minutes: self.check_minutes.clamp(1, 60),
+            sync_all_minutes: self.sync_all_minutes.clamp(5, 24 * 60),
+        }
+    }
+}
+
+impl Default for Connections {
+    fn default() -> Connections {
+        Connections { requests: 4, second: true, check_minutes: 2, sync_all_minutes: 15 }
+    }
+}
+
 /// A change to the mailbox the user makes, applied to the local cache at once and replayed on
 /// the server when it can be reached (RFC 4549's "pending actions").
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +165,34 @@ impl Op {
     pub fn is_folder_op(&self) -> bool {
         matches!(self, Op::CreateFolder { .. } | Op::RenameFolder { .. } | Op::DeleteFolder { .. })
     }
+
+    /// A change to messages already in the cache, which can be made there again harmlessly
+    /// (flags, categories, moves, deletes): what stays in the cache over a sync until the server
+    /// has it.
+    pub fn is_message_op(&self) -> bool {
+        matches!(self, Op::SetFlag { .. } | Op::SetKeyword { .. } | Op::Move { .. } | Op::Expunge { .. })
+    }
+
+    /// What the change is, for the log: its kind, how many messages and which folders (never
+    /// what the messages say).
+    pub fn describe(&self) -> String {
+        let n = self.keys().len();
+        let mut folders: Vec<&str> = self.keys().iter().map(|k| k.folder.as_str()).collect();
+        folders.sort_unstable();
+        folders.dedup();
+        let where_ = folders.join(", ");
+        let what = |s: &str| format!("{s} on {n} message{} in {where_}", if n == 1 { "" } else { "s" });
+        match self {
+            Op::SetFlag { flag, on, .. } => what(&format!("{} {flag:?}", if *on { "set" } else { "clear" })),
+            Op::SetKeyword { keyword, on, .. } => what(&format!("{} keyword {keyword}", if *on { "set" } else { "clear" })),
+            Op::Move { to, .. } => what(&format!("move to {to}")),
+            Op::Expunge { .. } => what("delete for good"),
+            Op::CreateFolder { path } => format!("create folder {path}"),
+            Op::RenameFolder { from, to } => format!("rename folder {from} to {to}"),
+            Op::DeleteFolder { path } => format!("delete folder {path}"),
+            Op::EmptyFolder { path } => format!("empty folder {path}"),
+        }
+    }
 }
 
 /// Work for the network layer.
@@ -165,8 +229,14 @@ pub enum Job {
     /// connect again.
     WorkOffline { on: bool },
     /// How much mail is kept on this computer: the newest `messages` of each folder (0: all of
-    /// them), and the newest `offline` of them downloaded in full ahead of reading.
-    SetSync { messages: u32, offline: u32 },
+    /// them), and the newest `offline` of them downloaded in full ahead of reading; and how each
+    /// account talks to its server.
+    SetSync {
+        messages: u32,
+        offline: u32,
+        #[serde(default)]
+        connections: Connections,
+    },
     /// Read the account's automatic replies from the server.
     GetVacation { account: String },
     /// Change them.
@@ -356,6 +426,25 @@ mod tests {
     fn secrets_never_print() {
         let j = Job::Start { account: AccountConfig::default(), password: Some(Secret("hunter2".into())) };
         assert!(!format!("{j:?}").contains("hunter2"));
+    }
+
+    /// A change as the log says it: what, how many, where; never what the messages say.
+    #[test]
+    fn changes_are_described_for_the_log() {
+        let k = |uid| MessageKey { account: "a1".into(), folder: "INBOX".into(), validity: 1, uid };
+        assert_eq!(Op::SetFlag { keys: vec![k(1)], flag: Flag::Flagged, on: true }.describe(), "set Flagged on 1 message in INBOX");
+        assert_eq!(Op::Move { keys: vec![k(1), k(2)], to: "Archive".into() }.describe(), "move to Archive on 2 messages in INBOX");
+        assert_eq!(Op::RenameFolder { from: "A".into(), to: "B".into() }.describe(), "rename folder A to B");
+        assert!(Op::Expunge { keys: vec![k(1)] }.is_message_op() && !Op::EmptyFolder { path: "Junk".into() }.is_message_op());
+    }
+
+    /// Connection settings stay within sense, and an older saved job (without them) still reads.
+    #[test]
+    fn connection_settings() {
+        let c = Connections { requests: 0, second: false, check_minutes: 999, sync_all_minutes: 1 }.clamped();
+        assert_eq!(c, Connections { requests: 1, second: false, check_minutes: 60, sync_all_minutes: 5 });
+        let j: Job = serde_json::from_str(r#"{"job": "setSync", "messages": 10, "offline": 2}"#).unwrap();
+        assert!(matches!(j, Job::SetSync { connections, .. } if connections == Connections::default()));
     }
 
     #[test]
