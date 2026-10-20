@@ -477,7 +477,9 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   default; off, one connection per account), how often to check for new mail where the server
   can't say (2 min) and to read every folder (15 min). The log says each status change once, a
   line per folder read (what changed, how long), each change waiting, made or refused, and each
-  connection's start and stop.
+  connection's start and stop. The account says it's up to date once its mail folders are, before
+  the calendars and contacts are read (every event of every calendar on Microsoft 365, minutes
+  on a big one, at every full sync: "Updating…" all along); the log says how long they took.
 - **A change made during a sync was lost on quitting, and undone on screen meanwhile:** a flag
   cleared (or any change) waited in the account connection's queue behind a full sync (80 s for
   a tester's Exchange mailbox at start-up, then every 15 minutes); folders read meanwhile showed

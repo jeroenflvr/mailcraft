@@ -54,7 +54,9 @@ Message sources live next to it as `<validity>/<uid>.eml`. A message is identifi
 - Then **wait for mail**: `IDLE` on the Inbox (RFC 2177) in half-second slices, so new jobs interrupt
   it at once; re-issued every 10 minutes (servers drop IDLE after 30). Without IDLE, poll every 2
   minutes. A full sync runs every 15 minutes. Both are settings (File › Options › Connections,
-  `account.connections`).
+  `account.connections`). The account is up to date once its mail folders (and the Outbox and
+  quota) are; the calendars and contacts follow (a big Microsoft 365 calendar takes minutes to
+  read, and the account said "Updating…" all that time).
 - **Connections per account:** the main one (syncing, changes, opened messages) and, unless turned
   off, a second one for sending and automatic replies that connects when there's something to
   send and lets go after 5 idle minutes. Graph keeps no connection open: each request is its own

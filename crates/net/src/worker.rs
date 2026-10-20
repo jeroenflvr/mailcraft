@@ -1395,7 +1395,6 @@ impl Worker {
         }
         if self.conn.is_some() {
             self.report_quota();
-            self.sync_dav();
         }
         if self.conn.is_some() {
             self.prune_jmap_numbers();
@@ -1404,7 +1403,13 @@ impl Worker {
             self.flush_outbox();
             self.relist_backoff = Duration::from_secs(5);
             log::info!("{}: synced {} folders in {:.1} s", self.acc.id, self.folders.len(), began.elapsed().as_secs_f32());
+            // The mail is up to date: said now. The calendars and contacts follow (on a big
+            // Microsoft 365 calendar that takes minutes, and the account said "Updating…" all
+            // along).
             self.status(SyncStatus::Online { at: now() });
+        }
+        if self.conn.is_some() {
+            self.sync_dav();
         }
     }
 
@@ -1723,22 +1728,19 @@ impl Worker {
     /// Sync calendars and address books with the account's CalDAV / CardDAV server (password
     /// accounts: OAuth tokens are for mail only).
     fn sync_dav(&mut self) {
+        let began = Instant::now();
         // Exchange Online: its calendars and contacts through Graph.
         if let Some(Conn::Graph(c)) = &self.conn {
             let pim: mailcraft_model::pim::Pim = self.store.load_account_doc(&self.acc.id, mailcraft_model::pim::PIM_DOC).unwrap_or_default();
-            match crate::graph_pim::sync(c, &pim, now()) {
-                Ok(sync) => self.sink.emit(Event::DavSynced { account: self.id(), sync: Box::new(sync) }),
-                Err(e) => log::info!("{}: calendars and contacts: {e}", self.acc.id),
-            }
+            let r = crate::graph_pim::sync(c, &pim, now());
+            self.dav_done(r, began);
             return;
         }
         // On-premises Exchange: its calendar and contacts through EWS.
         if let Some(Conn::Ews(c)) = &self.conn {
             let pim: mailcraft_model::pim::Pim = self.store.load_account_doc(&self.acc.id, mailcraft_model::pim::PIM_DOC).unwrap_or_default();
-            match crate::ews_pim::sync(c, &pim, now()) {
-                Ok(sync) => self.sink.emit(Event::DavSynced { account: self.id(), sync: Box::new(sync) }),
-                Err(e) => log::info!("{}: calendars and contacts: {e}", self.acc.id),
-            }
+            let r = crate::ews_pim::sync(c, &pim, now());
+            self.dav_done(r, began);
             return;
         }
         // OAuth tokens are for mail only.
@@ -1750,14 +1752,22 @@ impl Worker {
         let password = self.auth.lock().unwrap_or_else(std::sync::PoisonError::into_inner).secret.clone();
         let dav = crate::dav::Dav::new(&user, &password);
         let host = self.acc.pop.as_ref().map_or(self.acc.imap.host.as_str(), |p| p.host.as_str());
-        match crate::dav::sync(&dav, &self.acc.email, host, &pim, now()) {
-            Ok(sync) => self.sink.emit(Event::DavSynced { account: self.id(), sync: Box::new(sync) }),
-            Err(e) => {
-                log::info!("{}: calendars and contacts: {e}", self.acc.id);
-                if matches!(e, NetError::Auth(_)) {
-                    self.notice(format!("calendars and contacts: {e}"));
-                }
+        let r = crate::dav::sync(&dav, &self.acc.email, host, &pim, now());
+        if let Err(e @ NetError::Auth(_)) = &r {
+            self.notice(format!("calendars and contacts: {e}"));
+        }
+        self.dav_done(r, began);
+    }
+
+    /// Calendars and contacts read: handed up, and said in the log with how long it took.
+    fn dav_done(&mut self, r: Result<mailcraft_model::pim::DavSync>, began: Instant) {
+        let took = began.elapsed().as_secs_f32();
+        match r {
+            Ok(sync) => {
+                log::info!("{}: calendars and contacts read in {took:.1} s", self.acc.id);
+                self.sink.emit(Event::DavSynced { account: self.id(), sync: Box::new(sync) });
             }
+            Err(e) => log::warn!("{}: calendars and contacts failed after {took:.1} s: {e}", self.acc.id),
         }
     }
 

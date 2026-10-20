@@ -659,6 +659,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(store.root());
     }
 
+    /// The mail is said to be up to date when its folders are, not after the calendars and
+    /// contacts (every event of every calendar, which on a big Microsoft 365 calendar takes
+    /// minutes): the account stayed "Updating…" all that time, at every full sync.
+    #[test]
+    fn up_to_date_comes_before_calendars_and_contacts() {
+        let mut d = Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        d.deliver(&inbox, &mail("Contract", "c1"), true, "2026-10-01T09:00:00Z");
+        let server = serve(d);
+        let store = crate::fake::tests_store("graph-online-first");
+        let mut pool = crate::worker::Pool::new(store.clone(), Arc::new(crate::worker::MemoryCredentials::default()));
+        let account = AccountConfig {
+            id: "a1".into(),
+            email: "me@contoso.example".into(),
+            username: "me@contoso.example".into(),
+            graph: Some(server.base.clone()),
+            ..Default::default()
+        };
+        pool.submit(Job::Start { account, password: Some(Secret(TOKEN.into())) });
+        let seen = until(&pool, "online", |e| matches!(e, Event::Status { status: SyncStatus::Online { .. }, .. }));
+        assert!(!seen.iter().any(|e| matches!(e, Event::DavSynced { .. })), "calendars after: {seen:?}");
+        until(&pool, "calendars and contacts", |e| matches!(e, Event::DavSynced { .. }));
+        drop(pool);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
     /// A folder the server refuses to read (gone there since the folder list was read) is said,
     /// and the account is up to date again after: it stayed "Updating…" for good.
     #[test]
