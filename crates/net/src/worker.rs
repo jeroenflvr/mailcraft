@@ -357,7 +357,8 @@ impl Pool {
                 let connections = connections.clamped();
                 if opts.window != self.opts.window || opts.prefetch != self.opts.prefetch || connections != self.connections {
                     log::info!(
-                        "sync settings: {messages} messages a folder, {offline} downloaded; {} requests at once, second connection {}, new mail every {} min, every folder every {} min",
+                        "sync settings: {} messages a folder, {offline} downloaded; {} requests at once, second connection {}, new mail every {} min, every folder every {} min",
+                        if messages == 0 { "all".to_string() } else { messages.to_string() },
                         connections.requests,
                         if connections.second { "on" } else { "off" },
                         connections.check_minutes,
@@ -1767,6 +1768,8 @@ impl Worker {
                 log::info!("{}: calendars and contacts read in {took:.1} s", self.acc.id);
                 self.sink.emit(Event::DavSynced { account: self.id(), sync: Box::new(sync) });
             }
+            // Let go meanwhile: not a failure.
+            Err(e) if self.stopping() => log::debug!("{}: calendars and contacts stopped after {took:.1} s: {e}", self.acc.id),
             Err(e) => log::warn!("{}: calendars and contacts failed after {took:.1} s: {e}", self.acc.id),
         }
     }
