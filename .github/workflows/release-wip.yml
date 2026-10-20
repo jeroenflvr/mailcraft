@@ -1,7 +1,7 @@
-# Unsigned builds for every platform the Craft release covers, published on this repository's
-# Releases. Run by hand (Actions › Release (unsigned test build) › Run workflow) it publishes a
-# pre-release `v<version>-test.<run>` so people can try MailCraft; release.yml calls it with
-# `final: true` on a push to the `release` branch, which publishes the release `v<version>`.
+# Unsigned builds for every platform the Craft release covers, published as the release
+# `v<version>` of this repository (Actions › Release (unsigned) › Run workflow; release.yml calls
+# it too). With "pre-release" ticked it publishes a test pre-release `v<version>-test.<run>`
+# instead. A version already released isn't published again: bump it first (cargo xtask version).
 #
 # The same platforms as release.yml (storytold/craft-common-actions): macOS universal, Windows
 # x64/x86/arm64, Linux x86_64/aarch64 (AppImage, deb, rpm, tar.gz), Flatpak x86_64/aarch64, Linux
@@ -9,7 +9,7 @@
 # macos-15-xlarge), no `release` environment and no signing secrets, so Windows installers are
 # unsigned and the macOS app is ad-hoc signed and not notarized (the packaging scripts fall back
 # to that by themselves).
-name: Release (unsigned test build)
+name: Release (unsigned)
 
 on:
   workflow_dispatch:
@@ -18,14 +18,18 @@ on:
         description: "Version override, e.g. 0.8.1 (empty: Cargo.toml)"
         type: string
         default: ""
+      prerelease:
+        description: "A test pre-release v<version>-test.<run> rather than the release v<version>"
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       version:
         description: "Version override (empty: Cargo.toml)"
         type: string
         default: ""
-      final:
-        description: "Publish the release v<version> rather than a test pre-release"
+      prerelease:
+        description: "A test pre-release v<version>-test.<run> rather than the release v<version>"
         type: boolean
         default: false
 
@@ -33,7 +37,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-wip-${{ inputs.final && 'final' || 'test' }}
+  group: release-wip-${{ inputs.prerelease && 'test' || 'final' }}
   cancel-in-progress: false
 
 env:
@@ -71,7 +75,7 @@ jobs:
       - id: tag
         name: Tag
         env:
-          FINAL: ${{ inputs.final && '1' || '' }}
+          FINAL: ${{ !inputs.prerelease && '1' || '' }}
           VERSION: ${{ steps.v.outputs.version }}
           RUN: ${{ github.run_number }}
         run: |
@@ -386,8 +390,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.version.outputs.tag }}
           VERSION: ${{ needs.version.outputs.version }}
-          FINAL: ${{ inputs.final && '1' || '' }}
+          FINAL: ${{ !inputs.prerelease && '1' || '' }}
         run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::$TAG is released already: bump the version (cargo xtask version set …) and run this again."
+            exit 1
+          fi
           if [ -n "$FINAL" ]; then
             what="**Unsigned build** of MailCraft $VERSION"
             title="MailCraft $VERSION"

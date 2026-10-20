@@ -148,7 +148,7 @@ and the GitHub workflows run them through the shared Craft pipelines in
 | `windows-arm64.yml` | pushes to `main`, weekly | cross-build the ARM64 MSI, install and run it on Windows 11 ARM |
 | `packaging-lint.yml` | packaging or workflow changes | actionlint, shellcheck, PowerShell, WiX, desktop entry, AppStream, Flatpak |
 | `release.yml` | a push to the `release` branch, or by hand | package every platform, unsigned, and publish the GitHub Release `v<version>` |
-| `release-wip.yml` | by hand | the same builds, published as a test pre-release `v<version>-test.<run>` |
+| `release-wip.yml` | by hand | the same builds, published as the release `v<version>` (or, ticked, a test pre-release `v<version>-test.<run>`) |
 
 The version lives only in `[workspace.package]` of `Cargo.toml` (`cargo xtask version`,
 `cargo xtask version set 0.2.0`). App icons are drawn by `cargo xtask icons`.
