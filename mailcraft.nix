@@ -5,11 +5,15 @@
 , perl
 , cmake
 , clang
+, llvmPackages
 , libxkbcommon
 , wayland
 , libGL
 , vulkan-loader
-, xorg
+, libx11
+, libxcursor
+, libxi
+, libxrandr
 }:
 
 rustPlatform.buildRustPackage rec {
@@ -27,13 +31,13 @@ rustPlatform.buildRustPackage rec {
     wayland
     libGL
     vulkan-loader
-    xorg.libX11
-    xorg.libXcursor
-    xorg.libXi
-    xorg.libXrandr
+    libx11
+    libxcursor
+    libxi
+    libxrandr
   ];
 
-  LIBCLANG_PATH = "${clang.lib}/lib";
+  LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
   OPENSSL_NO_VENDOR = 1;
 
   cargoBuildFlags = [ "-p" "mailcraft" "-p" "mailcraft-cli" ];

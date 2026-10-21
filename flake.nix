@@ -39,7 +39,7 @@
 
           shellHook = ''
             export RUST_BACKTRACE=1
-            export LIBCLANG_PATH="${pkgs.clang.lib}/lib"
+            export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
             echo "MailCraft dev shell ready"
           '';
         };
