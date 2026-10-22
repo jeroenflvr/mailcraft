@@ -22,6 +22,28 @@ nix profile install .#mailcraft
 Neither command requires a Microsoft client ID to build. Microsoft sign-in needs
 an ID, supplied at runtime or built into the package as described below.
 
+## Keychain (Secret Service)
+
+MailCraft stores passwords and sign-in tokens in the system keychain through the
+freedesktop Secret Service (`org.freedesktop.secrets`). If none is running you
+will see *"the sign-in couldn't be kept in the keychain … org.freedesktop.secrets
+was not provided by any .service files"*. Enable a provider in your NixOS
+configuration, for example:
+
+```nix
+services.gnome.gnome-keyring.enable = true;
+# Unlock it at login (pick the PAM service your display manager uses):
+security.pam.services.login.enableGnomeKeyring = true;
+```
+
+KDE Plasma 6 users can rely on KWallet's Secret Service instead, and KeePassXC
+with Secret Service integration also works. Rebuild, then log out and back in.
+
+Outside Plasma (Hyprland, Sway…), KWallet may be installed but not running:
+nothing D-Bus-activates `org.freedesktop.secrets`, so start it with the session,
+e.g. in `hyprland.conf`: `exec-once = ksecretd`. Run only one Secret Service
+provider at a time.
+
 ## Microsoft sign-in without publishing your client ID
 
 `MAILCRAFT_MICROSOFT_CLIENT_ID` is the **Application (client) ID** of your Microsoft
