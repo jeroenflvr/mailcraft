@@ -42,6 +42,11 @@ rustPlatform.buildRustPackage rec {
 
   cargoBuildFlags = [ "-p" "mailcraft" "-p" "mailcraft-cli" ];
 
+  # winit/glutin/wgpu dlopen these at runtime; put them on the RPATH.
+  postFixup = ''
+    patchelf --add-rpath "${lib.makeLibraryPath buildInputs}" $out/bin/mailcraft
+  '';
+
   meta = with lib; {
     description = "Local-first email client in Rust";
     homepage = "https://github.com/jeroenflvr/mailcraft";
