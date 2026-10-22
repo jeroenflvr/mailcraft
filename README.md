@@ -111,7 +111,8 @@ cd apps/mailcraft-web && trunk serve
 Then open http://127.0.0.1:8774/?sample for the sample mailbox.
 
 The desktop app and the CLI share the cache (`%APPDATA%\MailCraft`, `~/Library/Application Support/MailCraft`
-or `~/.local/share/mailcraft`; override with `--data DIR` or `MAILCRAFT_DATA`).
+or `~/.local/share/mailcraft`; override with `--data DIR` or `MAILCRAFT_DATA`). Its `mailcraft.log`
+says what each account did; see [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Architecture
 

@@ -278,4 +278,5 @@ that changed something or took over 5 s (what was new, changed and removed, how 
 waiting for the server, made there (and how long it took) or refused, and when each connection
 starts and stops. The detailed log (File › Options › Troubleshooting, or `--log-level debug` /
 `MAILCRAFT_LOG=debug` for one run) adds every folder read and every Graph request (method, path
-without the query, status, time). Never a password, a token or what a message says.
+without the query, status, time). Never a password, a token or what a message says. Where to find
+it and how to follow it on each system: [troubleshooting.md](troubleshooting.md).
