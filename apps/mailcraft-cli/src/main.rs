@@ -66,8 +66,7 @@ impl Args {
 }
 
 fn clock() -> Clock {
-    let now = chrono::Local::now();
-    Clock::new(now.timestamp(), now.offset().local_minus_utc())
+    Clock::with_zone(chrono::Local::now().timestamp(), std::sync::Arc::new(mailcraft_net::tz::local_zone()))
 }
 
 fn password(prompt_for: &str) -> Result<String, String> {
@@ -139,6 +138,7 @@ fn start(s: &mut Session, store: &Store, account: &str) -> Result<Pool, String> 
     }
     let pw = password(&config.email)?;
     let mut pool = Pool::new(store.clone(), Arc::new(MemoryCredentials::default()));
+    pool.zone = s.clock.zone.clone();
     // Session::open queued Start jobs without passwords; replace them with one that has it.
     let _ = s.take_jobs();
     pool.submit(Job::Start { account: config, password: Some(Secret(pw)) });
@@ -177,7 +177,7 @@ fn run() -> Result<(), String> {
     let cmd = args.positional(0).unwrap_or_else(|| "help".into());
     if cmd == "sample" {
         let c = clock();
-        let made = mailcraft_engine::sample::seed_if_empty_at(&store, c.now, i64::from(c.offset)).map_err(|e| e.to_string())?;
+        let made = mailcraft_engine::sample::seed_if_empty_at(&store, c.now, i64::from(c.offset_at(c.now))).map_err(|e| e.to_string())?;
         println!("{}", if made { format!("sample mailbox created in {}", root.display()) } else { "the data folder already has accounts".into() });
         return Ok(());
     }

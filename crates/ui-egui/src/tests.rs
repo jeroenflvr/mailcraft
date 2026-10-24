@@ -471,6 +471,37 @@ pub(crate) fn pim_tour(a: &mut MailApp, ctx: &egui::Context) {
     frame(ctx, a, vec![]);
 }
 
+/// The week of 26 October viewed on 24 October, with the clocks going back on the 25th: an 08:00
+/// event is in the 08:00 row on the Sunday (a 25-hour day) and on the Monday, and the frame draws.
+#[test]
+fn the_week_across_a_change_of_clocks_draws_in_the_right_rows() {
+    use mailcraft_engine::model::dates::{Zone, days_from_civil};
+    let (mut a, dir) = app("dst-week");
+    let at = |y: i64, m: u32, d: u32, h: i64| days_from_civil(y, m, d) * 86_400 + h * 3600;
+    let zone = std::sync::Arc::new(Zone::named("Europe/Brussels").unwrap());
+    a.session.clock = Clock::with_zone(at(2026, 10, 24, 10), zone);
+    a.run("view.module", json!({"name": "calendar"}));
+    a.run("calendar.view", json!({"mode": "week"}));
+    a.run("calendar.goto", json!({"date": "2026-10-25"}));
+    for day in ["2026-10-25", "2026-10-26"] {
+        a.run("event.create", json!({"summary": "Stand-up", "start": format!("{day}T08:00"), "end": format!("{day}T09:00")}));
+    }
+    let ctx = egui::Context::default();
+    frame(&ctx, &mut a, vec![]);
+    let (d0, d1) = a.session.cal_days();
+    assert_eq!(d0, days_from_civil(2026, 10, 19), "the week of the 25th starts Monday the 19th");
+    let items = a.session.agenda(a.session.local_midnight(d0), a.session.local_midnight(d1 + 7));
+    let standups: Vec<_> = items.iter().filter(|i| i.summary == "Stand-up").collect();
+    assert_eq!(standups.len(), 2);
+    for (it, day) in standups.iter().zip([days_from_civil(2026, 10, 25), days_from_civil(2026, 10, 26)]) {
+        assert_eq!(crate::calendar::wall(it.start, day, &a.session), 8.0 * 3600.0, "{} is in the 08:00 row", it.start);
+    }
+    assert_eq!(standups[1].start, at(2026, 10, 26, 7), "Monday's 08:00 CET is 07:00Z");
+    a.run("calendar.goto", json!({"date": "2026-10-26"}));
+    frame(&ctx, &mut a, vec![]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn calendar_and_people_forms_save_through_commands() {
     let (mut a, dir) = app("pim-forms");

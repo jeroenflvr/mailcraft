@@ -540,10 +540,10 @@ pub fn registry() -> Registry {
         CommandSpec::new("calendar.goto", "Go to a date", "Calendar › Go to", |s, v| s.cal_goto(p::str(v, "date"), p::i64(v, "step").unwrap_or(0)))
             .params(r#"{"date"?: "YYYY-MM-DD"|"today", "step"?: number (days, weeks or months, as on screen)}"#),
         CommandSpec::new("calendar.events", "Events", "Calendar", |s, v| {
-            let off = i64::from(s.clock.offset);
             let (d0, d1) = s.cal_days();
-            let from = p::str(v, "from").and_then(|x| parse_local(x, off)).map_or(s.local_midnight(d0), |(t, all_day)| if all_day { t - off } else { t });
-            let to = p::str(v, "to").and_then(|x| parse_local(x, off)).map_or(s.local_midnight(d1), |(t, all_day)| if all_day { t - off + 86_400 } else { t });
+            let local = |x: &str| parse_local(x, &s.clock.zone);
+            let from = p::str(v, "from").and_then(local).map_or(s.local_midnight(d0), |(t, all_day)| if all_day { s.local_midnight(t.div_euclid(86_400)) } else { t });
+            let to = p::str(v, "to").and_then(local).map_or(s.local_midnight(d1), |(t, all_day)| if all_day { s.local_midnight(t.div_euclid(86_400) + 1) } else { t });
             Ok(json!(s.agenda(from, to).iter().map(|i| json!({
                 "uid": i.uid, "summary": i.summary, "location": i.location, "start": i.start, "end": i.end, "allDay": i.all_day,
                 "occurrence": i.occurrence, "recurring": i.recurring, "account": i.account, "calendar": i.calendar,
@@ -1618,10 +1618,11 @@ fn list_accounts(s: &mut Session, _: &Value) -> CmdResult {
 
 /// An event from command params, starting from `e` (what's not given stays).
 fn event_from(s: &Session, v: &Value, mut e: mailcraft_model::ical::CalEvent) -> Result<mailcraft_model::ical::CalEvent, CmdError> {
-    let off = i64::from(s.clock.offset);
     let when = |k: &str| -> Result<Option<(i64, bool)>, CmdError> {
         match p::str(v, k) {
-            Some(x) => parse_local(x, off).map(Some).ok_or_else(|| CmdError::Params(format!("`{x}` is not a date (YYYY-MM-DD or YYYY-MM-DDTHH:MM)"))),
+            Some(x) => parse_local(x, &s.clock.zone)
+                .map(Some)
+                .ok_or_else(|| CmdError::Params(format!("`{x}` is not a date (YYYY-MM-DD or YYYY-MM-DDTHH:MM)"))),
             None => Ok(v.get(k).and_then(Value::as_i64).map(|n| (n, false))),
         }
     };
@@ -1640,6 +1641,15 @@ fn event_from(s: &Session, v: &Value, mut e: mailcraft_model::ical::CalEvent) ->
     if e.all_day {
         e.start -= e.start.rem_euclid(86_400);
         e.end = (e.end - e.end.rem_euclid(86_400)).max(e.start + 86_400);
+    }
+    // Made here, a timed event is in the local zone: it keeps its `TZID` on the server, and a
+    // series repeats at the same wall-clock time across daylight saving.
+    let local = &s.clock.zone;
+    if e.tz.is_none() && !e.all_day && !local.id.is_empty() {
+        e.tz = Some(local.id.clone());
+        if mailcraft_model::dates::Zone::named(&local.id).is_none() && !local.transitions.is_empty() {
+            e.zone = Some((**local).clone());
+        }
     }
     for (k, field) in [("summary", &mut e.summary), ("location", &mut e.location), ("description", &mut e.description)] {
         if let Some(x) = p::str(v, k) {

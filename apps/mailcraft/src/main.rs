@@ -84,6 +84,9 @@ impl Services for Desktop {
         let now = chrono::Local::now();
         (now.timestamp(), now.offset().local_minus_utc())
     }
+    fn local_zone(&self) -> mailcraft_engine::model::dates::Zone {
+        mailcraft_net::tz::local_zone()
+    }
     fn pick_files(&mut self) -> Vec<PathBuf> {
         rfd::FileDialog::new().set_title("Attach files").pick_files().unwrap_or_default()
     }
@@ -482,6 +485,7 @@ fn main() -> eframe::Result {
     }
 
     let (now, offset) = Desktop::default().clock();
+    let zone = Arc::new(Desktop::default().local_zone());
     let store = root.as_ref().and_then(|r| {
         let opened = match &files {
             Some(f) => Store::open_packed(r, f).or_else(|e| {
@@ -505,7 +509,7 @@ fn main() -> eframe::Result {
     {
         eprintln!("mailcraft: the sample mailbox couldn't be created: {e}");
     }
-    let mut session = Session::open(store.clone(), Clock::new(now, offset));
+    let mut session = Session::open(store.clone(), Clock::with_zone(now, zone.clone()));
     let desktop_data = store.as_ref().and_then(Store::data_files_dir);
     session.oauth_available = mailcraft_net::oauth::available();
     let state_path = root.as_ref().map(|r| r.join("ui.json"));
@@ -538,7 +542,8 @@ fn main() -> eframe::Result {
             let args = cmd_args;
             let backend: Box<dyn Backend> = match store {
                 Some(store) => {
-                    let pool = Pool::new(store, Arc::new(Keychain));
+                    let mut pool = Pool::new(store, Arc::new(Keychain));
+                    pool.zone = zone;
                     let ctx = cc.egui_ctx.clone();
                     pool.set_waker(Arc::new(move || ctx.request_repaint()));
                     Box::new(PoolBackend(pool))

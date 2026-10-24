@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mailcraft_engine::Session;
-use mailcraft_engine::model::dates::Clock;
+use mailcraft_engine::model::dates::{Clock, Zone};
 use mailcraft_engine::store::Store;
 use mailcraft_ui_egui::{MailApp, Services};
 use wasm_bindgen::JsCast as _;
@@ -89,7 +89,7 @@ pub fn start() {
                     if db.is_some() {
                         store.track_changes();
                     }
-                    let mut session = Session::open(Some(store.clone()), Clock::new(now, offset));
+                    let mut session = Session::open(Some(store.clone()), Clock::with_zone(now, std::sync::Arc::new(local_zone())));
                     session.jmap_only = true;
                     let backend = WebBackend::new(store.clone(), cc.egui_ctx.clone());
                     let services = WebServices { picked: Rc::default(), ctx: cc.egui_ctx.clone() };
@@ -135,6 +135,17 @@ fn clock() -> (i64, i32) {
     // getTimezoneOffset is minutes behind UTC.
     let offset = -(d.get_timezone_offset() as i32) * 60;
     (now, offset)
+}
+
+/// The browser's zone: its offsets, read week by week from 30 years back to 30 ahead with the
+/// change pinned to the second (as on the desktop), and its IANA name from `Intl`.
+fn local_zone() -> Zone {
+    let offset_at = |t: i64| -(js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(t as f64 * 1000.0)).get_timezone_offset() as i32) * 60;
+    let options = js_sys::Intl::DateTimeFormat::new(&js_sys::Array::new(), &js_sys::Object::new()).resolved_options();
+    let name = js_sys::Reflect::get(&options, &wasm_bindgen::JsValue::from_str("timeZone")).ok().and_then(|v| v.as_string()).unwrap_or_default();
+    let now = clock().0;
+    const SPAN: i64 = 30 * 366 * 86_400;
+    Zone::probe(name, offset_at, now - SPAN, now + SPAN)
 }
 
 struct WebShell {
@@ -203,6 +214,9 @@ struct WebServices {
 impl Services for WebServices {
     fn clock(&self) -> (i64, i32) {
         clock()
+    }
+    fn local_zone(&self) -> Zone {
+        local_zone()
     }
     fn pick_files(&mut self) -> Vec<PathBuf> {
         Vec::new()

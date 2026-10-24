@@ -178,6 +178,11 @@ switched IMAP off.
   moved where they belong.
 - **Automatic replies** are the mailbox settings' `automaticRepliesSetting` (scheduled when the
   dates are set). Graph doesn't tell a mailbox's size to its owner, so there is no quota.
+- **Calendar time zones** (`graph_pim.rs`): events are read with `Prefer: outlook.timezone="UTC"`,
+  so the zone a series was made in comes from `recurrence.range.recurrenceTimeZone`, else
+  `originalStartTimeZone` (a Windows or IANA name) and is kept as the event's `tz`. Events are
+  written as wall-clock times with `timeZone` set to that name, and the recurrence pattern's days
+  are the zone's own, so Exchange repeats the series at the same local time all year.
 
 ## On-premises Exchange through EWS (`crates/net/src/ews.rs`)
 
@@ -210,6 +215,10 @@ servers that don't offer IMAP. Every call is SOAP over HTTPS.
   Contacts folders, synced like CalDAV / CardDAV: changes here first (appointments updated field
   by field, contacts made again, never any meeting mail), then both folders read in full.
   Recurrences go through Graph's pattern-and-range shape, so one RRULE mapping serves both.
+  Times come in UTC; the zone an appointment was made in (`StartTimeZone`, else
+  `MeetingTimeZone`) is kept as its `tz` and written back as `StartTimeZone` / `EndTimeZone`
+  with the Windows name EWS wants, so Exchange keeps repeating a series at the same wall-clock
+  time.
 
 ## Calendars and address books (`crates/net/src/dav.rs`)
 
@@ -221,6 +230,20 @@ here (deletions with `If-Match`, edits guarded by the item's etag so a newer cop
 never overwritten, new items with `If-None-Match: *`), then reads each collection whose `getctag`
 moved: the etags by `PROPFIND`, and the new or changed items by `calendar-multiget` /
 `addressbook-multiget`. The engine merges the result: what changed here meanwhile stays to be sent.
+
+**Time zones.** An event keeps the zone it was written in (`CalEvent::tz`, the `TZID`, with the
+file's `VTIMEZONE` rules in `zone` when it had them); its `start` and `end` stay UTC seconds. A
+`TZID` is resolved by the file's own `VTIMEZONE`, else the local zone when it has that name, else
+the built-in table of common Olson and Windows names (`crates/model/src/zones.rs`), else the local
+zone with a warning in the log, never UTC. Floating times are local; times ending in `Z` are UTC
+and recur at a fixed UTC time (RFC 5545). A recurrence repeats at the first occurrence's
+wall-clock time in the event's zone, so a weekly 08:00 series stays at 08:00 across daylight
+saving; an event with no zone (floating, or stored before zones were kept) repeats in the local
+zone. The local zone itself is read from the system with its changes of clocks
+(`mailcraft_net::tz`, `Zone::probe`; the browser asks `Date`/`Intl`) and handed to the workers
+(`Job::SetZone`). Writing keeps it: `DTSTART;TZID=…` plus a `VTIMEZONE` (the rules the event
+carries, or the table's, else one component per change); a zone nothing knows is written in UTC
+as before. Events made here get the local zone's name.
 
 **Invitations** travel by mail (iTIP over iMIP, RFC 5546/6047): a `text/calendar` part with
 `METHOD:REQUEST` shows as an invitation card (Accept, Tentative, Decline), which updates the

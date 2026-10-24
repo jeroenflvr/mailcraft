@@ -2878,7 +2878,9 @@ dependencies = [
 name = "mailcraft-net"
 version = "0.18.11"
 dependencies = [
+ "chrono",
  "hmac 0.13.0",
+ "iana-time-zone",
  "imap-proto",
  "ipconfig",
  "lettre",

@@ -406,7 +406,7 @@ async fn job(sh: &Rcs, id: &str, j: Job) {
             emit(sh, Event::Vacation { account: id.to_string(), vacation, error });
         }
         // Nothing to do in the browser: no Outbox (sending needs the server), no CalDAV.
-        Job::FlushOutbox { .. } | Job::SyncDav { .. } => {}
+        Job::FlushOutbox { .. } | Job::SyncDav { .. } | Job::SetZone { .. } => {}
         Job::Start { .. }
         | Job::Remove { .. }
         | Job::FetchUrl { .. }

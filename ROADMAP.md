@@ -211,3 +211,10 @@ local-first, media-aware v1); the fuller request is
   Removing an account deleted its `.mailcraft` file; as Outlook leaves a removed account's
   `.pst` on disk, the file now stays (closed, no one's), the same address added again gets a
   file of its own beside it, and Open & Export's picker starts in MailCraft Files to open it.
+- **2026-10-24** — Calendar times an hour late: the app held a single UTC offset (the one now),
+  so anything beyond the next change of clocks (25 October in Europe) was shifted, recurrences
+  repeated at their UTC time, and `TZID`s were dropped and not written back, which corrupted the
+  user's server copy when a series was edited here. `model::dates::Zone` (offset changes) now
+  backs `Clock`; events keep their zone, recurrences expand in it, CalDAV, Graph and EWS read and
+  write it, and the platform's zone is read with its daylight-saving changes (desktop, CLI,
+  browser). Regression tests span 2026-10-25 in the model, CalDAV, Graph, EWS, engine and UI.

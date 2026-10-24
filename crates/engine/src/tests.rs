@@ -1133,6 +1133,59 @@ fn remote_accounts_go_through_jobs_and_events() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Looked at on 24 October, the day before the clocks go back in Brussels: a Monday event is
+/// 08:00 on both sides of the change, a series made in summer stays at 08:00, and the week grid's
+/// days start where the local days start.
+#[test]
+fn calendar_times_follow_the_zone_across_a_change_of_clocks() {
+    use mailcraft_model::dates::{Clock, Zone, civil, days_from_civil};
+    let at = |y: i64, m: u32, d: u32, h: i64| days_from_civil(y, m, d) * 86_400 + h * 3600;
+    let zone = Zone::named("Europe/Brussels").unwrap();
+    let store = temp("zones");
+    assert!(sample::seed_if_empty(&store, NOW).unwrap());
+    let mut s = Session::open(Some(store), Clock::with_zone(at(2026, 10, 24, 10), std::sync::Arc::new(zone)));
+    s.run("view.module", &json!({"name": "calendar"})).unwrap();
+    // Made on a summer Monday at 08:00 local, weekly.
+    let uid = s
+        .run("event.create", &json!({"summary": "Stand-up", "start": "2026-10-12T08:00", "end": "2026-10-12T09:00", "repeat": "weekly"}))
+        .unwrap()["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, stored) = s.find_event(&uid).unwrap();
+    assert_eq!((stored.event.start, stored.event.tz.as_deref()), (at(2026, 10, 12, 6), Some("Europe/Brussels")));
+    let week = s.run("calendar.events", &json!({"from": "2026-10-26", "to": "2026-10-26"})).unwrap();
+    let e = week.as_array().unwrap().iter().find(|e| e["uid"] == uid.as_str()).cloned().unwrap();
+    assert_eq!(e["start"].as_i64(), Some(at(2026, 10, 26, 7)), "08:00 CET is 07:00Z, not 06:00Z");
+    assert_eq!(civil(at(2026, 10, 26, 7), &s.clock).hour, 8);
+    assert_eq!(civil(at(2026, 10, 23, 6), &s.clock).hour, 8);
+    // An event stored in UTC with no zone (from before zones were kept) still reads as local.
+    assert_eq!(s.local_midnight(days_from_civil(2026, 10, 26)), at(2026, 10, 25, 23));
+    assert_eq!(s.local_midnight(days_from_civil(2026, 10, 25)), at(2026, 10, 24, 22));
+    // A date typed for after the change is read with the offset in force then.
+    let later = s.run("event.create", &json!({"summary": "Later", "start": "2026-10-26T08:00"})).unwrap()["uid"].as_str().unwrap().to_string();
+    assert_eq!(s.find_event(&later).unwrap().1.event.start, at(2026, 10, 26, 7));
+    let _ = std::fs::remove_dir_all(s.store.as_ref().unwrap().root());
+}
+
+/// The clock keeps the platform's zone while it agrees with the reported offset, and falls back to
+/// a fixed one when it doesn't (the system's zone changed) until a new zone arrives.
+#[test]
+fn the_local_zone_follows_the_platform() {
+    use mailcraft_model::dates::{Clock, Zone};
+    let brussels = Zone::named("Europe/Brussels").unwrap();
+    let mut s = Session::open(None, Clock::with_zone(NOW, std::sync::Arc::new(brussels.clone())));
+    s.set_clock(NOW + 60, 7200);
+    assert_eq!(*s.clock.zone, brussels, "unchanged while the offset agrees");
+    assert!(s.take_jobs().is_empty());
+    s.set_clock(NOW + 120, -5 * 3600);
+    assert_eq!((s.clock.offset_at(NOW), s.clock.zone.id.as_str()), (-5 * 3600, ""), "a stand-in");
+    s.set_zone(Zone::fixed(-5 * 3600));
+    assert!(matches!(s.take_jobs().as_slice(), [Job::SetZone { .. }]), "the workers are told");
+    s.set_zone(Zone::fixed(-5 * 3600));
+    assert!(s.take_jobs().is_empty(), "once");
+}
+
 #[test]
 fn calendar_events_on_this_computer() {
     let mut s = sample_session("calendar");
@@ -2302,7 +2355,7 @@ fn events_take_their_categorys_colour() {
 
 /// The start of 2026-10-16, local, as the sample's clock has it.
 fn mailcraft_engine_day(s: &Session) -> i64 {
-    crate::parse_local("2026-10-16", i64::from(s.clock.offset)).map(|(t, _)| t).unwrap()
+    crate::parse_local("2026-10-16", &s.clock.zone).map(|(t, _)| t).unwrap()
 }
 
 /// Issue #1: calendars can be hidden (Outlook's ticks) and shown side by side, and the side

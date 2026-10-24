@@ -142,6 +142,8 @@ pub struct Pool {
     offline: bool,
     /// How accounts use their servers (requests at once, a second connection, how often).
     pub connections: Connections,
+    /// The local time zone: calendar times without a zone are read in it.
+    pub zone: Arc<mailcraft_model::dates::Zone>,
 }
 
 /// Workers started so far, numbering them in the log.
@@ -204,6 +206,7 @@ impl Pool {
             fetcher: None,
             offline: false,
             connections: Connections::default(),
+            zone: Arc::default(),
         }
     }
 
@@ -351,6 +354,7 @@ impl Pool {
             }
             Job::ImportPst { account, path } => self.import_pst(account, path),
             Job::ExportPst { account, path, name } => self.export_pst(account, path, name),
+            Job::SetZone { zone } => self.zone = Arc::new(zone),
             Job::SetSync { messages, offline, connections } => {
                 let opts =
                     SyncOptions { window: if messages == 0 { usize::MAX } else { messages as usize }, prefetch: offline as usize, ..self.opts };
@@ -540,6 +544,7 @@ impl Pool {
         w.creds = Some(self.creds.clone());
         w.sieve_port = self.sieve_port;
         w.connections = self.connections;
+        w.zone = self.zone.clone();
         w.stop = stop.clone();
         w.generation = generation;
         // The second connection: quiet (the account's status is the main one's), connecting
@@ -671,6 +676,8 @@ struct Worker {
     soon: Vec<(Instant, String)>,
     /// Requests at once, a second connection, how often to check.
     connections: Connections,
+    /// The local time zone, for calendar times that name none.
+    zone: Arc<mailcraft_model::dates::Zone>,
     /// Set by the pool when this connection is let go.
     stop: Arc<AtomicBool>,
     /// Which start of the account this is, for the log.
@@ -712,6 +719,7 @@ impl Worker {
             pushed: false,
             soon: Vec::new(),
             connections: Connections::default(),
+            zone: Arc::default(),
             stop: Arc::new(AtomicBool::new(false)),
             generation: 0,
             previous: Vec::new(),
@@ -1656,7 +1664,7 @@ impl Worker {
                 }
             }
             Job::FetchUrl { .. } | Job::Discover { .. } | Job::SignIn { .. } | Job::ImportPst { .. } | Job::ExportPst { .. } => {}
-            Job::Start { .. } | Job::Remove { .. } | Job::WorkOffline { .. } | Job::SetSync { .. } => {}
+            Job::Start { .. } | Job::Remove { .. } | Job::WorkOffline { .. } | Job::SetSync { .. } | Job::SetZone { .. } => {}
         }
     }
 
@@ -1753,7 +1761,7 @@ impl Worker {
         let password = self.auth.lock().unwrap_or_else(std::sync::PoisonError::into_inner).secret.clone();
         let dav = crate::dav::Dav::new(&user, &password);
         let host = self.acc.pop.as_ref().map_or(self.acc.imap.host.as_str(), |p| p.host.as_str());
-        let r = crate::dav::sync(&dav, &self.acc.email, host, &pim, now());
+        let r = crate::dav::sync(&dav, &self.acc.email, host, &pim, now(), &self.zone);
         if let Err(e @ NetError::Auth(_)) = &r {
             self.notice(format!("calendars and contacts: {e}"));
         }

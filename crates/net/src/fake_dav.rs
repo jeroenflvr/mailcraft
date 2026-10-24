@@ -182,6 +182,7 @@ pub fn serve() -> Server {
 
 #[cfg(test)]
 mod tests {
+    use mailcraft_model::dates::Zone;
     use mailcraft_model::ical::{self, CalEvent};
     use mailcraft_model::pim::{LOCAL, Pim, StoredEvent};
     use mailcraft_model::vcard::{self, Card, Typed};
@@ -223,7 +224,7 @@ mod tests {
         // A first sync reads everything.
         let mut pim = Pim { caldav_home: Some(home), carddav_home: Some(book_home), ..Default::default() };
         pim.ensure_defaults();
-        let first = sync(&dav, USER, "imap.example", &pim, 100).unwrap();
+        let first = sync(&dav, USER, "imap.example", &pim, 100, &Zone::default()).unwrap();
         let cal_id = format!("{}{CAL}", server.base);
         assert_eq!(first.calendars.as_ref().map(|c| (c.len(), c[0].name.as_str(), c[0].id.as_str())), Some((1, "Work", cal_id.as_str())));
         assert_eq!(first.events.iter().map(|e| e.event.summary.as_str()).collect::<Vec<_>>(), ["Review"]);
@@ -240,7 +241,7 @@ mod tests {
         pim.events.push(StoredEvent { calendar: cal_id.clone(), event: event("b@x", "New / one", 1_800_100_000), dirty: true, ..Default::default() });
         pim.events.push(StoredEvent { calendar: LOCAL.into(), event: event("l", "Only here", 1_800_000_000), dirty: false, ..Default::default() });
         pim.deleted.push(mailcraft_model::pim::Tombstone { href: pim.cards[0].href.clone(), etag: pim.cards[0].etag.clone(), ..Default::default() });
-        let second = sync(&dav, USER, "imap.example", &pim, 200).unwrap();
+        let second = sync(&dav, USER, "imap.example", &pim, 200, &Zone::default()).unwrap();
         assert!(second.errors.is_empty(), "{:?}", second.errors);
         assert_eq!(second.deleted.len(), 1);
         assert_eq!(second.pushed_events.len(), 2);
@@ -259,7 +260,7 @@ mod tests {
         let mut stale = pim.clone();
         stale.deleted.clear();
         stale.events = vec![StoredEvent { event: CalEvent { summary: "Old edit".into(), ..review.event.clone() }, dirty: true, ..review }];
-        let third = sync(&dav, USER, "imap.example", &stale, 300).unwrap();
+        let third = sync(&dav, USER, "imap.example", &stale, 300, &Zone::default()).unwrap();
         assert_eq!(third.errors.len(), 1, "{:?}", third.errors);
         assert!(!data.lock().unwrap().items.values().any(|(_, v)| v.contains("Old edit")));
         // Nothing changed since: the calendar isn't read again.
@@ -268,8 +269,42 @@ mod tests {
         settled.calendars = third.calendars.clone().unwrap();
         settled.events.iter_mut().for_each(|e| e.dirty = false);
         settled.cards.clear();
-        let fourth = sync(&dav, USER, "imap.example", &settled, 400).unwrap();
+        let fourth = sync(&dav, USER, "imap.example", &settled, 400, &Zone::default()).unwrap();
         assert_eq!(fourth.unchanged_calendars, vec![cal_id]);
         assert!(fourth.events.is_empty());
+    }
+
+    /// A weekly 08:00 Brussels series (its `TZID` sent bare, as many servers do) is read in its own
+    /// zone, not UTC and not the viewer's; editing it here and pushing it back keeps the zone, so
+    /// other clients still show 08:00 after the next change of clocks.
+    #[test]
+    fn a_series_keeps_its_zone_through_a_push() {
+        let server = serve();
+        let data = server.data.clone();
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:w1\r\nDTSTART;TZID=Europe/Brussels:20260112T080000\r\n\
+DTEND;TZID=Europe/Brussels:20260112T090000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nSUMMARY:Standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        data.lock().unwrap().put(&format!("{CAL}w.ics"), ics);
+        let dav = Dav::new(USER, PASSWORD);
+        let home = dav.home_from(Kind::Calendars, &format!("{}/.well-known/caldav", server.base)).unwrap().unwrap();
+        let mut pim = Pim { caldav_home: Some(home), ..Default::default() };
+        pim.ensure_defaults();
+        let viewer = Zone::fixed(-5 * 3600);
+        let first = sync(&dav, USER, "imap.example", &pim, 100, &viewer).unwrap();
+        let e = &first.events[0].event;
+        let utc = |y: i64, m: u32, d: u32, h: i64| mailcraft_model::dates::days_from_civil(y, m, d) * 86_400 + h * 3600;
+        assert_eq!(e.start, utc(2026, 1, 12, 7), "08:00 in Brussels, not UTC");
+        assert!(ical::starts(e, utc(2026, 8, 1, 0), &viewer).contains(&utc(2026, 7, 6, 6)), "and 08:00 again in summer");
+
+        pim.calendars = first.calendars.clone().unwrap();
+        pim.events = first.events.clone();
+        pim.events[0].event.summary = "Standup (renamed)".into();
+        pim.events[0].dirty = true;
+        let second = sync(&dav, USER, "imap.example", &pim, 200, &viewer).unwrap();
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        let stored = data.lock().unwrap().items.get(&format!("{CAL}w.ics")).map(|(_, v)| v.clone()).unwrap_or_default();
+        assert!(stored.contains("DTSTART;TZID=Europe/Brussels:20260112T080000") && stored.contains("BEGIN:VTIMEZONE"), "{stored}");
+        assert!(!stored.contains("DTSTART:2026"), "not rewritten in UTC:\n{stored}");
+        let back = &second.events[0].event;
+        assert_eq!((back.start, back.tz.as_deref()), (utc(2026, 1, 12, 7), Some("Europe/Brussels")));
     }
 }

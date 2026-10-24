@@ -50,7 +50,7 @@ impl Session {
             .iter()
             .find(|a| a.mime.to_ascii_lowercase().starts_with("text/calendar") || a.name.to_ascii_lowercase().ends_with(".ics"))?;
         let data = mime::attachment_data(&raw, att.index)?;
-        let cal = ical::parse(&String::from_utf8_lossy(&data), i64::from(self.clock.offset));
+        let cal = ical::parse(&String::from_utf8_lossy(&data), &self.clock.zone);
         (!cal.events.is_empty()).then_some(cal)
     }
 

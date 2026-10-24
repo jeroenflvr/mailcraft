@@ -244,6 +244,8 @@ pub enum Job {
     /// Sync the account's calendars and address books with its CalDAV / CardDAV server (changes
     /// made here first).
     SyncDav { account: String },
+    /// The local time zone changed: floating times from servers are read in it.
+    SetZone { zone: crate::dates::Zone },
     /// Read an Outlook data file (`.pst`) into an account with no server.
     ImportPst { account: String, path: String },
     /// Write the account's mail to an Outlook data file, which opens as `name`.
@@ -267,7 +269,7 @@ impl Job {
             | Job::SyncDav { account }
             | Job::ImportPst { account, .. }
             | Job::ExportPst { account, .. } => account,
-            Job::FetchUrl { .. } | Job::Discover { .. } | Job::WorkOffline { .. } | Job::SetSync { .. } => "",
+            Job::FetchUrl { .. } | Job::Discover { .. } | Job::WorkOffline { .. } | Job::SetSync { .. } | Job::SetZone { .. } => "",
             Job::SignIn { account } => &account.id,
         }
     }

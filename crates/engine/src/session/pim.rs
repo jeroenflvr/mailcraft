@@ -107,7 +107,7 @@ impl Session {
 
     /// The local day (days since the epoch) the calendar shows.
     pub fn cal_day(&self) -> i64 {
-        self.cal_day.unwrap_or_else(|| self.clock.now.saturating_add(i64::from(self.clock.offset)).div_euclid(86_400))
+        self.cal_day.unwrap_or_else(|| self.clock.local_day(self.clock.now))
     }
 
     /// The local days on screen: a day, the week (Monday first) or the weeks of the month.
@@ -125,18 +125,19 @@ impl Session {
         }
     }
 
-    /// The Unix time a local day starts.
+    /// The Unix time a local day starts (an hour later or earlier than the day before's 24 hours
+    /// when the clocks change).
     pub fn local_midnight(&self, day: i64) -> i64 {
-        day.saturating_mul(86_400) - i64::from(self.clock.offset)
+        self.clock.local_midnight(day)
     }
 
     /// Move the calendar: to a date, today, or by `step` days, weeks or months (its mode).
     pub fn cal_goto(&mut self, date: Option<&str>, step: i64) -> CmdResult {
         let mut d = self.cal_day();
         match date.map(str::trim) {
-            Some("today") | Some("") => d = self.clock.now.saturating_add(i64::from(self.clock.offset)).div_euclid(86_400),
+            Some("today") | Some("") => d = self.clock.local_day(self.clock.now),
             Some(s) => {
-                d = parse_local(s, 0)
+                d = parse_local(s, &self.clock.zone)
                     .map(|(t, _)| t.div_euclid(86_400))
                     .ok_or_else(|| CmdError::Params(format!("`{s}` is not a date (YYYY-MM-DD)")))?;
             }
@@ -180,16 +181,19 @@ impl Session {
 
     /// The occurrences overlapping `[from, to)`, by start, from every calendar that's shown.
     pub fn agenda(&self, from: i64, to: i64) -> Vec<AgendaItem> {
-        let off = i64::from(self.clock.offset);
         let mut out = Vec::new();
         for (account, p) in &self.pim {
             for cal in p.calendars.iter().filter(|c| self.calendar_shown(account, &c.id)) {
                 let stored: Vec<&StoredEvent> = p.events.iter().filter(|e| e.calendar == cal.id).collect();
                 let events: Vec<CalEvent> = stored.iter().map(|e| e.event.clone()).collect();
                 // All-day events are dates, not times: widen the window by a day each way.
-                for o in ical::occurrences(&events, from - 86_400, to + 86_400) {
+                for o in ical::occurrences(&events, from - 86_400, to + 86_400, &self.clock.zone) {
                     let Some(e) = events.get(o.event) else { continue };
-                    let (start, end) = if e.all_day { (o.start - off, o.end - off) } else { (o.start, o.end) };
+                    let (start, end) = if e.all_day {
+                        (self.local_midnight(o.start.div_euclid(86_400)), self.local_midnight(o.end.div_euclid(86_400)))
+                    } else {
+                        (o.start, o.end)
+                    };
                     if start >= to || end.max(start + 1) <= from {
                         continue;
                     }
@@ -686,9 +690,10 @@ fn check_card(c: &Card) -> Result<(), CmdError> {
 }
 
 /// A local date (`YYYY-MM-DD`, all day) or date and time (`YYYY-MM-DDTHH:MM`, or with a space),
-/// or Unix seconds, as (Unix seconds, all day). `offset` is the local UTC offset; all-day dates
-/// come back at UTC midnight (as events keep them).
-pub fn parse_local(s: &str, offset: i64) -> Option<(i64, bool)> {
+/// or Unix seconds, as (Unix seconds, all day). Times are in `zone` (a time that never happens or
+/// happens twice at a change of clocks is read as `Zone::local_to_utc` says); all-day dates come
+/// back at UTC midnight (as events keep them).
+pub fn parse_local(s: &str, zone: &Zone) -> Option<(i64, bool)> {
     let s = s.trim();
     if let Ok(n) = s.parse::<i64>() {
         return (n.abs() < 400_000_000_000).then_some((n, false));
@@ -709,5 +714,5 @@ pub fn parse_local(s: &str, offset: i64) -> Option<(i64, bool)> {
     if h > 23 || mi > 59 || s.get(13..14) != Some(":") {
         return None;
     }
-    Some((day * 86_400 + h * 3600 + mi * 60 - offset, false))
+    Some((zone.local_to_utc(day * 86_400 + h * 3600 + mi * 60), false))
 }

@@ -32,6 +32,10 @@ pst_rw = { package = "outlook-pst-rw", version = "1.2.14" }
 md4 = "0.11"
 md-5 = "0.11"
 hmac = "0.13"
+# The system's local time zone: its offsets (chrono) and its name (the IANA database's, on every
+# platform; both MIT / Apache-2.0).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+iana-time-zone = "0.1"
 log = { workspace = true }
 thiserror = { workspace = true }
 

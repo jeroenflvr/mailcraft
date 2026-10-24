@@ -6,7 +6,8 @@
 //! with their responses. Changes made here go first (new, changed, deleted), then every calendar
 //! and the contacts are read again.
 
-use mailcraft_model::ical::{Attendee, CalEvent};
+use mailcraft_model::dates::Zone;
+use mailcraft_model::ical::{self, Attendee, CalEvent};
 use mailcraft_model::pim::{BookInfo, CalendarInfo, DavSync, LOCAL, Pim, StoredCard, StoredEvent};
 use mailcraft_model::vcard::{Card, PostalAddress, Typed};
 use serde_json::{Value, json};
@@ -18,7 +19,8 @@ use crate::{NetError, Result};
 const MAX_ITEMS: usize = 5000;
 /// The address book Graph's contacts go into.
 pub const CONTACTS: &str = "graph:contacts";
-const EVENT_FIELDS: &str = "id,iCalUId,subject,body,start,end,isAllDay,location,attendees,organizer,recurrence,changeKey,isCancelled,type,categories";
+const EVENT_FIELDS: &str =
+    "id,iCalUId,subject,body,start,end,isAllDay,location,attendees,organizer,recurrence,changeKey,isCancelled,type,categories,originalStartTimeZone";
 const CONTACT_FIELDS: &str = "id,changeKey,displayName,givenName,surname,emailAddresses,businessPhones,homePhones,mobilePhone,companyName,jobTitle,personalNotes,businessAddress,homeAddress,otherAddress,birthday";
 
 fn seg(id: &str) -> String {
@@ -34,11 +36,16 @@ fn when(v: Option<&Value>) -> Option<i64> {
     mailcraft_jmap::utc_date(v?.get("dateTime")?.as_str()?)
 }
 
-fn date_time(t: i64) -> Value {
-    let days = t.div_euclid(86_400);
-    let secs = t.rem_euclid(86_400);
-    let (y, m, d) = mailcraft_model::dates::civil_from_days(days);
-    json!({"dateTime": format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60), "timeZone": "UTC"})
+/// A time as Graph's `dateTimeTimeZone`: the wall-clock time in the event's zone (named as the
+/// event names it, which Graph takes as an IANA or Windows name), else UTC.
+fn date_time(t: i64, zone: Option<&(String, Zone)>) -> Value {
+    let (name, shown) = match zone {
+        Some((name, z)) => (name.as_str(), t.saturating_add(i64::from(z.offset_at(t)))),
+        None => ("UTC", t),
+    };
+    let (y, m, d) = mailcraft_model::dates::civil_from_days(shown.div_euclid(86_400));
+    let secs = shown.rem_euclid(86_400);
+    json!({"dateTime": format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60), "timeZone": name})
 }
 
 fn ymd(t: i64) -> String {
@@ -168,6 +175,18 @@ fn person(v: &Value) -> Option<Attendee> {
     (!email.is_empty()).then(|| Attendee { email, name: s(e, "name"), partstat: String::new(), rsvp: false })
 }
 
+/// The zone an event or its series was made in: the recurrence's, else the event's own.
+fn series_zone(v: &Value) -> Option<String> {
+    let name = v
+        .pointer("/recurrence/range/recurrenceTimeZone")
+        .and_then(Value::as_str)
+        .filter(|z| !z.trim().is_empty())
+        .or_else(|| v.get("originalStartTimeZone").and_then(Value::as_str))?
+        .trim();
+    // Graph says "tzone://Microsoft/Custom" for a zone it can't name.
+    (!name.is_empty() && !name.contains("://")).then(|| name.to_string())
+}
+
 /// A Graph event as an event.
 pub fn event_of(v: &Value) -> Option<CalEvent> {
     let all_day = v.get("isAllDay").and_then(Value::as_bool).unwrap_or(false);
@@ -201,6 +220,8 @@ pub fn event_of(v: &Value) -> Option<CalEvent> {
         end,
         all_day,
         rrule: v.get("recurrence").filter(|r| !r.is_null()).and_then(rrule_of),
+        // Times come in UTC; a series repeats at the wall-clock time of the zone it was made in.
+        tz: if all_day { None } else { series_zone(v) },
         organizer: v.get("organizer").and_then(person),
         attendees,
         status: if v.get("isCancelled").and_then(Value::as_bool).unwrap_or(false) { "CANCELLED".into() } else { String::new() },
@@ -215,17 +236,20 @@ pub fn event_of(v: &Value) -> Option<CalEvent> {
 
 /// An event as Graph's JSON (for creating or changing it).
 pub fn event_json(e: &CalEvent) -> Value {
+    let zone = ical::written_zone(e);
     let mut v = json!({
         "subject": e.summary,
         "body": {"contentType": "text", "content": e.description},
         "location": {"displayName": e.location},
         "isAllDay": e.all_day,
-        "start": if e.all_day { json!({"dateTime": format!("{}T00:00:00", ymd(e.start)), "timeZone": "UTC"}) } else { date_time(e.start) },
-        "end": if e.all_day { json!({"dateTime": format!("{}T00:00:00", ymd(e.end.max(e.start + 86_400))), "timeZone": "UTC"}) } else { date_time(e.end) },
+        "start": if e.all_day { json!({"dateTime": format!("{}T00:00:00", ymd(e.start)), "timeZone": "UTC"}) } else { date_time(e.start, zone.as_ref()) },
+        "end": if e.all_day { json!({"dateTime": format!("{}T00:00:00", ymd(e.end.max(e.start + 86_400))), "timeZone": "UTC"}) } else { date_time(e.end, zone.as_ref()) },
         "attendees": e.attendees.iter().map(|a| json!({"type": "required", "emailAddress": {"address": a.email, "name": a.name}})).collect::<Vec<_>>(),
         "categories": e.categories,
     });
-    v["recurrence"] = e.rrule.as_deref().and_then(|r| recurrence_of(r, e.start)).unwrap_or(Value::Null);
+    // The pattern's days and dates are the zone's, not UTC's.
+    let first = e.start.saturating_add(zone.as_ref().map_or(0, |(_, z)| i64::from(z.offset_at(e.start))));
+    v["recurrence"] = e.rrule.as_deref().and_then(|r| recurrence_of(r, first)).unwrap_or(Value::Null);
     v
 }
 
@@ -517,5 +541,35 @@ mod tests {
         );
         let back = card_json(&card);
         assert_eq!((back["mobilePhone"].as_str(), back["businessPhones"][0].as_str()), (Some("+1 555 0101"), Some("+1 555 0100")));
+    }
+
+    /// A series keeps the zone it was made in: read from `originalStartTimeZone` (a Windows name)
+    /// and written back as wall-clock time in it, so Exchange repeats it at 08:00 all year.
+    #[test]
+    fn a_series_keeps_its_zone() {
+        let v = json!({
+            "id": "S1", "iCalUId": "uid-s", "subject": "Standup", "type": "seriesMaster",
+            "start": {"dateTime": "2026-01-12T07:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-01-12T08:00:00.0000000", "timeZone": "UTC"},
+            "originalStartTimeZone": "Romance Standard Time",
+            "recurrence": {"pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["monday"]}, "range": {"type": "noEnd", "startDate": "2026-01-12"}},
+        });
+        let e = event_of(&v).unwrap();
+        assert_eq!(e.tz.as_deref(), Some("Romance Standard Time"));
+        let local = mailcraft_model::dates::Zone::fixed(0);
+        let s = ical::starts(&e, e.start + 200 * 86_400, &local);
+        assert!(s.contains(&(e.start + 175 * 86_400 - 3600)), "6 July is 06:00Z: {s:?}");
+        let back = event_json(&e);
+        assert_eq!(back["start"], json!({"dateTime": "2026-01-12T08:00:00", "timeZone": "Romance Standard Time"}));
+        // The recurrence zone wins over the event's; a zone Graph can't name is ignored.
+        let mut w = v.clone();
+        w["recurrence"]["range"]["recurrenceTimeZone"] = json!("Europe/Brussels");
+        assert_eq!(event_of(&w).unwrap().tz.as_deref(), Some("Europe/Brussels"));
+        w["recurrence"]["range"]["recurrenceTimeZone"] = json!("tzone://Microsoft/Custom");
+        w["originalStartTimeZone"] = json!("tzone://Microsoft/Custom");
+        assert_eq!(event_of(&w).unwrap().tz, None);
+        // A zone nothing knows is sent as UTC, as before.
+        let odd = CalEvent { tz: Some("Mars/Olympus".into()), ..e };
+        assert_eq!(event_json(&odd)["start"]["timeZone"], "UTC");
     }
 }

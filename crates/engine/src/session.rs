@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use mailcraft_mime::{self as mime, OutAttachment, Parsed, ReplyMode};
 use mailcraft_model::contacts::{Contact, ContactBook};
-use mailcraft_model::dates::{Clock, DateGroup};
+use mailcraft_model::dates::{Clock, DateGroup, Zone};
 use mailcraft_model::job::{Secret, Vacation};
 use mailcraft_model::search::{Doc, Index, Query, summary_text};
 use mailcraft_model::thread::{Thread, threads};
@@ -592,6 +592,9 @@ pub struct Session {
     pub compose: Option<Compose>,
     pub prefs: Prefs,
     pub clock: Clock,
+    /// The zone the network layer was last given (the one the session started with, or the last
+    /// `Job::SetZone`).
+    zone_sent: Arc<Zone>,
     pub notices: Vec<Notice>,
     /// What the last changes can be put back to, newest last (Undo, Ctrl+Z).
     pub undo: Vec<Undo>,
@@ -675,6 +678,7 @@ const ACCOUNT_COLORS: u8 = 8;
 impl Session {
     /// A session over a cache. Remote accounts get a `Start` job (password from the keychain).
     pub fn open(store: Option<Store>, clock: Clock) -> Session {
+        let (first_id, now) = (u64::try_from(clock.now.max(0)).unwrap_or(0).saturating_mul(1000), clock.now);
         let mut s = Session {
             store,
             accounts: Vec::new(),
@@ -689,6 +693,7 @@ impl Session {
             windows: Vec::new(),
             compose: None,
             prefs: Prefs::default(),
+            zone_sent: clock.zone.clone(),
             clock,
             notices: Vec::new(),
             undo: Vec::new(),
@@ -728,8 +733,8 @@ impl Session {
             body_words_bytes: 0,
             registry: Arc::new(crate::cmd::registry()),
             // Compose ids also name Outbox entries, which outlive a session: start from the clock.
-            next_id: u64::try_from(clock.now.max(0)).unwrap_or(0).saturating_mul(1000),
-            seed: (clock.now as u64) ^ 0x9E37_79B9_7F4A_7C15,
+            next_id: first_id,
+            seed: (now as u64) ^ 0x9E37_79B9_7F4A_7C15,
         };
         if let Some(store) = &s.store {
             s.rules = store.load_doc("rules.json").unwrap_or_default();
@@ -825,8 +830,24 @@ impl Session {
         self.jobs.push(job);
     }
 
+    /// The time as the platform reports it. The local zone stays unless it disagrees with the
+    /// reported offset (the system's zone changed), in which case a fixed zone stands in until
+    /// [`Session::set_zone`] gives the new one.
     pub fn set_clock(&mut self, now: i64, offset: i32) {
-        self.clock = Clock::new(now, offset);
+        if self.clock.offset_at(now) != offset.clamp(-14 * 3600, 14 * 3600) {
+            self.clock.zone = Arc::new(Zone::fixed(offset));
+        }
+        self.clock.now = now;
+    }
+
+    /// The local time zone, as the platform describes it. The network layer reads floating
+    /// calendar times in it too.
+    pub fn set_zone(&mut self, zone: Zone) {
+        if *self.zone_sent != zone {
+            self.jobs.push(Job::SetZone { zone: zone.clone() });
+        }
+        self.clock.zone = Arc::new(zone);
+        self.zone_sent = self.clock.zone.clone();
     }
 
     pub fn notice(&mut self, text: impl Into<String>, error: bool) {

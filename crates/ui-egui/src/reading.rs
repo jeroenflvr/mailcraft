@@ -372,7 +372,7 @@ fn invite_card(s: &Session, st: &mut UiState, ui: &mut Ui, key: &MessageKey, act
             ui.vertical(|ui| {
                 ui.label(RichText::new(&e.summary).font(theme::bold(15.0)).color(t.text));
                 let when = if e.all_day {
-                    crate::i18n::date(&dates::full_time(e.start - i64::from(s.clock.offset), &s.clock))
+                    crate::i18n::date(&dates::full_time(s.clock.local_midnight(e.start.div_euclid(86_400)), &s.clock))
                         .split(' ')
                         .take(2)
                         .collect::<Vec<_>>()
@@ -1762,7 +1762,7 @@ const CHIP_H: f32 = 42.0;
 /// own, or at once again.
 fn delay_menu(ui: &mut Ui, t: &Tokens, c: &mut mailcraft_engine::Compose, clock: &dates::Clock) {
     let today = dates::today(clock);
-    let at = |day: i64, minutes: i64| day.saturating_mul(86_400) - i64::from(clock.offset) + minutes * 60;
+    let at = |day: i64, minutes: i64| clock.local_to_utc(day.saturating_mul(86_400).saturating_add(minutes * 60));
     let weekday = (today + 3).rem_euclid(7);
     let presets = [
         ("In 1 hour", (clock.now + 3600) / 60 * 60),
@@ -2062,7 +2062,7 @@ fn compose(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
         }
         _ => Vec::new(),
     };
-    let clock = s.clock;
+    let clock = s.clock.clone();
     // Delay Delivery holds mail in the Outbox, which only a server account's sends from.
     let can_delay = s.compose.as_ref().and_then(|c| s.account(&c.account)).is_some_and(|a| !a.is_local());
     let signature = s.compose.as_ref().and_then(|c| s.account(&c.account)).map(|a| a.config.signature.clone()).unwrap_or_default();

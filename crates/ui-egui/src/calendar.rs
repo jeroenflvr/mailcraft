@@ -21,7 +21,7 @@ pub fn color(i: u8, t: &Tokens) -> Color32 {
 }
 
 fn today(s: &Session) -> i64 {
-    s.clock.now.saturating_add(i64::from(s.clock.offset)).div_euclid(86_400)
+    s.clock.local_day(s.clock.now)
 }
 
 /// `HH:MM`, local.
@@ -32,7 +32,18 @@ pub fn hm(t: i64, s: &Session) -> String {
 
 /// The local day a time falls on.
 fn day_of(t: i64, s: &Session) -> i64 {
-    t.saturating_add(i64::from(s.clock.offset)).div_euclid(86_400)
+    s.clock.local_day(t)
+}
+
+/// Seconds of wall-clock time into local day `d` at `t`, within the day: 08:00 is 8 hours down
+/// the grid even on the day the clocks change (the day then has 23 or 25 hours).
+pub(crate) fn wall(t: i64, d: i64, s: &Session) -> f32 {
+    (t.saturating_add(i64::from(s.clock.offset_at(t))) - d.saturating_mul(86_400)).clamp(0, 86_400) as f32
+}
+
+/// The Unix time of a wall-clock time `secs` into local day `d`.
+fn at_wall(d: i64, secs: i64, s: &Session) -> i64 {
+    s.clock.local_to_utc(d.saturating_mul(86_400).saturating_add(secs))
 }
 
 /// `October 2026`, `12 – 18 October 2026`, `Monday, 12 October 2026`.
@@ -384,7 +395,7 @@ fn month(s: &Session, t: &Tokens, ui: &mut Ui, items: &[AgendaItem], d0: i64, ac
                 }
             }
             if bg.double_clicked() {
-                acts.push(Action::Dialog(Dialog::new_event(s, Some(s.local_midnight(d) + 9 * 3600))));
+                acts.push(Action::Dialog(Dialog::new_event(s, Some(at_wall(d, 9 * 3600, s)))));
             }
         }
     }
@@ -553,7 +564,7 @@ fn days(s: &Session, st: &mut UiState, ui: &mut Ui, items: &[AgendaItem], d0: i6
                     && let Some(p) = r.interact_pointer_pos()
                 {
                     let half = ((p.y - grid.min.y) / (HOUR / 2.0)).floor().clamp(0.0, 47.0) as i64;
-                    acts.push(new_event_in(s, s.local_midnight(d0 + i) + half * 1800, cals.get(j).filter(|_| k > 1)));
+                    acts.push(new_event_in(s, at_wall(d0 + i, half * 1800, s), cals.get(j).filter(|_| k > 1)));
                 }
             }
         }
@@ -579,8 +590,8 @@ fn days(s: &Session, st: &mut UiState, ui: &mut Ui, items: &[AgendaItem], d0: i6
             }
             let width = (cw - 6.0) / lane_end.len().max(1) as f32;
             for (it, lane) in todays.iter().zip(lanes) {
-                let top = ((it.start.max(day0) - day0) as f32 / 3600.0) * HOUR;
-                let bottom = ((it.end.min(day1) - day0) as f32 / 3600.0) * HOUR;
+                let top = (wall(it.start, d, s) / 3600.0) * HOUR;
+                let bottom = (wall(it.end, d, s) / 3600.0) * HOUR;
                 let r = Rect::from_min_size(
                     pos2(grid.min.x + day_x(i, j) + 3.0 + width * lane as f32, grid.min.y + top + 1.0),
                     vec2(width - 2.0, (bottom - top - 2.0).max(18.0)),
@@ -604,7 +615,7 @@ fn days(s: &Session, st: &mut UiState, ui: &mut Ui, items: &[AgendaItem], d0: i6
         // Now, in every pane.
         let n_day = today(s);
         if n_day >= d0 && n_day < d1 {
-            let y = grid.min.y + ((s.clock.now - s.local_midnight(n_day)) as f32 / 3600.0) * HOUR;
+            let y = grid.min.y + (wall(s.clock.now, n_day, s) / 3600.0) * HOUR;
             for j in 0..k {
                 let x0 = grid.min.x + day_x(n_day - d0, j);
                 ui.painter().line_segment([pos2(x0, y), pos2(x0 + cw, y)], egui::Stroke::new(2.0, t.danger));

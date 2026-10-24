@@ -10,6 +10,7 @@
 use mailcraft_model::ical::{Attendee, CalEvent};
 use mailcraft_model::pim::{BookInfo, CalendarInfo, DavSync, Note, Pim, StoredCard, StoredEvent, StoredNote};
 use mailcraft_model::vcard::{Card, PostalAddress, Typed};
+use mailcraft_model::zones;
 use serde_json::{Value, json};
 
 use crate::ews::{Client, El, esc};
@@ -123,6 +124,14 @@ fn person(m: &El) -> Option<Attendee> {
     email.contains('@').then(|| Attendee { email, name: text(mb, "Name"), partstat: String::new(), rsvp: false })
 }
 
+/// The Windows zone name an appointment was made in (`StartTimeZone`, else the older
+/// `MeetingTimeZone`).
+fn series_zone(it: &El) -> Option<String> {
+    let name =
+        it.child("StartTimeZone").and_then(|z| z.attr("Id")).or_else(|| it.child("MeetingTimeZone").and_then(|z| z.attr("TimeZoneName")))?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// An appointment as an event (occurrences and changed instances are left to their series).
 pub fn event_of(it: &El) -> Option<CalEvent> {
     if matches!(it.text_of("CalendarItemType"), Some("Occurrence" | "Exception")) {
@@ -167,6 +176,8 @@ pub fn event_of(it: &El) -> Option<CalEvent> {
         end,
         all_day,
         rrule: it.child("Recurrence").and_then(recurrence_json).as_ref().and_then(rrule_of),
+        // Times come in UTC; a series repeats at the wall-clock time of the zone it was made in.
+        tz: if all_day { None } else { series_zone(it) },
         organizer: it.child("Organizer").and_then(person),
         attendees,
         status: if it.text_of("IsCancelled") == Some("true") { "CANCELLED".into() } else { String::new() },
@@ -199,6 +210,11 @@ fn event_fields(e: &CalEvent) -> Vec<(&'static str, String)> {
     ]);
     if let Some(r) = e.rrule.as_deref().and_then(|r| recurrence_xml(r, e.start)) {
         f.push(("Recurrence", r));
+    }
+    // The zone it was made in, so a series keeps its wall-clock time across daylight saving.
+    if let Some(id) = e.tz.as_deref().filter(|_| !e.all_day).and_then(zones::windows_name) {
+        f.push(("StartTimeZone", format!("<t:StartTimeZone Id=\"{}\"/>", esc(id))));
+        f.push(("EndTimeZone", format!("<t:EndTimeZone Id=\"{}\"/>", esc(id))));
     }
     f
 }
@@ -460,7 +476,7 @@ fn items_in(c: &Client, parent: &str, extra: &str) -> Result<Vec<El>> {
         let list: String = chunk.iter().map(|id| format!("<t:ItemId Id=\"{}\"/>", esc(id))).collect();
         let doc = c.call(&format!(
             "<m:GetItem><m:ItemShape><t:BaseShape>AllProperties</t:BaseShape><t:BodyType>Text</t:BodyType>\
-             <t:AdditionalProperties><t:FieldURI FieldURI=\"calendar:Recurrence\"/><t:FieldURI FieldURI=\"item:EffectiveRights\"/>{}</t:AdditionalProperties></m:ItemShape>\
+             <t:AdditionalProperties><t:FieldURI FieldURI=\"calendar:Recurrence\"/><t:FieldURI FieldURI=\"calendar:StartTimeZone\"/><t:FieldURI FieldURI=\"item:EffectiveRights\"/>{}</t:AdditionalProperties></m:ItemShape>\
              <m:ItemIds>{list}</m:ItemIds></m:GetItem>",
             extra
         ))?;
@@ -844,5 +860,25 @@ mod tests {
         assert!(event_fields(&e).iter().any(|(_, x)| x.contains("<t:String>Red category</t:String>")));
         let plain = CalEvent { categories: Vec::new(), ..e };
         assert!(event_fields(&plain).iter().all(|(n, _)| *n != "Categories"));
+    }
+
+    /// An appointment's zone comes in (`StartTimeZone`, else `MeetingTimeZone`) and goes back out as
+    /// a Windows name, whichever kind of name it was made with.
+    #[test]
+    fn appointments_keep_their_zone() {
+        let xml = "<t:CalendarItem><t:Subject>Standup</t:Subject><t:UID>u1</t:UID><t:Start>2026-01-12T07:00:00Z</t:Start><t:End>2026-01-12T08:00:00Z</t:End>\
+                   <t:StartTimeZone Id=\"W. Europe Standard Time\" Name=\"(UTC+01:00) Amsterdam\"/></t:CalendarItem>";
+        let e = event_of(parse(xml).find("CalendarItem").unwrap()).unwrap();
+        assert_eq!(e.tz.as_deref(), Some("W. Europe Standard Time"));
+        let old = xml.replace("StartTimeZone Id", "MeetingTimeZone TimeZoneName");
+        assert_eq!(event_of(parse(&old).find("CalendarItem").unwrap()).unwrap().tz.as_deref(), Some("W. Europe Standard Time"));
+        let fields = event_fields(&e);
+        assert!(fields.iter().any(|(n, x)| *n == "StartTimeZone" && x.contains("Id=\"W. Europe Standard Time\"")), "{fields:?}");
+        assert_eq!(fields.last().map(|f| f.0), Some("EndTimeZone"));
+        // An IANA name (made in MailCraft) goes as its Windows name; one nothing knows is left out.
+        let iana = CalEvent { tz: Some("Europe/Brussels".into()), ..e.clone() };
+        assert!(event_fields(&iana).iter().any(|(_, x)| x.contains("Id=\"Romance Standard Time\"")));
+        let odd = CalEvent { tz: Some("Mars/Olympus".into()), ..e };
+        assert!(event_fields(&odd).iter().all(|(n, _)| !n.ends_with("TimeZone")));
     }
 }

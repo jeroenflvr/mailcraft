@@ -97,8 +97,8 @@ impl EventForm {
         let read_only = s.pim.get(account).is_some_and(|p| p.calendars.iter().any(|c| c.id == stored.calendar && c.read_only));
         // A recurring event is edited as a series: its first occurrence's dates.
         let (start, end) = if e.all_day {
-            let off = i64::from(s.clock.offset);
-            (e.start - off, e.end - off - 86_400)
+            // All-day events are dates: the local midnights of their first and last day.
+            (s.local_midnight(e.start.div_euclid(86_400)), s.local_midnight((e.end - 1).div_euclid(86_400)))
         } else {
             (e.start, e.end)
         };

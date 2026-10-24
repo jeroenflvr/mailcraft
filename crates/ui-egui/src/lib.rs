@@ -92,8 +92,14 @@ impl Backend for NullBackend {
 
 /// Platform services the UI needs.
 pub trait Services {
-    /// Unix seconds and the local UTC offset in seconds.
+    /// Unix seconds and the local UTC offset in seconds (now).
     fn clock(&self) -> (i64, i32);
+    /// The local time zone with its daylight-saving changes, for times away from now. Asked at
+    /// the start and when the offset from [`Services::clock`] stops agreeing with the last one;
+    /// the default knows only the offset now.
+    fn local_zone(&self) -> mailcraft_engine::model::dates::Zone {
+        mailcraft_engine::model::dates::Zone::fixed(self.clock().1)
+    }
     /// Files to attach (an empty list when cancelled).
     fn pick_files(&mut self) -> Vec<PathBuf>;
     /// Where to save a file (`None` when cancelled).
@@ -610,6 +616,9 @@ impl MailApp {
 
     fn pump(&mut self) {
         let (now, offset) = self.services.clock();
+        if self.session.clock.offset_at(now) != offset.clamp(-14 * 3600, 14 * 3600) {
+            self.session.set_zone(self.services.local_zone());
+        }
         self.session.set_clock(now, offset);
         for e in self.backend.poll() {
             self.session.apply(e);

@@ -500,3 +500,18 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   id in a batch came back under its regular id, was numbered again, and was dropped and fetched
   again at every sync. Every request in a batch now carries it; the fake Graph answers
   without it as Graph does.
+
+### Unreleased — calendar time zones
+- **Calendar times an hour off:** the clock held one UTC offset (the one now), so next week's
+  events, across a change of clocks, were an hour late (or early), recurrences repeated at their
+  UTC time, `TZID`s were lost on reading (CalDAV read bare Olson names as UTC) and editing a series
+  here rewrote it in UTC on the server. Now a `Zone` (a list of offset changes) is the local zone
+  and an event's own: `Clock::offset_at(t)` and `local_to_utc` replace the single offset
+  everywhere (the calendar grids, the editor, invitations, delayed send, snooze), recurrences
+  repeat at the same wall-clock time in the event's zone, `TZID`s resolve through the file's
+  `VTIMEZONE`, then a built-in table of Olson and Windows names, then the local zone (with a
+  warning), and writing keeps `TZID` + `VTIMEZONE` (CalDAV), `timeZone` (Graph) and
+  `StartTimeZone` (EWS). See [sync.md](sync.md). Limits: the table's daylight-saving rules are
+  the current ones for every year (the US before 2007, Australia before 2008 differ); the local
+  zone is read for 30 years each way; zones the table doesn't know and a server doesn't describe
+  are written in UTC.
