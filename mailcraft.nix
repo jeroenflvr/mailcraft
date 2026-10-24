@@ -18,7 +18,7 @@
 
 rustPlatform.buildRustPackage rec {
   pname = "mailcraft";
-  version = "0.18.11";
+  version = "0.19.0";
   src = ./.;
 
   cargoLock.lockFile = ./Cargo.lock;
