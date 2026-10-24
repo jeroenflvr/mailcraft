@@ -1,6 +1,6 @@
 # Roadmap
 
-**Stage:** v0.19.1 — Mail printed as it is shown (2026-10-24). Each milestone below is a version: v0.1 was
+**Stage:** v0.19.2 — The Print dialog (2026-10-24). Each milestone below is a version: v0.1 was
 the first working client, and every later one is named for what it added.
 Scope: [storytold/artcraft#2177](https://github.com/storytold/artcraft/issues/2177) (lightweight,
 local-first, media-aware v1); the fuller request is
@@ -230,7 +230,7 @@ local-first, media-aware v1); the fuller request is
   the reading pane does: headings, bold and italic, colours, clickable links, and tables with
   their columns and backgrounds, rows kept whole over page breaks. The reading pane sizes
   tables without widths to their content, so a receipt's label stays beside its value.
-- **2026-10-24** — The Print dialog: printer, copies and collating, pages, orientation, paper,
+- **2026-10-24** — **v0.19.2**: the Print dialog: printer, copies and collating, pages, orientation, paper,
   both sides, color, scale and the message header, with a preview of the page; the last settings
   are kept. Orientation, paper, scale and the page list are in the PDF (so they work on Windows
   and as Save as PDF in the browser, where the dialog is a page setup); the rest goes to CUPS.

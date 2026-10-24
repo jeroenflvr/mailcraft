@@ -6,7 +6,7 @@ the items it deferred (calendar, contacts, Exchange, PST import, a web build) ar
 limits below. What each version brought is under [Done](#done); the milestones are in
 [ROADMAP.md](../ROADMAP.md).
 
-_Status: v0.19.1, 2026-10-24._
+_Status: v0.19.2, 2026-10-24._
 
 ## Open
 
@@ -559,7 +559,7 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   stacking the row; `max-width` caps a fluid box and a `margin: 0 auto` wrapper is centred. The
   sample mailbox has a receipt laid out that way (*Your receipt from Print Shop*).
 
-### Unreleased — the Print dialog
+### v0.19.2 — the Print dialog
 - **Printer options:** *Print* (File › Print, the reading pane, `message.print`) is a dialog of
   Outlook's Print page, simplified: the printer, copies and *Collate*, the pages (all, or a list
   such as `1-3, 5`, checked as it is typed and against the pages the message takes), portrait or
