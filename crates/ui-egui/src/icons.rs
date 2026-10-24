@@ -47,6 +47,8 @@ pub enum Icon {
     Clock,
     Tag,
     Print,
+    Portrait,
+    Landscape,
     Back,
     Info,
     Away,
@@ -430,6 +432,18 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.rect(4.0, 1.5, 12.0, 5.5);
             pen.closed(&[(1.5, 5.5), (14.5, 5.5), (14.5, 11.5), (12.0, 11.5), (12.0, 9.5), (4.0, 9.5), (4.0, 11.5), (1.5, 11.5)]);
             pen.rect(4.0, 9.5, 12.0, 14.5);
+        }
+        Icon::Portrait => {
+            pen.rect(3.5, 1.5, 12.5, 14.5);
+            pen.line(&[(5.5, 5.0), (10.5, 5.0)]);
+            pen.line(&[(5.5, 8.0), (10.5, 8.0)]);
+            pen.line(&[(5.5, 11.0), (8.5, 11.0)]);
+        }
+        Icon::Landscape => {
+            pen.rect(1.5, 3.5, 14.5, 12.5);
+            pen.line(&[(4.0, 6.0), (12.0, 6.0)]);
+            pen.line(&[(4.0, 8.5), (12.0, 8.5)]);
+            pen.line(&[(4.0, 11.0), (8.0, 11.0)]);
         }
         Icon::Tag => {
             pen.closed(&[(1.5, 2.5), (8.0, 2.5), (14.5, 9.0), (9.0, 14.5), (1.5, 8.0)]);

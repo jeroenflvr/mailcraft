@@ -5,7 +5,9 @@
 //! archive, Ctrl+Shift+V move, F9 send/receive, Ctrl+Enter send.
 
 use mailcraft_mime::{OutAttachment, ReplyMode, mime_from_name, sanitize_filename};
-use mailcraft_model::{AccountConfig, Flag, FolderRole, Security, ServerConfig};
+use mailcraft_model::{
+    AccountConfig, ColorMode, Duplex, Flag, FolderRole, Orientation, PageRange, Paper, PrintOptions, Scale, Security, ServerConfig,
+};
 use serde_json::{Value, json};
 
 use crate::session::{ListFilter, MoveTarget, ReadingPane, SearchScope, View, parse_key};
@@ -220,9 +222,11 @@ pub fn registry() -> Registry {
         })
         .params(r#"{"key": string}"#),
         CommandSpec::new("message.saveAs", "Save as", "File › Save As", save_message).params(r#"{"path": string}"#).when(has_reading),
-        CommandSpec::new("message.exportPdf", "Save as PDF", "File › Save As", export_pdf).params(r#"{"path": string}"#).when(has_reading),
+        CommandSpec::new("message.exportPdf", "Save as PDF", "File › Save As", export_pdf)
+            .params(r#"{"path": string, "paper"?: "a4"|"letter"|"legal"|"a3"|"a5", "orientation"?: "portrait"|"landscape", "scale"?: "fit"|number (25–400), "pages"?: string ("1-3, 5"), "headers"?: bool, "remember"?: bool (keep the paper, orientation, scale and header as the dialog's)}"#)
+            .when(has_reading),
         CommandSpec::new("message.print", "Print", "File › Print", print_message)
-            .params(r#"{"printer"?: string (default: the system's), "copies"?: number (1–99)}"#)
+            .params(r#"{"printer"?: string (default: the system's), "copies"?: number (1–99), "collate"?: bool, "orientation"?: "portrait"|"landscape", "duplex"?: "off"|"long"|"short", "color"?: "color"|"mono", "paper"?: "a4"|"letter"|"legal"|"a3"|"a5", "scale"?: "fit"|number (25–400), "pages"?: string ("1-3, 5"), "headers"?: bool, "remember"?: bool (keep these as the dialog's settings)}"#)
             .when(has_reading),
         CommandSpec::new("message.showPictures", "Show pictures", "Reading pane", |s, v| s.show_pictures(p::bool(v, "always").unwrap_or(false)))
             .params(r#"{"always"?: bool}"#)
@@ -1342,15 +1346,16 @@ impl Session {
         Ok(mailcraft_print::Doc { title: m.subject.clone(), header, body: m.text.clone(), blocks })
     }
 
-    /// The open message as a PDF, in `fonts` (the system's: [`mailcraft_print::Fonts`]).
-    pub fn message_pdf(&self, fonts: &mailcraft_print::Fonts) -> Result<Vec<u8>, CmdError> {
-        render_pdf(&self.message_doc()?, fonts).map_err(CmdError::Failed)
+    /// The open message as a PDF on the paper `setup` describes, in `fonts` (the system's:
+    /// [`mailcraft_print::Fonts`]).
+    pub fn message_pdf(&self, fonts: &mailcraft_print::Fonts, setup: &mailcraft_print::PageSetup) -> Result<Vec<u8>, CmdError> {
+        render_pdf(&self.message_doc()?, fonts, setup).map_err(CmdError::Failed)
     }
 }
 
-/// Pages as a PDF in `fonts`; what the fonts lacked is said in the log.
-pub fn render_pdf(doc: &mailcraft_print::Doc, fonts: &mailcraft_print::Fonts) -> Result<Vec<u8>, String> {
-    let (pdf, report) = mailcraft_print::pdf_report(doc, fonts)?;
+/// Pages as a PDF in `fonts` on the paper `setup` describes; what the fonts lacked is said in the log.
+pub fn render_pdf(doc: &mailcraft_print::Doc, fonts: &mailcraft_print::Fonts, setup: &mailcraft_print::PageSetup) -> Result<Vec<u8>, String> {
+    let (pdf, report) = mailcraft_print::pdf_report_with(doc, fonts, setup)?;
     if !report.missing.is_empty() || report.dropped_fonts > 0 {
         let shown: String = report.missing.iter().take(20).map(|c| format!("U+{:04X}", u32::from(*c))).collect::<Vec<_>>().join(" ");
         log::info!("print: no font for {} characters ({shown}); {} fonts left out as too large", report.missing.len(), report.dropped_fonts);
@@ -1428,16 +1433,90 @@ fn save_message(s: &mut Session, v: &Value) -> CmdResult {
 /// to the print system (the engine runs no processes).
 fn print_message(s: &mut Session, v: &Value) -> CmdResult {
     let doc = s.message_doc()?;
-    let copies = p::u64(v, "copies").map_or(1, |n| u32::try_from(n.clamp(1, 99)).unwrap_or(1));
+    let options = print_options(v)?;
+    if p::bool(v, "remember").unwrap_or(false) {
+        s.prefs.print = options.remembered();
+    }
+    let reply = json!({"queued": true, "printer": options.printer, "copies": options.copies, "pages": options.pages.to_string()});
+    s.print_requests.push(crate::PrintRequest { doc, options });
+    Ok(reply)
+}
+
+/// The print options in a command's flat params. A field of the wrong type is left at its default
+/// (junk is not an error, as `copies` always was); a text that isn't one of the choices, a scale
+/// out of range or a page list that doesn't parse says so.
+pub fn print_options(v: &Value) -> Result<PrintOptions, CmdError> {
+    use mailcraft_model::printing::{MAX_COPIES, MAX_SCALE, MIN_SCALE};
+    let d = PrintOptions::default();
+    let choice = |key: &str| -> Option<String> { p::str(v, key).map(|t| t.trim().to_ascii_lowercase().replace(['-', '_', ' '], "")) };
+    let bad = |key: &str, why: String| CmdError::Params(format!("`{key}`: {why}"));
     let printer = p::str(v, "printer").map(str::trim).filter(|x| !x.is_empty()).map(str::to_string);
-    s.print_requests.push(crate::PrintRequest { doc, printer: printer.clone(), copies });
-    Ok(json!({"queued": true, "printer": printer, "copies": copies}))
+    let copies = p::u64(v, "copies").map_or(d.copies, |n| u32::try_from(n.clamp(1, u64::from(MAX_COPIES))).unwrap_or(1));
+    let orientation = match choice("orientation").as_deref() {
+        None => d.orientation,
+        Some("portrait") => Orientation::Portrait,
+        Some("landscape") => Orientation::Landscape,
+        Some(o) => return Err(bad("orientation", format!("`{o}` is not portrait or landscape"))),
+    };
+    let duplex = match choice("duplex").as_deref() {
+        None => d.duplex,
+        Some("off" | "none" | "oneside" | "onesided") => Duplex::Off,
+        Some("long" | "longedge") => Duplex::LongEdge,
+        Some("short" | "shortedge") => Duplex::ShortEdge,
+        Some(o) => return Err(bad("duplex", format!("`{o}` is not off, long or short"))),
+    };
+    let color = match choice("color").or_else(|| choice("colour")).as_deref() {
+        None => d.color,
+        Some("color" | "colour") => ColorMode::Color,
+        Some("mono" | "monochrome" | "blackandwhite" | "bw" | "gray" | "grey") => ColorMode::Monochrome,
+        Some(o) => return Err(bad("color", format!("`{o}` is not color or mono"))),
+    };
+    let paper = match p::str(v, "paper") {
+        None => d.paper,
+        Some(t) => Paper::from_code(t)
+            .ok_or_else(|| bad("paper", format!("`{}` is not a4, letter, legal, a3 or a5", t.chars().take(20).collect::<String>())))?,
+    };
+    let scale = match v.get("scale") {
+        Some(Value::String(t)) => Scale::parse(t).map_err(|e| bad("scale", e))?,
+        Some(n) if n.is_number() => {
+            let pct = n.as_u64().filter(|p| (u64::from(MIN_SCALE)..=u64::from(MAX_SCALE)).contains(p));
+            Scale::Percent(
+                pct.and_then(|p| u16::try_from(p).ok()).ok_or_else(|| bad("scale", format!("the scale is between {MIN_SCALE}% and {MAX_SCALE}%")))?,
+            )
+        }
+        _ => d.scale,
+    };
+    let pages = match v.get("pages") {
+        Some(Value::String(t)) => PageRange::parse(t).map_err(|e| bad("pages", e))?,
+        Some(n) if n.is_number() => PageRange::parse(&n.to_string()).map_err(|e| bad("pages", e))?,
+        _ => d.pages.clone(),
+    };
+    Ok(PrintOptions {
+        printer,
+        copies,
+        collate: p::bool(v, "collate").unwrap_or(d.collate),
+        orientation,
+        duplex,
+        color,
+        paper,
+        scale,
+        pages,
+        headers: p::bool(v, "headers").unwrap_or(d.headers),
+    })
 }
 
 /// The open message as a PDF.
 fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
     let path = p::req_str(v, "path")?;
-    let bytes = s.message_pdf(&s.print_fonts)?;
+    let options = print_options(v)?;
+    if p::bool(v, "remember").unwrap_or(false) {
+        // The page setup only: a PDF has no printer, copies or sides.
+        let kept = s.prefs.print.clone();
+        s.prefs.print =
+            PrintOptions { orientation: options.orientation, paper: options.paper, scale: options.scale, headers: options.headers, ..kept };
+    }
+    let setup = mailcraft_print::PageSetup::from(&options);
+    let bytes = s.message_pdf(&s.print_fonts, &setup)?;
     std::fs::write(path, &bytes).map_err(|e| CmdError::Failed(format!("{path}: {e}")))?;
     Ok(json!({"saved": path, "bytes": bytes.len()}))
 }

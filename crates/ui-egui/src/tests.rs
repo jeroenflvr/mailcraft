@@ -202,14 +202,12 @@ pub(crate) fn tour() {
             Dialog::AddSharedMailbox { account: "sample".into(), address: "sales@contoso.example".into(), error: Some("already open".into()) },
             Dialog::print(
                 mailcraft_engine::model::Printing::Choose,
-                Ok(vec![
-                    mailcraft_engine::model::Printer { name: "Office_Laser".into(), default: true },
-                    mailcraft_engine::model::Printer { name: "Label_Maker".into(), default: false },
-                ]),
+                Ok(vec![mailcraft_engine::model::Printer { name: "Office_Laser".into(), default: true, ..Default::default() }, plain_printer()]),
+                &Default::default(),
             ),
-            Dialog::print(mailcraft_engine::model::Printing::Choose, Err("Scheduler is not running.".into())),
-            Dialog::print(mailcraft_engine::model::Printing::Viewer, Ok(Vec::new())),
-            Dialog::print(mailcraft_engine::model::Printing::None, Ok(Vec::new())),
+            Dialog::print(mailcraft_engine::model::Printing::Choose, Err("Scheduler is not running.".into()), &Default::default()),
+            Dialog::print(mailcraft_engine::model::Printing::Viewer, Ok(Vec::new()), &Default::default()),
+            Dialog::print(mailcraft_engine::model::Printing::None, Ok(Vec::new()), &Default::default()),
             Dialog::RemoveAccount { account: "sample".into(), email: "x".into() },
             Dialog::MailboxClosed {
                 account: "sample".into(),
@@ -512,10 +510,21 @@ fn the_week_across_a_change_of_clocks_draws_in_the_right_rows() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A printer that prints on one side, in black and white, on A4 only.
+fn plain_printer() -> mailcraft_engine::model::Printer {
+    mailcraft_engine::model::Printer {
+        name: "Label_Maker".into(),
+        default: false,
+        duplex: Some(false),
+        color: Some(false),
+        papers: vec![mailcraft_engine::model::Paper::A4],
+    }
+}
+
 /// Services with a print system that records what it is given.
 #[derive(Default)]
 struct Printing {
-    jobs: std::rc::Rc<std::cell::RefCell<Vec<(Option<String>, u32, Vec<u8>)>>>,
+    jobs: std::rc::Rc<std::cell::RefCell<Vec<(mailcraft_engine::model::PrintOptions, Vec<u8>)>>>,
     fail: bool,
 }
 
@@ -536,16 +545,13 @@ impl crate::Services for Printing {
         mailcraft_engine::model::Printing::Choose
     }
     fn printers(&mut self) -> Result<Vec<mailcraft_engine::model::Printer>, String> {
-        Ok(vec![
-            mailcraft_engine::model::Printer { name: "Label_Maker".into(), default: false },
-            mailcraft_engine::model::Printer { name: "Office_Laser".into(), default: true },
-        ])
+        Ok(vec![plain_printer(), mailcraft_engine::model::Printer { name: "Office_Laser".into(), default: true, ..Default::default() }])
     }
-    fn print_pdf(&mut self, printer: Option<&str>, copies: u32, pdf: &[u8]) -> Result<(), String> {
+    fn print_pdf(&mut self, options: &mailcraft_engine::model::PrintOptions, pdf: &[u8]) -> Result<(), String> {
         if self.fail {
             return Err("The printer or class does not exist.".into());
         }
-        self.jobs.borrow_mut().push((printer.map(str::to_string), copies, pdf.to_vec()));
+        self.jobs.borrow_mut().push((options.clone(), pdf.to_vec()));
         Ok(())
     }
 }
@@ -568,21 +574,21 @@ fn printing_goes_through_the_print_system() {
     frame(&ctx, &mut a, vec![]);
 
     a.act(crate::Action::Print);
-    let Some(Dialog::Print { printers, selected, copies, .. }) = &a.ui.dialog else { panic!("no print dialog: {:?}", a.ui.dialog) };
-    assert_eq!((printers.len(), printers[*selected].name.as_str(), *copies), (2, "Office_Laser", 1), "the default is picked");
+    let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no print dialog: {:?}", a.ui.dialog) };
+    assert_eq!((f.printers.len(), f.options.printer.as_deref(), f.options.copies), (2, Some("Office_Laser"), 1), "the default is picked");
     frame(&ctx, &mut a, vec![]);
     a.act(crate::Action::Submit("message.print", json!({"printer": "Label_Maker", "copies": 2})));
     assert!(a.ui.dialog.is_none());
     {
         let sent = jobs.borrow();
         assert_eq!(sent.len(), 1);
-        assert_eq!((sent[0].0.as_deref(), sent[0].1), (Some("Label_Maker"), 2));
-        assert!(sent[0].2.starts_with(b"%PDF-") && sent[0].2.ends_with(b"%%EOF\n"));
+        assert_eq!((sent[0].0.printer.as_deref(), sent[0].0.copies), (Some("Label_Maker"), 2));
+        assert!(sent[0].1.starts_with(b"%PDF-") && sent[0].1.ends_with(b"%%EOF\n"));
     }
     assert!(a.session.notices.last().is_some_and(|n| !n.error && n.text.contains("Label_Maker")), "{:?}", a.session.notices.last());
 
     a.act(crate::Action::QuickPrint);
-    assert_eq!((jobs.borrow().len(), jobs.borrow()[1].0.clone(), jobs.borrow()[1].1), (2, None, 1), "the default printer, once");
+    assert_eq!((jobs.borrow().len(), jobs.borrow()[1].0.printer.clone(), jobs.borrow()[1].0.copies), (2, None, 1), "the default printer, once");
 
     // A refusal is said, not lost.
     let mut failing =
@@ -598,11 +604,126 @@ fn printing_goes_through_the_print_system() {
     plain.session.open_message(&key);
     plain.act(crate::Action::QuickPrint);
     plain.act(crate::Action::Print);
-    let Some(Dialog::Print { printing, .. }) = &plain.ui.dialog else { panic!("no print dialog") };
-    assert_eq!(*printing, mailcraft_engine::model::Printing::None);
+    let Some(Dialog::Print(f)) = &plain.ui.dialog else { panic!("no print dialog") };
+    assert_eq!(f.printing, mailcraft_engine::model::Printing::None);
     frame(&ctx, &mut plain, vec![]);
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(d2);
+}
+
+/// The dialog opens with the settings last used, shows the page, sends what was chosen when Enter
+/// is pressed, and won't send a page list that isn't one or a setting the printer lacks.
+#[test]
+fn the_print_dialog_sends_what_was_chosen() {
+    use mailcraft_engine::model::{ColorMode, Duplex, Orientation, PageRange, Paper, PrintOptions, Scale};
+    let dir = std::env::temp_dir().join(format!("mailcraft-ui-print-dialog-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    sample::seed_if_empty(&store, NOW).unwrap();
+    let s = Session::open(Some(store), Clock::new(NOW, 0));
+    let services = Printing::default();
+    let jobs = services.jobs.clone();
+    let mut a = MailApp::new(s, Box::new(NullBackend), Box::new(services));
+    let ctx = egui::Context::default();
+    let open = |a: &mut MailApp| {
+        let key = a.session.list.iter().find(|m| m.subject.contains("Storyboard review")).map(|m| m.key.clone()).unwrap();
+        a.session.open_message(&key);
+    };
+    open(&mut a);
+    frame(&ctx, &mut a, vec![]);
+    a.session.prefs.print = PrintOptions {
+        printer: Some("Office_Laser".into()),
+        copies: 3,
+        orientation: Orientation::Landscape,
+        paper: Paper::Letter,
+        scale: Scale::Percent(75),
+        duplex: Duplex::LongEdge,
+        ..Default::default()
+    };
+    a.act(crate::Action::Print);
+    let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
+    assert_eq!(
+        (f.options.copies, f.options.orientation, f.options.paper, f.options.duplex),
+        (3, Orientation::Landscape, Paper::Letter, Duplex::LongEdge)
+    );
+    for _ in 0..3 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
+    assert!(f.preview.drawn() && f.preview.total.is_some_and(|n| n >= 1), "the page is drawn");
+    // Settings and preview side by side, and all of it on a small screen.
+    let d = a.ui.dialog.clone().unwrap();
+    let area = ctx.memory(|m| m.area_rect(egui::Id::unique(("dialog", std::mem::discriminant(&d)))));
+    let r = area.expect("the dialog is up");
+    assert!(r.width() > 600.0 && r.width() < 760.0 && r.height() < 640.0, "{r:?}");
+
+    // Enter prints with what the dialog holds.
+    frame(&ctx, &mut a, vec![key(Key::Enter, Modifiers::NONE)]);
+    assert!(a.ui.dialog.is_none(), "Enter prints and closes");
+    {
+        let sent = jobs.borrow();
+        assert_eq!(sent.len(), 1);
+        let o = &sent[0].0;
+        assert_eq!(
+            (o.copies, o.orientation, o.paper, o.scale, o.duplex),
+            (3, Orientation::Landscape, Paper::Letter, Scale::Percent(75), Duplex::LongEdge)
+        );
+        assert!(String::from_utf8_lossy(&sent[0].1).contains("/MediaBox [0 0 792.00 612.00]"), "the PDF is laid out on that paper");
+    }
+    assert_eq!(a.session.prefs.print.copies, 3, "kept for next time");
+    assert_eq!(a.session.prefs.print.pages, PageRange::All);
+
+    // A page list that isn't one: Enter does nothing, the reason shows.
+    a.act(crate::Action::Print);
+    if let Some(Dialog::Print(f)) = a.ui.dialog.as_mut() {
+        f.range_all = false;
+        f.range_text = "3-1".into();
+    }
+    frame(&ctx, &mut a, vec![]);
+    frame(&ctx, &mut a, vec![key(Key::Enter, Modifiers::NONE)]);
+    assert!(matches!(a.ui.dialog, Some(Dialog::Print(_))), "still open");
+    assert_eq!(jobs.borrow().len(), 1, "nothing was sent");
+    // Past the end of a message of a page or two: the same.
+    if let Some(Dialog::Print(f)) = a.ui.dialog.as_mut() {
+        f.range_text = "40".into();
+    }
+    for _ in 0..3 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    frame(&ctx, &mut a, vec![key(Key::Enter, Modifiers::NONE)]);
+    assert!(matches!(a.ui.dialog, Some(Dialog::Print(_))) && jobs.borrow().len() == 1);
+    // A good list prints just those pages.
+    if let Some(Dialog::Print(f)) = a.ui.dialog.as_mut() {
+        f.range_text = "1".into();
+    }
+    frame(&ctx, &mut a, vec![]);
+    frame(&ctx, &mut a, vec![key(Key::Enter, Modifiers::NONE)]);
+    assert!(a.ui.dialog.is_none());
+    assert_eq!(jobs.borrow()[1].0.pages, PageRange::Range(vec![(1, 1)]));
+    assert_eq!(a.session.prefs.print.pages, PageRange::All, "the page list isn't kept");
+
+    // A printer without both sides or color: those are left off, however the dialog was left.
+    a.session.prefs.print = PrintOptions {
+        printer: Some("Label_Maker".into()),
+        duplex: Duplex::ShortEdge,
+        color: ColorMode::Color,
+        paper: Paper::A3,
+        ..Default::default()
+    };
+    a.act(crate::Action::Print);
+    let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
+    assert!(!f.can_duplex() && !f.can_color());
+    assert_eq!((f.options.duplex, f.options.color, f.options.paper), (Duplex::Off, ColorMode::Monochrome, Paper::A4));
+    frame(&ctx, &mut a, vec![]);
+    frame(&ctx, &mut a, vec![key(Key::Escape, Modifiers::NONE)]);
+    assert!(a.ui.dialog.is_none(), "Escape cancels");
+    assert_eq!(jobs.borrow().len(), 2);
+    // A printer that has gone away isn't kept: the default is used.
+    a.session.prefs.print.printer = Some("Gone".into());
+    a.act(crate::Action::Print);
+    let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
+    assert_eq!(f.options.printer.as_deref(), Some("Office_Laser"));
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -1137,6 +1258,21 @@ fn in_the_browser_files_download_and_attachments_come_from_the_picker() {
     let got = downloads.borrow().clone();
     assert!(got.len() >= 4, "{got:?}");
     assert!(got[0].0.ends_with(".eml") && got[1].0.ends_with(".pdf") && got.iter().all(|(_, n)| *n > 0), "{got:?}");
+    // Print is a page setup there: Save as PDF on the paper chosen, which is kept.
+    let before = downloads.borrow().len();
+    a.act(crate::Action::Print);
+    let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no page setup") };
+    assert_eq!(f.printing, mailcraft_engine::model::Printing::None);
+    for _ in 0..3 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    a.act(crate::Action::SavePdf(Box::new(json!({"orientation": "landscape", "paper": "letter", "pages": "1", "remember": true}))));
+    assert_eq!(downloads.borrow().len(), before + 1);
+    assert_eq!(a.session.prefs.print.orientation, mailcraft_engine::model::Orientation::Landscape);
+    assert_eq!(a.session.prefs.print.paper, mailcraft_engine::model::Paper::Letter);
+    a.act(crate::Action::SavePdf(Box::new(json!({"pages": "x"}))));
+    assert_eq!(downloads.borrow().len(), before + 1, "a bad page list saves nothing");
+    assert!(a.session.notices.last().is_some_and(|n| n.error));
 
     // Only JMAP accounts: the form asks for the session address, and nothing else is accepted.
     a.session.jmap_only = true;

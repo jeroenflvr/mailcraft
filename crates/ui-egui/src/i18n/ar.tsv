@@ -886,7 +886,6 @@ month	May	مايو
 	Troubleshooting	استكشاف الأخطاء وإصلاحها
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	يوضح mailcraft.log، في مجلد تطبيق MailCraft، ما فعله كل حساب. لا يحتوي أبدًا على كلمات مرور أو محتوى الرسائل.
 	Detailed log (every request to the server)	سجل مفصل (كل طلب إلى الخادم)
-	Printing isn't available here. Save the message as a PDF instead.	الطباعة غير متاحة هنا. احفظ الرسالة كملف PDF بدلًا من ذلك.
 	The PDF app asks which printer to use.	سيسألك تطبيق PDF عن الطابعة التي تريد استخدامها.
 	No printers were found. Open the message as a PDF and print it from the viewer.	لم يُعثر على أي طابعة. افتح الرسالة كملف PDF واطبعها من العارض.
 	Printer	الطابعة
@@ -896,3 +895,26 @@ month	May	مايو
 	Sent to {printer}	أُرسلت إلى {printer}
 	Sent to print	أُرسلت للطباعة
 	The message couldn't be printed: {error}	تعذّرت طباعة الرسالة: {error}
+	Black and white	أبيض وأسود
+	Collate	ترتيب النسخ
+	Fit to page	ملاءمة الصفحة
+	Landscape	أفقي
+	Long edge	الحافة الطويلة
+	No preview	لا توجد معاينة
+	Not offered by this printer	غير متاح في هذه الطابعة
+	Orientation	الاتجاه
+	Page setup	إعداد الصفحة
+	Page {page} of {total}	الصفحة {page} من {total}
+	Pages	الصفحات
+	Pages:	الصفحات:
+	Paper	الورق
+	Portrait	عمودي
+	Print on both sides	الطباعة على الوجهين
+	Print the message header	طباعة ترويسة الرسالة
+	Save as PDF	حفظ بتنسيق PDF
+	Save as PDF instead	الحفظ بتنسيق PDF بدلًا من ذلك
+	Scale	المقياس
+	Short edge	الحافة القصيرة
+	The PDF app's print dialog decides the rest, such as both sides and color.	يحدد مربع حوار الطباعة في تطبيق PDF بقية الخيارات، مثل الطباعة على الوجهين واللون.
+	The message has only {total} pages	تحتوي الرسالة على {total} صفحات فقط
+	Use page numbers like 1-3, 5	استخدم أرقام صفحات مثل 1-3, 5

@@ -890,7 +890,6 @@ month	May	Май
 	Troubleshooting	Устранение неполадок
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log в папке приложения MailCraft показывает, что делала каждая учётная запись. В нём никогда нет паролей и содержимого писем.
 	Detailed log (every request to the server)	Подробный журнал (каждый запрос к серверу)
-	Printing isn't available here. Save the message as a PDF instead.	Здесь печать недоступна. Сохраните сообщение как PDF.
 	The PDF app asks which printer to use.	Приложение для PDF спросит, какой принтер использовать.
 	No printers were found. Open the message as a PDF and print it from the viewer.	Принтеры не найдены. Откройте сообщение как PDF и напечатайте его из программы просмотра.
 	Printer	Принтер
@@ -900,3 +899,26 @@ month	May	Май
 	Sent to {printer}	Отправлено на {printer}
 	Sent to print	Отправлено на печать
 	The message couldn't be printed: {error}	Не удалось напечатать сообщение: {error}
+	Black and white	Чёрно-белая
+	Collate	Разбирать по копиям
+	Fit to page	По размеру страницы
+	Landscape	Альбомная
+	Long edge	По длинной стороне
+	No preview	Нет предпросмотра
+	Not offered by this printer	Этот принтер не поддерживает
+	Orientation	Ориентация
+	Page setup	Параметры страницы
+	Page {page} of {total}	Страница {page} из {total}
+	Pages	Страницы
+	Pages:	Страницы:
+	Paper	Бумага
+	Portrait	Книжная
+	Print on both sides	Двусторонняя печать
+	Print the message header	Печатать заголовок сообщения
+	Save as PDF	Сохранить как PDF
+	Save as PDF instead	Вместо этого сохранить как PDF
+	Scale	Масштаб
+	Short edge	По короткой стороне
+	The PDF app's print dialog decides the rest, such as both sides and color.	Остальное, например двустороннюю печать и цвет, определяет окно печати PDF-приложения.
+	The message has only {total} pages	В сообщении всего страниц: {total}
+	Use page numbers like 1-3, 5	Укажите номера страниц, например 1-3, 5

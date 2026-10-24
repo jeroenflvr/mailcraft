@@ -2909,6 +2909,7 @@ name = "mailcraft-print"
 version = "0.19.1"
 dependencies = [
  "mailcraft-mime",
+ "mailcraft-model",
  "miniz_oxide 0.9.1",
  "ttf-parser",
 ]

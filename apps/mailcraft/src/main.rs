@@ -96,8 +96,8 @@ impl Services for Desktop {
     fn printers(&mut self) -> Result<Vec<mailcraft_engine::model::Printer>, String> {
         mailcraft_net::print::printers()
     }
-    fn print_pdf(&mut self, printer: Option<&str>, copies: u32, pdf: &[u8]) -> Result<(), String> {
-        mailcraft_net::print::print_pdf(printer, copies, pdf)
+    fn print_pdf(&mut self, options: &mailcraft_engine::model::PrintOptions, pdf: &[u8]) -> Result<(), String> {
+        mailcraft_net::print::print_pdf(options, pdf)
     }
     fn pick_files(&mut self) -> Vec<PathBuf> {
         rfd::FileDialog::new().set_title("Attach files").pick_files().unwrap_or_default()
@@ -599,6 +599,12 @@ fn main() -> eframe::Result {
                     "ui.options" => app.ui.backstage = Some(Backstage::new(Page::Options)),
                     "ui.openExport" => app.ui.backstage = Some(Backstage::new(Page::Open)),
                     "ui.about" => app.ui.backstage = Some(Backstage::new(Page::About)),
+                    "ui.print" => {
+                        use mailcraft_engine::model::Printing;
+                        let printing = mailcraft_net::print::printing();
+                        let printers = if printing == Printing::Choose { mailcraft_net::print::printers() } else { Ok(Vec::new()) };
+                        app.ui.dialog = Some(mailcraft_ui_egui::Dialog::print(printing, printers, &app.session.prefs.print));
+                    }
                     "ui.newEvent" => app.ui.dialog = Some(mailcraft_ui_egui::Dialog::new_event(&app.session, None)),
                     "ui.newContact" => app.ui.dialog = Some(mailcraft_ui_egui::Dialog::new_contact()),
                     _ => match serde_json::from_str(params) {

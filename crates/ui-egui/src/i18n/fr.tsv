@@ -891,7 +891,6 @@ month	May	mai
 	Troubleshooting	Dépannage
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log, dans le dossier de l’application MailCraft, indique ce que chaque compte a fait. Il ne contient jamais de mots de passe ni le contenu des messages.
 	Detailed log (every request to the server)	Journal détaillé (chaque requête au serveur)
-	Printing isn't available here. Save the message as a PDF instead.	L’impression n’est pas disponible ici. Enregistrez plutôt le message en PDF.
 	The PDF app asks which printer to use.	L’application PDF demande quelle imprimante utiliser.
 	No printers were found. Open the message as a PDF and print it from the viewer.	Aucune imprimante n’a été trouvée. Ouvrez le message en PDF et imprimez-le depuis la visionneuse.
 	Printer	Imprimante
@@ -901,3 +900,26 @@ month	May	mai
 	Sent to {printer}	Envoyé à {printer}
 	Sent to print	Envoyé à l’impression
 	The message couldn't be printed: {error}	Le message n’a pas pu être imprimé : {error}
+	Black and white	Noir et blanc
+	Collate	Assembler
+	Fit to page	Ajuster à la page
+	Landscape	Paysage
+	Long edge	Bord long
+	No preview	Aucun aperçu
+	Not offered by this printer	Non proposé par cette imprimante
+	Orientation	Orientation
+	Page setup	Mise en page
+	Page {page} of {total}	Page {page} sur {total}
+	Pages	Pages
+	Pages:	Pages :
+	Paper	Papier
+	Portrait	Portrait
+	Print on both sides	Imprimer recto verso
+	Print the message header	Imprimer l'en-tête du message
+	Save as PDF	Enregistrer en PDF
+	Save as PDF instead	Enregistrer plutôt en PDF
+	Scale	Échelle
+	Short edge	Bord court
+	The PDF app's print dialog decides the rest, such as both sides and color.	La boîte de dialogue d'impression de l'application PDF décide du reste, comme le recto verso et la couleur.
+	The message has only {total} pages	Le message compte seulement {total} pages
+	Use page numbers like 1-3, 5	Utilisez des numéros de page comme 1-3, 5

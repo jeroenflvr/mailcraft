@@ -890,7 +890,6 @@ month	May	maggio
 	Troubleshooting	Risoluzione dei problemi
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log, nella cartella dell'app MailCraft, indica cosa ha fatto ogni account. Non contiene mai password né il contenuto dei messaggi.
 	Detailed log (every request to the server)	Registro dettagliato (ogni richiesta al server)
-	Printing isn't available here. Save the message as a PDF instead.	La stampa non è disponibile qui. Salva invece il messaggio come PDF.
 	The PDF app asks which printer to use.	L'app PDF chiede quale stampante usare.
 	No printers were found. Open the message as a PDF and print it from the viewer.	Non è stata trovata nessuna stampante. Apri il messaggio come PDF e stampalo dal visualizzatore.
 	Printer	Stampante
@@ -900,3 +899,26 @@ month	May	maggio
 	Sent to {printer}	Inviato a {printer}
 	Sent to print	Inviato alla stampa
 	The message couldn't be printed: {error}	Impossibile stampare il messaggio: {error}
+	Black and white	Bianco e nero
+	Collate	Fascicola
+	Fit to page	Adatta alla pagina
+	Landscape	Orizzontale
+	Long edge	Lato lungo
+	No preview	Nessuna anteprima
+	Not offered by this printer	Non disponibile su questa stampante
+	Orientation	Orientamento
+	Page setup	Imposta pagina
+	Page {page} of {total}	Pagina {page} di {total}
+	Pages	Pagine
+	Pages:	Pagine:
+	Paper	Carta
+	Portrait	Verticale
+	Print on both sides	Stampa fronte/retro
+	Print the message header	Stampa l'intestazione del messaggio
+	Save as PDF	Salva come PDF
+	Save as PDF instead	Salva invece come PDF
+	Scale	Scala
+	Short edge	Lato corto
+	The PDF app's print dialog decides the rest, such as both sides and color.	Il resto, come il fronte/retro e il colore, lo decide la finestra di stampa dell'app PDF.
+	The message has only {total} pages	Il messaggio ha solo {total} pagine
+	Use page numbers like 1-3, 5	Usa numeri di pagina come 1-3, 5

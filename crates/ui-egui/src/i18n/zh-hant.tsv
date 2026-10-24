@@ -890,7 +890,6 @@ month	May	5月
 	Troubleshooting	疑難排解
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	MailCraft 應用程式資料夾中的 mailcraft.log 記錄每個帳戶做了什麼。它從不包含密碼或郵件內容。
 	Detailed log (every request to the server)	詳細記錄 (傳往伺服器的每個要求)
-	Printing isn't available here. Save the message as a PDF instead.	此處無法列印。請改為將郵件儲存為 PDF。
 	The PDF app asks which printer to use.	PDF 應用程式會詢問要使用哪一台印表機。
 	No printers were found. Open the message as a PDF and print it from the viewer.	找不到印表機。請將郵件以 PDF 開啟，並從檢視器列印。
 	Printer	印表機
@@ -900,3 +899,26 @@ month	May	5月
 	Sent to {printer}	已傳送到 {printer}
 	Sent to print	已傳送列印
 	The message couldn't be printed: {error}	無法列印郵件: {error}
+	Black and white	黑白
+	Collate	逐份列印
+	Fit to page	符合頁面
+	Landscape	橫向
+	Long edge	長邊
+	No preview	無預覽
+	Not offered by this printer	此印表機不支援
+	Orientation	方向
+	Page setup	頁面設定
+	Page {page} of {total}	第 {page} 頁，共 {total} 頁
+	Pages	頁面
+	Pages:	頁面：
+	Paper	紙張
+	Portrait	直向
+	Print on both sides	雙面列印
+	Print the message header	列印郵件標頭
+	Save as PDF	另存為 PDF
+	Save as PDF instead	改為另存為 PDF
+	Scale	縮放
+	Short edge	短邊
+	The PDF app's print dialog decides the rest, such as both sides and color.	雙面列印和顏色等其他設定由 PDF 應用程式的列印對話方塊決定。
+	The message has only {total} pages	此郵件只有 {total} 頁
+	Use page numbers like 1-3, 5	請輸入頁碼，例如 1-3, 5

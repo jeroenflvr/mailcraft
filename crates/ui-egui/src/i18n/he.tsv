@@ -886,7 +886,6 @@ month	May	מאי
 	Troubleshooting	פתרון בעיות
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log, בתיקיית היישום של MailCraft, מתאר מה כל חשבון עשה. הוא אף פעם לא מכיל סיסמאות או את תוכן ההודעות.
 	Detailed log (every request to the server)	יומן מפורט (כל בקשה לשרת)
-	Printing isn't available here. Save the message as a PDF instead.	ההדפסה אינה זמינה כאן. שמור את ההודעה כ-PDF במקום זאת.
 	The PDF app asks which printer to use.	אפליקציית ה-PDF תשאל באיזו מדפסת להשתמש.
 	No printers were found. Open the message as a PDF and print it from the viewer.	לא נמצאו מדפסות. פתח את ההודעה כ-PDF והדפס אותה מהמציג.
 	Printer	מדפסת
@@ -896,3 +895,26 @@ month	May	מאי
 	Sent to {printer}	נשלח אל {printer}
 	Sent to print	נשלח להדפסה
 	The message couldn't be printed: {error}	לא ניתן היה להדפיס את ההודעה: {error}
+	Black and white	שחור-לבן
+	Collate	סידור לפי עותקים
+	Fit to page	התאם לדף
+	Landscape	לרוחב
+	Long edge	הצד הארוך
+	No preview	אין תצוגה מקדימה
+	Not offered by this printer	המדפסת הזו אינה תומכת בכך
+	Orientation	כיוון
+	Page setup	הגדרת עמוד
+	Page {page} of {total}	עמוד {page} מתוך {total}
+	Pages	עמודים
+	Pages:	עמודים:
+	Paper	נייר
+	Portrait	לאורך
+	Print on both sides	הדפסה דו-צדדית
+	Print the message header	הדפס את כותרת ההודעה
+	Save as PDF	שמור כ-PDF
+	Save as PDF instead	שמור כ-PDF במקום
+	Scale	קנה מידה
+	Short edge	הצד הקצר
+	The PDF app's print dialog decides the rest, such as both sides and color.	שאר ההגדרות, כמו הדפסה דו-צדדית וצבע, נקבעות בחלון ההדפסה של אפליקציית ה-PDF.
+	The message has only {total} pages	בהודעה יש רק {total} עמודים
+	Use page numbers like 1-3, 5	השתמשו במספרי עמודים כמו 1-3, 5

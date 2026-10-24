@@ -1,10 +1,10 @@
 //! Engine tests: commands against the sample mailbox and scripted network events.
 
-use mailcraft_model::{Event, Flag, FolderRole, Job, Op, SyncStatus};
+use mailcraft_model::{ColorMode, Duplex, Event, Flag, FolderRole, Job, Op, Orientation, PageRange, Paper, PrintOptions, Scale, SyncStatus};
 use mailcraft_store::Store;
 use serde_json::{Value, json};
 
-use crate::session::{ListFilter, Row, SearchScope, View};
+use crate::session::{ListFilter, Prefs, Row, SearchScope, View};
 use crate::{CmdError, Session, sample};
 
 const NOW: i64 = 1_791_979_200;
@@ -48,6 +48,8 @@ fn every_command_survives_junk_params() {
         json!({"query": "\"unterminated from: -", "scope": 3}),
         json!({"email": "@", "password": "", "imapPort": 99_999_999}),
         json!({"index": 1e300, "limit": -5, "on": "yes"}),
+        json!({"printer": 5, "copies": -1e300, "pages": "9999999999999-1", "scale": 1e300, "paper": [], "orientation": {}, "path": "/nonexistent/x.pdf"}),
+        json!({"pages": "1-4000000000", "scale": "0", "duplex": 3, "color": null, "headers": "no", "collate": 1, "remember": true}),
     ];
     for id in &ids {
         for p in &junk {
@@ -542,12 +544,70 @@ fn printing_queues_a_request_for_the_app() {
     s.run("message.print", &json!({"copies": "many", "printer": 5})).unwrap();
     let wanted = s.take_print_requests();
     assert_eq!(wanted.len(), 3);
-    assert_eq!((wanted[0].printer.as_deref(), wanted[0].copies), (Some("Office_Laser"), 99));
-    assert_eq!((wanted[1].printer.clone(), wanted[1].copies), (None, 1));
-    assert_eq!((wanted[2].printer.clone(), wanted[2].copies), (None, 1), "what isn't understood is the default");
+    assert_eq!((wanted[0].options.printer.as_deref(), wanted[0].options.copies), (Some("Office_Laser"), 99));
+    assert_eq!((wanted[1].options.printer.clone(), wanted[1].options.copies), (None, 1));
+    assert_eq!((wanted[2].options.printer.clone(), wanted[2].options.copies), (None, 1), "what isn't understood is the default");
+    assert_eq!(
+        wanted[0].options,
+        PrintOptions { printer: Some("Office_Laser".into()), copies: 99, ..PrintOptions::default() },
+        "the rest is the default"
+    );
     assert_eq!(wanted[0].doc.title, "Storyboard review on Thursday");
     assert!(!wanted[0].doc.body.is_empty() && wanted[0].doc.header.iter().any(|(k, _)| k == "From"));
     assert!(s.take_print_requests().is_empty());
+    let _ = std::fs::remove_dir_all(s.store.as_ref().unwrap().root());
+}
+
+/// The Print dialog's options come as flat params; each is checked, none can panic, and the last
+/// ones are kept only when asked (the dialog does) and without the page list.
+#[test]
+fn print_options_are_parsed_and_remembered() {
+    let mut s = sample_session("print-options");
+    let k = key_of(&s, "Storyboard review on Thursday");
+    s.run("list.open", &k).unwrap();
+    let full = json!({"printer": "P", "copies": 2, "collate": false, "orientation": "Landscape", "duplex": "long-edge", "color": "mono",
+                      "paper": "LETTER", "scale": "75%", "pages": "3, 1-2", "headers": false, "remember": true});
+    s.run("message.print", &full).unwrap();
+    let o = s.take_print_requests().remove(0).options;
+    assert_eq!((o.orientation, o.duplex, o.color, o.paper), (Orientation::Landscape, Duplex::LongEdge, ColorMode::Monochrome, Paper::Letter));
+    assert_eq!((o.scale, o.collate, o.headers, o.copies), (Scale::Percent(75), false, false, 2));
+    assert_eq!(o.pages, PageRange::Range(vec![(1, 3)]));
+    assert_eq!(s.prefs.print, PrintOptions { pages: PageRange::All, ..o.clone() }, "kept, but not the page list");
+    // Not asked to remember: the settings stay.
+    s.run("message.print", &json!({"copies": 5})).unwrap();
+    assert_eq!(s.prefs.print.copies, 2);
+    s.take_print_requests();
+    // A number is a page or a percentage; the wrong type is the default; wrong text is an error.
+    s.run("message.print", &json!({"pages": 4, "scale": 50, "orientation": 7, "duplex": null})).unwrap();
+    let o = s.take_print_requests().remove(0).options;
+    assert_eq!((o.pages, o.scale, o.orientation, o.duplex), (PageRange::Range(vec![(4, 4)]), Scale::Percent(50), Orientation::Portrait, Duplex::Off));
+    for bad in [
+        json!({"pages": "3-1"}),
+        json!({"pages": 0}),
+        json!({"scale": 5}),
+        json!({"scale": "huge"}),
+        json!({"scale": -3}),
+        json!({"paper": "B7"}),
+        json!({"orientation": "sideways"}),
+        json!({"duplex": "triple"}),
+        json!({"color": "purple"}),
+    ] {
+        assert!(matches!(s.run("message.print", &bad), Err(CmdError::Params(_))), "{bad}");
+    }
+    assert!(s.take_print_requests().is_empty(), "a bad request queues nothing");
+
+    // Preferences: kept across runs, and a damaged entry costs only itself.
+    let json = serde_json::to_string(&s.prefs).unwrap();
+    let back: Prefs = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.print, s.prefs.print);
+    let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    v["print"] = json!({"pages": "9-1", "copies": 4});
+    let damaged: Prefs = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!((damaged.print.clone(), damaged.conversations), (PrintOptions::default(), s.prefs.conversations));
+    v["print"] = json!(17);
+    assert_eq!(serde_json::from_value::<Prefs>(v.clone()).unwrap().print, PrintOptions::default());
+    v.as_object_mut().unwrap().remove("print");
+    assert_eq!(serde_json::from_value::<Prefs>(v).unwrap().print, PrintOptions::default(), "old files have none");
     let _ = std::fs::remove_dir_all(s.store.as_ref().unwrap().root());
 }
 
@@ -570,6 +630,13 @@ fn messages_save_as_eml_and_pdf() {
     s.run("message.exportPdf", &json!({"path": pdf.to_string_lossy()})).unwrap();
     let bytes = std::fs::read(&pdf).unwrap();
     assert!(bytes.starts_with(b"%PDF-") && bytes.ends_with(b"%%EOF\n"));
+    assert!(String::from_utf8_lossy(&bytes).contains("/MediaBox [0 0 595.28 841.89]"));
+    // The page setup applies to a saved PDF too.
+    let wide = dir.join("wide.pdf");
+    s.run("message.exportPdf", &json!({"path": wide.to_string_lossy(), "orientation": "landscape", "paper": "letter", "headers": false})).unwrap();
+    assert!(String::from_utf8_lossy(&std::fs::read(&wide).unwrap()).contains("/MediaBox [0 0 792.00 612.00]"));
+    assert!(s.run("message.exportPdf", &json!({"path": wide.to_string_lossy(), "pages": "40"})).is_err(), "past the end");
+    assert!(s.run("message.exportPdf", &json!({"path": wide.to_string_lossy(), "pages": "x"})).is_err());
     if let Ok(keep) = std::env::var("MAILCRAFT_KEEP_PDF") {
         let _ = std::fs::copy(&pdf, keep);
     }

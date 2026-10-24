@@ -18,6 +18,7 @@ pub(crate) fn interface_strings() -> BTreeSet<String> {
         include_str!("../calendar.rs"),
         include_str!("../people.rs"),
         include_str!("../pim_dialogs.rs"),
+        include_str!("../print_dialog.rs"),
         include_str!("../notes.rs"),
     ];
     // (prefix, which string literals after it are interface text)

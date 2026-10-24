@@ -886,7 +886,6 @@ month	May	mei
 	Troubleshooting	Probleemoplossing
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log, in de app-map van MailCraft, vertelt wat elk account deed. Het bevat nooit wachtwoorden of de inhoud van berichten.
 	Detailed log (every request to the server)	Gedetailleerd logboek (elk verzoek aan de server)
-	Printing isn't available here. Save the message as a PDF instead.	Afdrukken is hier niet beschikbaar. Bewaar het bericht in plaats daarvan als pdf.
 	The PDF app asks which printer to use.	De pdf-app vraagt welke printer je wilt gebruiken.
 	No printers were found. Open the message as a PDF and print it from the viewer.	Er zijn geen printers gevonden. Open het bericht als pdf en druk het af vanuit de viewer.
 	Printer	Printer
@@ -896,3 +895,26 @@ month	May	mei
 	Sent to {printer}	Verzonden naar {printer}
 	Sent to print	Verzonden om af te drukken
 	The message couldn't be printed: {error}	Het bericht kon niet worden afgedrukt: {error}
+	Black and white	Zwart-wit
+	Collate	Sorteren
+	Fit to page	Aanpassen aan pagina
+	Landscape	Liggend
+	Long edge	Lange zijde
+	No preview	Geen voorbeeld
+	Not offered by this printer	Niet beschikbaar op deze printer
+	Orientation	Afdrukstand
+	Page setup	Pagina-instelling
+	Page {page} of {total}	Pagina {page} van {total}
+	Pages	Pagina's
+	Pages:	Pagina's:
+	Paper	Papier
+	Portrait	Staand
+	Print on both sides	Dubbelzijdig afdrukken
+	Print the message header	Berichtkop afdrukken
+	Save as PDF	Opslaan als pdf
+	Save as PDF instead	In plaats daarvan als pdf opslaan
+	Scale	Schaal
+	Short edge	Korte zijde
+	The PDF app's print dialog decides the rest, such as both sides and color.	De pdf-app bepaalt de rest in zijn eigen afdrukvenster, zoals dubbelzijdig en kleur.
+	The message has only {total} pages	Het bericht heeft maar {total} pagina's
+	Use page numbers like 1-3, 5	Gebruik paginanummers zoals 1-3, 5

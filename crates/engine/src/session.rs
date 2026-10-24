@@ -266,6 +266,15 @@ pub struct Prefs {
     /// IMAP has nowhere for it, so it's kept here, as Outlook keeps it for IMAP accounts.
     #[serde(default)]
     pub follow_up: BTreeMap<String, i64>,
+    /// The Print dialog's settings, as Outlook keeps them (the page list is not kept). A damaged
+    /// entry falls back to the defaults rather than costing every other setting.
+    #[serde(deserialize_with = "lenient_print")]
+    pub print: mailcraft_model::PrintOptions,
+}
+
+fn lenient_print<'de, D: serde::Deserializer<'de>>(d: D) -> Result<mailcraft_model::PrintOptions, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<mailcraft_model::PrintOptions>(v).map(|o| o.remembered()).unwrap_or_default())
 }
 
 /// What the message list is sorted and grouped by.
@@ -429,6 +438,7 @@ impl Default for Prefs {
             work_offline: false,
             ignored: BTreeSet::new(),
             follow_up: BTreeMap::new(),
+            print: mailcraft_model::PrintOptions::default(),
             folder_pane_minimized: false,
             collapsed: BTreeSet::new(),
         }
@@ -573,13 +583,12 @@ const CACHE_MESSAGES: usize = 300_000;
 /// Body words kept for search at most (bytes): enough for the messages a search looks at again.
 const BODY_WORDS_BYTES: usize = 48 << 20;
 
-/// A message to print: its pages as they were when it was asked for, the printer (`None`: the
-/// system's default) and the number of copies.
+/// A message to print: its pages as they were when it was asked for, and what the Print dialog
+/// chose (the printer, copies, paper, orientation, scale, page range…).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrintRequest {
     pub doc: mailcraft_print::Doc,
-    pub printer: Option<String>,
-    pub copies: u32,
+    pub options: mailcraft_model::PrintOptions,
 }
 
 pub struct Session {

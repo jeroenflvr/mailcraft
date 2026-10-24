@@ -562,15 +562,9 @@ pub enum Dialog {
     },
     Rules,
     EditRule(Box<RuleForm>),
-    /// Print the open message: which printer, how many copies (Outlook's File › Print).
-    Print {
-        printing: mailcraft_engine::model::Printing,
-        printers: Vec<mailcraft_engine::model::Printer>,
-        /// Why the printers couldn't be listed (no print system, its scheduler isn't running).
-        why: Option<String>,
-        selected: usize,
-        copies: u32,
-    },
+    /// Print the open message: the printer and its options, with a preview (Outlook's File ›
+    /// Print); a page setup for Save as PDF where nothing prints from the app.
+    Print(Box<crate::print_dialog::PrintForm>),
     /// A picture attachment, larger.
     PicturePreview {
         key: mailcraft_engine::model::MessageKey,
@@ -813,14 +807,13 @@ impl Dialog {
         Dialog::MoveTo { filter: String::new() }
     }
 
-    /// Print: the printers the system listed (or why it couldn't), the default selected.
-    pub fn print(printing: mailcraft_engine::model::Printing, printers: Result<Vec<mailcraft_engine::model::Printer>, String>) -> Dialog {
-        let (printers, why) = match printers {
-            Ok(p) => (p, None),
-            Err(e) => (Vec::new(), Some(e)),
-        };
-        let selected = printers.iter().position(|p| p.default).unwrap_or(0);
-        Dialog::Print { printing, printers, why, selected, copies: 1 }
+    /// Print: the printers the system listed (or why it couldn't), and the settings last used.
+    pub fn print(
+        printing: mailcraft_engine::model::Printing,
+        printers: Result<Vec<mailcraft_engine::model::Printer>, String>,
+        saved: &mailcraft_engine::model::PrintOptions,
+    ) -> Dialog {
+        Dialog::Print(Box::new(crate::print_dialog::PrintForm::new(printing, printers, saved)))
     }
 
     /// A new event (at a time, or the next hour).
@@ -942,7 +935,7 @@ impl Dialog {
             Dialog::Contact(f) => f.error = Some(e),
             Dialog::Vacation(f) => f.error = Some(e),
             Dialog::OpenSharedCalendar { error, .. } | Dialog::AddSharedMailbox { error, .. } => *error = Some(e),
-            Dialog::Print { why, .. } => *why = Some(e),
+            Dialog::Print(f) => f.error = Some(e),
             _ => {}
         }
     }
@@ -1002,7 +995,7 @@ impl Dialog {
     }
 }
 
-fn title(ui: &mut Ui, t: &Tokens, s: &str) {
+pub(crate) fn title(ui: &mut Ui, t: &Tokens, s: &str) {
     ui.label(RichText::new(tl!(s)).font(theme::bold(18.0)).color(t.text));
     ui.add_space(6.0);
 }
@@ -1032,7 +1025,7 @@ fn close_row(ui: &mut Ui) -> bool {
     button_row(ui, |ui| !ui.button(tl!("Close")).clicked())
 }
 
-fn buttons(ui: &mut Ui, t: &Tokens, ok: &str, ok_enabled: bool) -> (bool, bool) {
+pub(crate) fn buttons(ui: &mut Ui, t: &Tokens, ok: &str, ok_enabled: bool) -> (bool, bool) {
     let mut res = (false, false);
     ui.add_space(10.0);
     button_row(ui, |ui| {
@@ -2140,59 +2133,7 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
             !cancel
         }
         Dialog::EditAccount(f) => edit_account(ui, f, t, acts),
-        Dialog::Print { printing, printers, why, selected, copies } => {
-            use mailcraft_engine::model::Printing;
-            ui.set_width(420.0);
-            title(ui, t, "Print");
-            let note = |ui: &mut Ui, text: &str| {
-                ui.add(egui::Label::new(RichText::new(text).color(t.dim)).wrap());
-            };
-            let can = match printing {
-                Printing::None => {
-                    note(ui, tl!("Printing isn't available here. Save the message as a PDF instead."));
-                    false
-                }
-                Printing::Viewer => {
-                    note(ui, tl!("The PDF app asks which printer to use."));
-                    true
-                }
-                Printing::Choose if printers.is_empty() => {
-                    note(ui, tl!("No printers were found. Open the message as a PDF and print it from the viewer."));
-                    if let Some(w) = why {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(w.as_str()).color(t.danger).small());
-                    }
-                    false
-                }
-                Printing::Choose => {
-                    ui.label(RichText::new(tl!("Printer")).color(t.dim).small());
-                    for (i, p) in printers.iter().enumerate() {
-                        let label = if p.default { tf!("{name} (default)", name = p.name) } else { p.name.clone() };
-                        ui.radio_value(selected, i, label);
-                    }
-                    true
-                }
-            };
-            if can {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(tl!("Copies"));
-                    ui.add(egui::DragValue::new(copies).range(1..=99));
-                });
-            }
-            ui.add_space(6.0);
-            let as_pdf = ui.link(tl!("Open as a PDF instead")).clicked();
-            let (ok, cancel) = buttons(ui, t, "Print", can);
-            if as_pdf {
-                acts.push(Action::OpenAsPdf);
-                return false;
-            }
-            if ok && can {
-                let printer = if *printing == Printing::Choose { printers.get(*selected).map(|p| p.name.clone()) } else { None };
-                acts.push(Action::Submit("message.print", json!({"printer": printer, "copies": *copies})));
-            }
-            !cancel
-        }
+        Dialog::Print(f) => crate::print_dialog::body(ui, f, t, acts),
         Dialog::OpenSharedCalendar { email, error } => {
             ui.set_width(420.0);
             title(ui, t, "Open a shared calendar");

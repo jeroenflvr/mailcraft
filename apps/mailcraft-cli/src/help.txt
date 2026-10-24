@@ -8,8 +8,11 @@ mailcraft-cli [--data DIR] <command>
   sync [--account ID]            download new mail into the cache
   list [--account ID] [--folder PATH] [--limit N]
   read KEY                       print a message (KEY from `list`)
-  print KEY [--printer NAME] [--copies N]
+  print KEY [--printer NAME] [--copies N] [--landscape] [--duplex long|short] [--mono]
+            [--paper a4|letter|legal|a3|a5] [--scale fit|NN] [--pages 1-3,5] [--no-header]
                                  send a message to a printer (`print --list`: the printers)
+  pdf KEY OUT.pdf [--landscape] [--paper …] [--scale fit|NN] [--pages 1-3,5] [--no-header]
+                                 save a message as a PDF on that paper
   search QUERY                   search the cache (from:, subject:, has:attachment…)
   send --to ADDR --subject S --body TEXT [--account ID] [--attach FILE]
   commands                       every engine command, as JSON

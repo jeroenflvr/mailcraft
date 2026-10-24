@@ -12,8 +12,11 @@
 //!   sync [--account ID]            download new mail into the cache
 //!   list [--account ID] [--folder PATH] [--limit N]
 //!   read KEY                       print a message (KEY from `list`)
-//!   print KEY [--printer NAME] [--copies N]
+//!   print KEY [--printer NAME] [--copies N] [--landscape] [--duplex long|short] [--mono]
+//!             [--paper a4|letter|legal|a3|a5] [--scale fit|NN] [--pages 1-3,5] [--no-header]
 //!                                  send a message to a printer (`print --list`: the printers)
+//!   pdf KEY OUT.pdf [--landscape] [--paper …] [--scale fit|NN] [--pages 1-3,5] [--no-header]
+//!                                  save a message as a PDF on that paper
 //!   search QUERY                   search the cache (from:, subject:, has:attachment…)
 //!   send --to ADDR --subject S --body TEXT [--account ID] [--attach FILE]
 //!   commands                       every engine command, as JSON
@@ -38,6 +41,9 @@ use mailcraft_engine::store::Store;
 use mailcraft_net::worker::{MemoryCredentials, Pool};
 use serde_json::{Value, json};
 
+/// Options that stand alone, with no value after them.
+const FLAGS: &[&str] = &["--list", "--landscape", "--mono", "--no-header"];
+
 struct Args {
     rest: Vec<String>,
 }
@@ -46,12 +52,43 @@ impl Args {
     fn opt(&self, name: &str) -> Option<String> {
         self.rest.iter().position(|a| a == name).and_then(|i| self.rest.get(i + 1)).cloned()
     }
+    fn flag(&self, name: &str) -> bool {
+        self.rest.iter().any(|a| a == name)
+    }
+    /// The print options of `print` and `pdf` as the `message.print` params.
+    fn print_params(&self) -> Result<Value, String> {
+        let mut v = json!({});
+        let number = |name: &str| -> Result<Option<u64>, String> {
+            self.opt(name).map(|c| c.parse::<u64>().map_err(|_| format!("{name}: `{c}` is not a number"))).transpose()
+        };
+        if let Some(c) = number("--copies")? {
+            v["copies"] = json!(c);
+        }
+        for (flag, key) in [("--printer", "printer"), ("--duplex", "duplex"), ("--paper", "paper"), ("--scale", "scale"), ("--pages", "pages")] {
+            if let Some(x) = self.opt(flag) {
+                v[key] = json!(x);
+            }
+        }
+        if self.flag("--landscape") {
+            v["orientation"] = json!("landscape");
+        }
+        if self.flag("--mono") {
+            v["color"] = json!("mono");
+        }
+        if self.flag("--no-header") {
+            v["headers"] = json!(false);
+        }
+        Ok(v)
+    }
     fn positional(&self, n: usize) -> Option<String> {
         let mut skip = false;
         let mut i = 0;
         for a in &self.rest {
             if skip {
                 skip = false;
+                continue;
+            }
+            if FLAGS.contains(&a.as_str()) {
                 continue;
             }
             if a.starts_with("--") {
@@ -165,6 +202,8 @@ fn open_message(s: &mut Session, store: &Store, key: &str) -> Result<Value, Stri
     })?;
     s.run("message.read", &json!({})).map_err(|e| e.to_string())
 }
+
+const PRINT_USAGE: &str = "print KEY [--printer NAME] [--copies N] [--landscape] [--duplex long|short] [--mono] [--paper a4|letter|legal|a3|a5] [--scale fit|NN] [--pages 1-3,5] [--no-header]   (print --list shows the printers)";
 
 fn print(v: &Value) {
     println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
@@ -325,16 +364,27 @@ fn run() -> Result<(), String> {
             }
         }
         "print" => {
-            let key = args.positional(1).ok_or("print KEY [--printer NAME] [--copies N]   (print --list shows the printers)")?;
+            let key = args.positional(1).ok_or(PRINT_USAGE)?;
             open_message(&mut s, &store, &key)?;
-            let copies = args.opt("--copies").map(|c| c.parse::<u64>().map_err(|_| format!("--copies: `{c}` is not a number"))).transpose()?;
-            s.run("message.print", &json!({"printer": args.opt("--printer"), "copies": copies})).map_err(|e| e.to_string())?;
+            s.run("message.print", &args.print_params()?).map_err(|e| e.to_string())?;
             for r in s.take_print_requests() {
                 let fonts = mailcraft_net::fonts::print_fonts(&r.doc.text());
-                let pdf = mailcraft_engine::cmd::render_pdf(&r.doc, &fonts)?;
-                mailcraft_net::print::print_pdf(r.printer.as_deref(), r.copies, &pdf)?;
-                println!("sent to {}", r.printer.as_deref().unwrap_or("the default printer"));
+                let setup = mailcraft_engine::print::PageSetup::from(&r.options);
+                let pdf = mailcraft_engine::cmd::render_pdf(&r.doc, &fonts, &setup)?;
+                mailcraft_net::print::print_pdf(&r.options, &pdf)?;
+                println!("sent to {}", r.options.printer.as_deref().unwrap_or("the default printer"));
             }
+        }
+        "pdf" => {
+            let (key, out) = args
+                .positional(1)
+                .zip(args.positional(2))
+                .ok_or("pdf KEY OUT.pdf [--landscape] [--paper a4|letter|legal|a3|a5] [--scale fit|NN] [--pages 1-3,5] [--no-header]")?;
+            open_message(&mut s, &store, &key)?;
+            let mut params = args.print_params()?;
+            params["path"] = json!(out);
+            let r = s.run("message.exportPdf", &params).map_err(|e| e.to_string())?;
+            println!("saved {} ({} bytes)", r["saved"].as_str().unwrap_or(&out), r["bytes"]);
         }
         "search" => {
             let q = args.positional(1).ok_or("search QUERY")?;

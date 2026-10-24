@@ -887,7 +887,6 @@ month	May	5月
 	Troubleshooting	トラブルシューティング
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	MailCraft のアプリ フォルダーにある mailcraft.log には、各アカウントの動作が記録されます。パスワードやメッセージの内容は記録されません。
 	Detailed log (every request to the server)	詳細なログ (サーバーへのすべてのリクエスト)
-	Printing isn't available here. Save the message as a PDF instead.	ここでは印刷できません。代わりにメッセージを PDF として保存してください。
 	The PDF app asks which printer to use.	PDF アプリが使用するプリンターを尋ねます。
 	No printers were found. Open the message as a PDF and print it from the viewer.	プリンターが見つかりませんでした。メッセージを PDF で開き、ビューアーから印刷してください。
 	Printer	プリンター
@@ -897,3 +896,26 @@ month	May	5月
 	Sent to {printer}	{printer} に送信しました
 	Sent to print	印刷に送信しました
 	The message couldn't be printed: {error}	メッセージを印刷できませんでした: {error}
+	Black and white	白黒
+	Collate	部単位で印刷
+	Fit to page	ページに合わせる
+	Landscape	横
+	Long edge	長辺とじ
+	No preview	プレビューなし
+	Not offered by this printer	このプリンターでは使えません
+	Orientation	印刷の向き
+	Page setup	ページ設定
+	Page {page} of {total}	{page} / {total} ページ
+	Pages	ページ
+	Pages:	ページ:
+	Paper	用紙
+	Portrait	縦
+	Print on both sides	両面印刷
+	Print the message header	メッセージのヘッダーを印刷
+	Save as PDF	PDF として保存
+	Save as PDF instead	代わりに PDF として保存
+	Scale	拡大縮小
+	Short edge	短辺とじ
+	The PDF app's print dialog decides the rest, such as both sides and color.	両面印刷やカラーなどのほかの設定は、PDF アプリの印刷ダイアログで決まります。
+	The message has only {total} pages	このメッセージは {total} ページしかありません
+	Use page numbers like 1-3, 5	1-3, 5 のようにページ番号を入力してください
