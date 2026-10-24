@@ -245,7 +245,7 @@ fn message(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
                             acts.push(Action::Run("mail.forward", json!({})));
                         }
                         ui.add_space(6.0);
-                        if widgets::pill_button(ui, Icon::Print, "Print", &t).on_hover_text(tl!("Open as a PDF to print")).clicked() {
+                        if widgets::pill_button(ui, Icon::Print, "Print", &t).clicked() {
                             acts.push(Action::Print);
                         }
                         let more = widgets::pill_button(ui, Icon::File, "Save", &t);

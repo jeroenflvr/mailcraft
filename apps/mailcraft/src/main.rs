@@ -87,6 +87,18 @@ impl Services for Desktop {
     fn local_zone(&self) -> mailcraft_engine::model::dates::Zone {
         mailcraft_net::tz::local_zone()
     }
+    fn print_fonts(&mut self, text: &str) -> mailcraft_engine::print::Fonts {
+        mailcraft_net::fonts::print_fonts(text)
+    }
+    fn printing(&self) -> mailcraft_engine::model::Printing {
+        mailcraft_net::print::printing()
+    }
+    fn printers(&mut self) -> Result<Vec<mailcraft_engine::model::Printer>, String> {
+        mailcraft_net::print::printers()
+    }
+    fn print_pdf(&mut self, printer: Option<&str>, copies: u32, pdf: &[u8]) -> Result<(), String> {
+        mailcraft_net::print::print_pdf(printer, copies, pdf)
+    }
     fn pick_files(&mut self) -> Vec<PathBuf> {
         rfd::FileDialog::new().set_title("Attach files").pick_files().unwrap_or_default()
     }
@@ -342,8 +354,12 @@ fn shell_open(target: &std::ffi::OsStr) -> Result<(), String> {
     }
 }
 
-/// The system's UI font, if installed (never bundled).
+/// The system's UI font, if installed (never bundled): found by name in the system's font
+/// collection (so any layout works: NixOS, Fedora…), else at the usual places.
 fn system_fonts() -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    if let (Some(regular), bold) = mailcraft_net::fonts::ui_fonts() {
+        return (Some(regular), bold);
+    }
     let candidates: &[(&str, &str)] = if cfg!(target_os = "windows") {
         &[("C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\segoeuib.ttf")]
     } else if cfg!(target_os = "macos") {
@@ -555,10 +571,6 @@ fn main() -> eframe::Result {
                 app.ui.title_base = "MailCraft – Sample mailbox".into();
             }
             let (regular, bold) = system_fonts();
-            // PDFs (print, save as PDF) embed the same font.
-            if let Some(r) = &regular {
-                app.session.print_fonts = Some((r.clone(), bold.clone()));
-            }
             app.install_fonts(&cc.egui_ctx, regular, bold);
             if let Some(v) = state_path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()) {
                 app.restore_state(&v);

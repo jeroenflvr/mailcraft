@@ -200,6 +200,16 @@ pub(crate) fn tour() {
             },
             Dialog::OpenSharedCalendar { email: "ana@contoso.example".into(), error: Some("no access".into()) },
             Dialog::AddSharedMailbox { account: "sample".into(), address: "sales@contoso.example".into(), error: Some("already open".into()) },
+            Dialog::print(
+                mailcraft_engine::model::Printing::Choose,
+                Ok(vec![
+                    mailcraft_engine::model::Printer { name: "Office_Laser".into(), default: true },
+                    mailcraft_engine::model::Printer { name: "Label_Maker".into(), default: false },
+                ]),
+            ),
+            Dialog::print(mailcraft_engine::model::Printing::Choose, Err("Scheduler is not running.".into())),
+            Dialog::print(mailcraft_engine::model::Printing::Viewer, Ok(Vec::new())),
+            Dialog::print(mailcraft_engine::model::Printing::None, Ok(Vec::new())),
             Dialog::RemoveAccount { account: "sample".into(), email: "x".into() },
             Dialog::MailboxClosed {
                 account: "sample".into(),
@@ -500,6 +510,99 @@ fn the_week_across_a_change_of_clocks_draws_in_the_right_rows() {
     a.run("calendar.goto", json!({"date": "2026-10-26"}));
     frame(&ctx, &mut a, vec![]);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Services with a print system that records what it is given.
+#[derive(Default)]
+struct Printing {
+    jobs: std::rc::Rc<std::cell::RefCell<Vec<(Option<String>, u32, Vec<u8>)>>>,
+    fail: bool,
+}
+
+impl crate::Services for Printing {
+    fn clock(&self) -> (i64, i32) {
+        (NOW, 0)
+    }
+    fn pick_files(&mut self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    fn save_path(&mut self, _: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+    fn open_path(&mut self, _: &std::path::Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn printing(&self) -> mailcraft_engine::model::Printing {
+        mailcraft_engine::model::Printing::Choose
+    }
+    fn printers(&mut self) -> Result<Vec<mailcraft_engine::model::Printer>, String> {
+        Ok(vec![
+            mailcraft_engine::model::Printer { name: "Label_Maker".into(), default: false },
+            mailcraft_engine::model::Printer { name: "Office_Laser".into(), default: true },
+        ])
+    }
+    fn print_pdf(&mut self, printer: Option<&str>, copies: u32, pdf: &[u8]) -> Result<(), String> {
+        if self.fail {
+            return Err("The printer or class does not exist.".into());
+        }
+        self.jobs.borrow_mut().push((printer.map(str::to_string), copies, pdf.to_vec()));
+        Ok(())
+    }
+}
+
+/// Print opens a dialog with the system's printers (the default picked) and sends the message as
+/// a PDF to the one chosen; Quick print goes to the default at once; a refusal is said.
+#[test]
+fn printing_goes_through_the_print_system() {
+    let dir = std::env::temp_dir().join(format!("mailcraft-ui-print-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    sample::seed_if_empty(&store, NOW).unwrap();
+    let s = Session::open(Some(store), Clock::new(NOW, 0));
+    let services = Printing::default();
+    let jobs = services.jobs.clone();
+    let mut a = MailApp::new(s, Box::new(NullBackend), Box::new(services));
+    let ctx = egui::Context::default();
+    let key = a.session.list.iter().find(|m| m.subject.contains("Storyboard review")).map(|m| m.key.clone()).unwrap();
+    a.session.open_message(&key);
+    frame(&ctx, &mut a, vec![]);
+
+    a.act(crate::Action::Print);
+    let Some(Dialog::Print { printers, selected, copies, .. }) = &a.ui.dialog else { panic!("no print dialog: {:?}", a.ui.dialog) };
+    assert_eq!((printers.len(), printers[*selected].name.as_str(), *copies), (2, "Office_Laser", 1), "the default is picked");
+    frame(&ctx, &mut a, vec![]);
+    a.act(crate::Action::Submit("message.print", json!({"printer": "Label_Maker", "copies": 2})));
+    assert!(a.ui.dialog.is_none());
+    {
+        let sent = jobs.borrow();
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].0.as_deref(), sent[0].1), (Some("Label_Maker"), 2));
+        assert!(sent[0].2.starts_with(b"%PDF-") && sent[0].2.ends_with(b"%%EOF\n"));
+    }
+    assert!(a.session.notices.last().is_some_and(|n| !n.error && n.text.contains("Label_Maker")), "{:?}", a.session.notices.last());
+
+    a.act(crate::Action::QuickPrint);
+    assert_eq!((jobs.borrow().len(), jobs.borrow()[1].0.clone(), jobs.borrow()[1].1), (2, None, 1), "the default printer, once");
+
+    // A refusal is said, not lost.
+    let mut failing =
+        MailApp::new(Session::open(None, Clock::new(NOW, 0)), Box::new(NullBackend), Box::new(Printing { fail: true, ..Default::default() }));
+    failing.session.reading = a.session.reading.clone();
+    failing.run("message.print", json!({}));
+    failing.act(crate::Action::QuickPrint);
+    assert!(failing.session.notices.last().is_some_and(|n| n.error && n.text.contains("does not exist")), "{:?}", failing.session.notices.last());
+
+    // Without a print system (the null services), Quick print makes a PDF to print from a viewer.
+    let (mut plain, d2) = app("print-plain");
+    let key = plain.session.list.iter().find(|m| m.subject.contains("Storyboard review")).map(|m| m.key.clone()).unwrap();
+    plain.session.open_message(&key);
+    plain.act(crate::Action::QuickPrint);
+    plain.act(crate::Action::Print);
+    let Some(Dialog::Print { printing, .. }) = &plain.ui.dialog else { panic!("no print dialog") };
+    assert_eq!(*printing, mailcraft_engine::model::Printing::None);
+    frame(&ctx, &mut plain, vec![]);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(d2);
 }
 
 #[test]

@@ -21,10 +21,11 @@ use serde_json::Value;
 
 pub use mailcraft_mime as mime;
 pub use mailcraft_model as model;
+pub use mailcraft_print as print;
 pub use mailcraft_store as store;
 pub use session::{
-    ARRANGE_HEADINGS, AccountState, Arrange, Compose, FolderRef, ListFilter, MoveTarget, NotesOrder, Notice, Picture, Prefs, ReadInPane, Reading,
-    ReadingPane, Row, SearchScope, Session, VacationState, View,
+    ARRANGE_HEADINGS, AccountState, Arrange, Compose, FolderRef, ListFilter, MoveTarget, NotesOrder, Notice, Picture, Prefs, PrintRequest,
+    ReadInPane, Reading, ReadingPane, Row, SearchScope, Session, VacationState, View,
     invite::Invite,
     parse_key,
     pim::{AgendaItem, CalMode, Module, NoteRef, Person, parse_local},

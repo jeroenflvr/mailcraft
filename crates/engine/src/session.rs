@@ -573,6 +573,15 @@ const CACHE_MESSAGES: usize = 300_000;
 /// Body words kept for search at most (bytes): enough for the messages a search looks at again.
 const BODY_WORDS_BYTES: usize = 48 << 20;
 
+/// A message to print: its pages as they were when it was asked for, the printer (`None`: the
+/// system's default) and the number of copies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrintRequest {
+    pub doc: mailcraft_print::Doc,
+    pub printer: Option<String>,
+    pub copies: u32,
+}
+
 pub struct Session {
     pub store: Option<Store>,
     pub accounts: Vec<AccountState>,
@@ -645,8 +654,12 @@ pub struct Session {
     pub oauth_available: Vec<String>,
     /// Only JMAP accounts can be added (the browser, which can't open IMAP or SMTP connections).
     pub jmap_only: bool,
-    /// The fonts PDFs embed (regular, bold): the system's, set by the app.
-    pub print_fonts: Option<(Vec<u8>, Option<Vec<u8>>)>,
+    /// The fonts PDFs made by commands (`message.exportPdf`) embed: the system's UI font, set by the
+    /// app. Printing from the window asks the platform for fonts that fit the message's text.
+    pub print_fonts: mailcraft_print::Fonts,
+    /// Messages to send to a printer (`message.print`), for the app to lay out in the system's
+    /// fonts and hand to the print system: the engine runs no processes.
+    pub print_requests: Vec<PrintRequest>,
     /// Pages to show in the browser (OAuth sign-in), oldest first.
     pub open_urls: Vec<String>,
     /// Each account's calendars and address books.
@@ -720,7 +733,8 @@ impl Session {
             held: HashMap::new(),
             oauth_available: Vec::new(),
             jmap_only: false,
-            print_fonts: None,
+            print_fonts: mailcraft_print::Fonts::default(),
+            print_requests: Vec::new(),
             open_urls: Vec::new(),
             pim: HashMap::new(),
             module: pim::Module::Mail,
@@ -824,6 +838,11 @@ impl Session {
     /// Jobs for the network layer, oldest first.
     pub fn take_jobs(&mut self) -> Vec<Job> {
         std::mem::take(&mut self.jobs)
+    }
+
+    /// The messages asked to be printed since last asked.
+    pub fn take_print_requests(&mut self) -> Vec<PrintRequest> {
+        std::mem::take(&mut self.print_requests)
     }
 
     pub fn push_job(&mut self, job: Job) {

@@ -2879,6 +2879,7 @@ name = "mailcraft-net"
 version = "0.18.11"
 dependencies = [
  "chrono",
+ "fontique",
  "hmac 0.13.0",
  "iana-time-zone",
  "imap-proto",
@@ -2888,6 +2889,7 @@ dependencies = [
  "mailcraft-jmap",
  "mailcraft-mime",
  "mailcraft-model",
+ "mailcraft-print",
  "mailcraft-store",
  "md-5",
  "md4",

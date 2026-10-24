@@ -12,6 +12,8 @@
 //!   sync [--account ID]            download new mail into the cache
 //!   list [--account ID] [--folder PATH] [--limit N]
 //!   read KEY                       print a message (KEY from `list`)
+//!   print KEY [--printer NAME] [--copies N]
+//!                                  send a message to a printer (`print --list`: the printers)
 //!   search QUERY                   search the cache (from:, subject:, has:attachment…)
 //!   send --to ADDR --subject S --body TEXT [--account ID] [--attach FILE]
 //!   commands                       every engine command, as JSON
@@ -143,6 +145,25 @@ fn start(s: &mut Session, store: &Store, account: &str) -> Result<Pool, String> 
     let _ = s.take_jobs();
     pool.submit(Job::Start { account: config, password: Some(Secret(pw)) });
     Ok(pool)
+}
+
+/// Open a message of the cache (downloading it first if it isn't there) and read it.
+fn open_message(s: &mut Session, store: &Store, key: &str) -> Result<Value, String> {
+    let k = mailcraft_engine::model::MessageKey::from_id(key).ok_or("bad key")?;
+    s.open_view(mailcraft_engine::View::Folder { account: k.account.clone(), folder: k.folder.clone() });
+    let r = s.run("message.read", &json!({"key": key})).map_err(|e| e.to_string())?;
+    if r.get("pending").is_none() {
+        return Ok(r);
+    }
+    // Not cached: download it.
+    let mut pool = start(s, store, &k.account)?;
+    pool.submit(Job::FetchBody { key: k.clone() });
+    drive(s, &mut pool, Duration::from_secs(120), |e| match e {
+        Event::Body { key, .. } if *key == k => Some(Ok(())),
+        Event::BodyFailed { key, error } if *key == k => Some(Err(error.clone())),
+        _ => None,
+    })?;
+    s.run("message.read", &json!({})).map_err(|e| e.to_string())
 }
 
 fn print(v: &Value) {
@@ -279,20 +300,7 @@ fn run() -> Result<(), String> {
         }
         "read" => {
             let key = args.positional(1).ok_or("read KEY")?;
-            let k = mailcraft_engine::model::MessageKey::from_id(&key).ok_or("bad key")?;
-            s.open_view(mailcraft_engine::View::Folder { account: k.account.clone(), folder: k.folder.clone() });
-            let mut r = s.run("message.read", &json!({"key": key})).map_err(|e| e.to_string())?;
-            if r.get("pending").is_some() {
-                // Not cached: download it.
-                let mut pool = start(&mut s, &store, &k.account)?;
-                pool.submit(Job::FetchBody { key: k.clone() });
-                drive(&mut s, &mut pool, Duration::from_secs(120), |e| match e {
-                    Event::Body { key, .. } if *key == k => Some(Ok(())),
-                    Event::BodyFailed { key, error } if *key == k => Some(Err(error.clone())),
-                    _ => None,
-                })?;
-                r = s.run("message.read", &json!({})).map_err(|e| e.to_string())?;
-            }
+            let r = open_message(&mut s, &store, &key)?;
             println!("From:    {}", r["from"].as_str().unwrap_or(""));
             println!("To:      {}", r["to"].as_str().unwrap_or(""));
             if r["cc"].as_str().is_some_and(|c| !c.is_empty()) {
@@ -310,6 +318,23 @@ fn run() -> Result<(), String> {
                 );
             }
             println!("\n{}", r["text"].as_str().unwrap_or(""));
+        }
+        "print" if args.rest.iter().any(|a| a == "--list") => {
+            for p in mailcraft_net::print::printers()? {
+                println!("{}{}", p.name, if p.default { "  (default)" } else { "" });
+            }
+        }
+        "print" => {
+            let key = args.positional(1).ok_or("print KEY [--printer NAME] [--copies N]   (print --list shows the printers)")?;
+            open_message(&mut s, &store, &key)?;
+            let copies = args.opt("--copies").map(|c| c.parse::<u64>().map_err(|_| format!("--copies: `{c}` is not a number"))).transpose()?;
+            s.run("message.print", &json!({"printer": args.opt("--printer"), "copies": copies})).map_err(|e| e.to_string())?;
+            for r in s.take_print_requests() {
+                let fonts = mailcraft_net::fonts::print_fonts(&r.doc.text());
+                let pdf = mailcraft_engine::cmd::render_pdf(&r.doc, &fonts)?;
+                mailcraft_net::print::print_pdf(r.printer.as_deref(), r.copies, &pdf)?;
+                println!("sent to {}", r.printer.as_deref().unwrap_or("the default printer"));
+            }
         }
         "search" => {
             let q = args.positional(1).ok_or("search QUERY")?;

@@ -49,7 +49,7 @@ mailbox; packaging for every desktop.
 - **Attachments:** text-like previews, attached emails, PDF thumbnails (first page) and video
   frames from ffmpeg, Open in the Craft app for the file, Save all, dragging out to other apps
   (Windows and macOS).
-- **Print and export:** print through a PDF, Save as PDF, Save as `.eml`.
+- **Print and export:** print through a PDF (since the unreleased version, to a printer: below), Save as PDF, Save as `.eml`.
 - **Languages:** ten besides English (Spanish, French, German, Brazilian Portuguese, Italian,
   Russian, Japanese, Korean, Simplified and Traditional Chinese), following the system or chosen
   in Options.
@@ -515,3 +515,28 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   the current ones for every year (the US before 2007, Australia before 2008 differ); the local
   zone is read for 30 years each way; zones the table doesn't know and a server doesn't describe
   are written in UTC.
+
+### Unreleased — printing and the squares in printed text
+- **Squares in the printed text:** a PDF embedded one font and drew every character it lacked as
+  that font's missing-glyph box: box drawing (every HTML table), arrows, check marks, emoji,
+  other scripts. Printing now picks each character from the first font that has it. The app asks
+  the system's font collection (`fontique`) for the interface's regular and bold faces and, for
+  what they lack, the fallback the system recommends for each script and a few known symbol
+  families; the print crate splits each line into runs by face, embeds the faces used (TrueType
+  as `FontFile2`, OpenType with CFF outlines such as Noto Sans CJK as `FontFile3`, the face of a
+  `.ttc` cut out of the collection) with a `ToUnicode` map per face, drops zero-width and format
+  characters (the emoji selector gave two squares per emoji) and draws a character nothing has as
+  `?`, never glyph 0, with a line in the log. Embedded fonts are capped at 40 MB a document (the
+  largest fallbacks go first). Fonts are found by name through the system's collection, so
+  NixOS and Fedora layouts work (the old fixed paths remain as a last resort for the interface).
+  Not yet: colour emoji (bitmap fonts can't be embedded: they print as `?`), subsetting (a CJK
+  face makes the PDF several MB), shaping (Arabic joins, Indic clusters).
+- **Print to a printer:** *Print* opens a dialog with the system's printers (the default
+  selected) and copies; *Quick print* (the message list's menu) prints once on the default
+  printer. Linux, the BSDs and macOS list printers with `lpstat` and print with `lp` (CUPS); with
+  no CUPS or no printer the dialog says so and offers *Open as a PDF instead*, the previous
+  behaviour. Windows hands the PDF to the registered PDF app's Print verb, which asks which
+  printer to use (choosing one here would need the `windows` crate and `unsafe`, which the
+  workspace forbids). The browser keeps Save as PDF. `message.print` (`printer`, `copies`) queues
+  the request; the app lays it out in the system's fonts and hands it over, so the engine runs no
+  processes; `mailcraft-cli print KEY [--printer NAME] [--copies N]` and `print --list`.

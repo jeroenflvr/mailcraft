@@ -431,7 +431,7 @@ fn message_row(
         item(ui, acts, tl!("Reply"), Action::Run("mail.reply", json!({})));
         item(ui, acts, tl!("Reply all"), Action::Run("mail.replyAll", json!({})));
         item(ui, acts, tl!("Forward"), Action::Run("mail.forward", json!({})));
-        item(ui, acts, tl!("Quick print"), Action::Print);
+        item(ui, acts, tl!("Quick print"), Action::QuickPrint);
         ui.separator();
         item(
             ui,

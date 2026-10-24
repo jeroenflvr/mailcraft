@@ -887,3 +887,13 @@ month	May	5月
 	Troubleshooting	トラブルシューティング
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	MailCraft のアプリ フォルダーにある mailcraft.log には、各アカウントの動作が記録されます。パスワードやメッセージの内容は記録されません。
 	Detailed log (every request to the server)	詳細なログ (サーバーへのすべてのリクエスト)
+	Printing isn't available here. Save the message as a PDF instead.	ここでは印刷できません。代わりにメッセージを PDF として保存してください。
+	The PDF app asks which printer to use.	PDF アプリが使用するプリンターを尋ねます。
+	No printers were found. Open the message as a PDF and print it from the viewer.	プリンターが見つかりませんでした。メッセージを PDF で開き、ビューアーから印刷してください。
+	Printer	プリンター
+	{name} (default)	{name}(既定)
+	Copies	部数
+	Open as a PDF instead	代わりに PDF で開く
+	Sent to {printer}	{printer} に送信しました
+	Sent to print	印刷に送信しました
+	The message couldn't be printed: {error}	メッセージを印刷できませんでした: {error}

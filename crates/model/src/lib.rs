@@ -24,6 +24,27 @@ use serde::{Deserialize, Serialize};
 pub use addr::EmailAddress;
 pub use job::{Connections, Event, Job, Op, SyncStatus};
 
+/// A printer the system knows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Printer {
+    pub name: String,
+    /// The one the system prints to when none is named.
+    #[serde(default)]
+    pub default: bool,
+}
+
+/// How a message gets to paper from where MailCraft runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Printing {
+    /// Not from here (the browser): the message is saved as a PDF.
+    #[default]
+    None,
+    /// The system's printers are listed and one is chosen (CUPS: Linux, the BSDs, macOS).
+    Choose,
+    /// The system's PDF app prints it and asks which printer (Windows).
+    Viewer,
+}
+
 /// How a connection to a server is secured.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

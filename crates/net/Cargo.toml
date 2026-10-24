@@ -14,6 +14,7 @@ mailcraft-model = { workspace = true }
 mailcraft-mime = { workspace = true }
 mailcraft-store = { workspace = true }
 mailcraft-jmap = { workspace = true }
+mailcraft-print = { workspace = true }
 imap-proto = { workspace = true }
 lettre = { workspace = true }
 rustls = { workspace = true }
@@ -36,6 +37,9 @@ hmac = "0.13"
 # platform; both MIT / Apache-2.0).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 iana-time-zone = "0.1"
+# The system's fonts, found by name and by script, for printing (Apache-2.0 OR MIT; eframe already
+# builds it for the interface's fonts).
+fontique = { version = "0.11", default-features = false, features = ["system", "fontconfig-dlopen"] }
 log = { workspace = true }
 thiserror = { workspace = true }
 

@@ -890,3 +890,13 @@ month	May	Май
 	Troubleshooting	Устранение неполадок
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log в папке приложения MailCraft показывает, что делала каждая учётная запись. В нём никогда нет паролей и содержимого писем.
 	Detailed log (every request to the server)	Подробный журнал (каждый запрос к серверу)
+	Printing isn't available here. Save the message as a PDF instead.	Здесь печать недоступна. Сохраните сообщение как PDF.
+	The PDF app asks which printer to use.	Приложение для PDF спросит, какой принтер использовать.
+	No printers were found. Open the message as a PDF and print it from the viewer.	Принтеры не найдены. Откройте сообщение как PDF и напечатайте его из программы просмотра.
+	Printer	Принтер
+	{name} (default)	{name} (по умолчанию)
+	Copies	Копии
+	Open as a PDF instead	Вместо этого открыть как PDF
+	Sent to {printer}	Отправлено на {printer}
+	Sent to print	Отправлено на печать
+	The message couldn't be printed: {error}	Не удалось напечатать сообщение: {error}

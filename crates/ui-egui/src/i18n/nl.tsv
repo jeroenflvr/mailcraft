@@ -886,3 +886,13 @@ month	May	mei
 	Troubleshooting	Probleemoplossing
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log, in de app-map van MailCraft, vertelt wat elk account deed. Het bevat nooit wachtwoorden of de inhoud van berichten.
 	Detailed log (every request to the server)	Gedetailleerd logboek (elk verzoek aan de server)
+	Printing isn't available here. Save the message as a PDF instead.	Afdrukken is hier niet beschikbaar. Bewaar het bericht in plaats daarvan als pdf.
+	The PDF app asks which printer to use.	De pdf-app vraagt welke printer je wilt gebruiken.
+	No printers were found. Open the message as a PDF and print it from the viewer.	Er zijn geen printers gevonden. Open het bericht als pdf en druk het af vanuit de viewer.
+	Printer	Printer
+	{name} (default)	{name} (standaard)
+	Copies	Exemplaren
+	Open as a PDF instead	In plaats daarvan als pdf openen
+	Sent to {printer}	Verzonden naar {printer}
+	Sent to print	Verzonden om af te drukken
+	The message couldn't be printed: {error}	Het bericht kon niet worden afgedrukt: {error}

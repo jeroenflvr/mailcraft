@@ -201,6 +201,25 @@ pub trait Services {
     fn take_picked(&mut self) -> Vec<(String, String, Vec<u8>)> {
         Vec::new()
     }
+    /// The fonts to print a message with: the interface's regular and bold faces, and fallbacks for
+    /// whatever of `text` they lack (symbols, other scripts). The default offers the fonts built in
+    /// from craft-fonts, if any.
+    fn print_fonts(&mut self, _text: &str) -> mailcraft_engine::print::Fonts {
+        let fallbacks = craft_fonts::fallbacks().map(|f| mailcraft_engine::print::FontFile::new(f.bytes, 0)).collect();
+        mailcraft_engine::print::Fonts { fallbacks, ..Default::default() }
+    }
+    /// How a message gets to a printer from here.
+    fn printing(&self) -> mailcraft_engine::model::Printing {
+        mailcraft_engine::model::Printing::None
+    }
+    /// The printers the system knows, the default marked, or why they can't be listed.
+    fn printers(&mut self) -> Result<Vec<mailcraft_engine::model::Printer>, String> {
+        Ok(Vec::new())
+    }
+    /// Print a PDF (`printer`: `None` for the system's default).
+    fn print_pdf(&mut self, _printer: Option<&str>, _copies: u32, _pdf: &[u8]) -> Result<(), String> {
+        Err("not available".into())
+    }
 }
 
 /// Services for tests: a fixed clock, no dialogs.
@@ -244,8 +263,13 @@ pub enum Action {
     /// Search every folder for this (shown in the box, with the Search tab).
     Search(String),
     SetDark(Option<bool>),
-    /// Print the open message (as a PDF opened in the system's viewer).
+    /// Print the open message: a dialog with the printers and the copies.
     Print,
+    /// Print it at once, on the default printer, once.
+    QuickPrint,
+    /// Make a PDF of the open message, saved where asked and opened in the system's viewer, to
+    /// print from there.
+    OpenAsPdf,
     /// Save the open message as a PDF, or as its `.eml` source.
     ExportPdf,
     SaveMessage,
@@ -638,8 +662,35 @@ impl MailApp {
                 self.run("compose.attach", json!({"name": name, "data": data}));
             }
         }
+        self.send_print_requests();
         // Snoozed mail that is due comes back.
         self.session.tick();
+    }
+
+    /// The fonts to print the open message with (the system's, chosen for its characters).
+    fn fonts_for_open_message(&mut self) -> mailcraft_engine::print::Fonts {
+        let text = self.session.message_doc().map(|d| d.text()).unwrap_or_default();
+        self.services.print_fonts(&text)
+    }
+
+    /// Messages asked to print (`message.print`): laid out in the system's fonts and handed to the
+    /// print system, and the answer said.
+    fn send_print_requests(&mut self) {
+        for r in self.session.take_print_requests() {
+            let fonts = self.services.print_fonts(&r.doc.text());
+            let sent =
+                mailcraft_engine::cmd::render_pdf(&r.doc, &fonts).and_then(|pdf| self.services.print_pdf(r.printer.as_deref(), r.copies, &pdf));
+            match sent {
+                Ok(()) => {
+                    let said = match &r.printer {
+                        Some(p) => tf!("Sent to {printer}", printer = p),
+                        None => tl!("Sent to print").to_string(),
+                    };
+                    self.session.notice(said, false);
+                }
+                Err(e) => self.session.notice(tf!("The message couldn't be printed: {error}", error = e), true),
+            }
+        }
     }
 
     fn flush_jobs(&mut self) {
@@ -1004,6 +1055,8 @@ impl MailApp {
                     | Action::DragOut(_)
                     | Action::SaveAll
                     | Action::Print
+                    | Action::QuickPrint
+                    | Action::OpenAsPdf
                     | Action::ExportPdf
                     | Action::SaveMessage
                     | Action::Run("attachment.preview", _) => Action::InWindow(key.clone(), Box::new(a)),
@@ -1217,6 +1270,7 @@ impl MailApp {
                         self.ui.person = v.get("uid").and_then(Value::as_str).map(str::to_string);
                     }
                     self.ui.dialog = None;
+                    self.send_print_requests();
                 }
                 Err(e) => {
                     if let Some(d) = self.ui.dialog.as_mut() {
@@ -1236,9 +1290,10 @@ impl MailApp {
                     self.session.notice(tf!("{app} couldn't open it: {error}", app = app.display(), error = e), true);
                 }
             }
-            Action::Print | Action::ExportPdf if self.services.downloads() => {
+            Action::Print | Action::QuickPrint | Action::OpenAsPdf | Action::ExportPdf if self.services.downloads() => {
                 let name = format!("{}.pdf", self.message_file_name());
-                match self.session.message_pdf() {
+                let fonts = self.fonts_for_open_message();
+                match self.session.message_pdf(&fonts) {
                     Ok(b) => self.services.download(&name, &b),
                     Err(e) => self.session.notice(e.to_string(), true),
                 }
@@ -1274,8 +1329,22 @@ impl MailApp {
             Action::InsertPicture if self.services.pick_later("picture") => {}
             Action::AttachFiles if self.services.pick_later("attach") => {}
             Action::Print => {
+                let printing = self.services.printing();
+                let printers = if printing == mailcraft_engine::model::Printing::Choose { self.services.printers() } else { Ok(Vec::new()) };
+                self.ui.dialog = Some(Dialog::print(printing, printers));
+            }
+            Action::QuickPrint => {
+                if self.services.printing() == mailcraft_engine::model::Printing::None {
+                    self.act(Action::OpenAsPdf);
+                } else {
+                    self.run("message.print", json!({}));
+                    self.send_print_requests();
+                }
+            }
+            Action::OpenAsPdf => {
                 // The message as a PDF, saved where asked, then opened to print from the viewer.
                 let Some(path) = self.services.save_path(&format!("{}.pdf", self.message_file_name())) else { return };
+                self.session.print_fonts = self.fonts_for_open_message();
                 match self.session.run("message.exportPdf", &json!({"path": path.to_string_lossy()})) {
                     Ok(_) => match self.services.open_path(&path) {
                         Ok(()) => self.session.notice(tl!("Opened as a PDF: print it from the viewer"), false),
@@ -1287,6 +1356,9 @@ impl MailApp {
             Action::ExportPdf | Action::SaveMessage => {
                 let (ext, id) = if matches!(a, Action::ExportPdf) { ("pdf", "message.exportPdf") } else { ("eml", "message.saveAs") };
                 if let Some(path) = self.services.save_path(&format!("{}.{ext}", self.message_file_name())) {
+                    if ext == "pdf" {
+                        self.session.print_fonts = self.fonts_for_open_message();
+                    }
                     match self.session.run(id, &json!({"path": path.to_string_lossy()})) {
                         Ok(_) => self.session.notice(tf!("Saved {path}", path = path.display()), false),
                         Err(e) => self.session.notice(e.to_string(), true),

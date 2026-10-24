@@ -20,6 +20,7 @@ pub mod dav;
 pub mod dns;
 pub mod ews;
 mod ews_pim;
+pub mod fonts;
 pub mod graph;
 pub mod graph_pim;
 pub mod http;
@@ -28,6 +29,7 @@ pub mod jmap;
 pub mod ntlm;
 pub mod oauth;
 pub mod pop;
+pub mod print;
 pub mod pst;
 #[cfg(test)]
 mod pst_bench;

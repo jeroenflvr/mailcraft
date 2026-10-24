@@ -887,3 +887,13 @@ month	May	5月
 	Troubleshooting	疑难解答
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	MailCraft 应用文件夹中的 mailcraft.log 记录每个帐户做了什么。它从不包含密码或邮件内容。
 	Detailed log (every request to the server)	详细日志 (发往服务器的每个请求)
+	Printing isn't available here. Save the message as a PDF instead.	此处无法打印。请改为将邮件保存为 PDF。
+	The PDF app asks which printer to use.	PDF 应用会询问使用哪台打印机。
+	No printers were found. Open the message as a PDF and print it from the viewer.	未找到打印机。请将邮件以 PDF 打开，并从查看器打印。
+	Printer	打印机
+	{name} (default)	{name}（默认）
+	Copies	份数
+	Open as a PDF instead	改为以 PDF 打开
+	Sent to {printer}	已发送到 {printer}
+	Sent to print	已发送打印
+	The message couldn't be printed: {error}	无法打印邮件: {error}

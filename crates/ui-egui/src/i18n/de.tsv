@@ -891,3 +891,13 @@ month	May	Mai
 	Troubleshooting	Fehlerbehebung
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log im App-Ordner von MailCraft zeigt, was jedes Konto getan hat. Es enthält nie Passwörter oder Nachrichteninhalte.
 	Detailed log (every request to the server)	Ausführliches Protokoll (jede Anfrage an den Server)
+	Printing isn't available here. Save the message as a PDF instead.	Drucken ist hier nicht verfügbar. Speichern Sie die Nachricht stattdessen als PDF.
+	The PDF app asks which printer to use.	Die PDF-App fragt, welcher Drucker verwendet werden soll.
+	No printers were found. Open the message as a PDF and print it from the viewer.	Es wurden keine Drucker gefunden. Öffnen Sie die Nachricht als PDF und drucken Sie sie aus dem Viewer.
+	Printer	Drucker
+	{name} (default)	{name} (Standard)
+	Copies	Kopien
+	Open as a PDF instead	Stattdessen als PDF öffnen
+	Sent to {printer}	An {printer} gesendet
+	Sent to print	Zum Drucken gesendet
+	The message couldn't be printed: {error}	Die Nachricht konnte nicht gedruckt werden: {error}

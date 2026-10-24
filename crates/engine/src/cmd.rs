@@ -221,6 +221,9 @@ pub fn registry() -> Registry {
         .params(r#"{"key": string}"#),
         CommandSpec::new("message.saveAs", "Save as", "File › Save As", save_message).params(r#"{"path": string}"#).when(has_reading),
         CommandSpec::new("message.exportPdf", "Save as PDF", "File › Save As", export_pdf).params(r#"{"path": string}"#).when(has_reading),
+        CommandSpec::new("message.print", "Print", "File › Print", print_message)
+            .params(r#"{"printer"?: string (default: the system's), "copies"?: number (1–99)}"#)
+            .when(has_reading),
         CommandSpec::new("message.showPictures", "Show pictures", "Reading pane", |s, v| s.show_pictures(p::bool(v, "always").unwrap_or(false)))
             .params(r#"{"always"?: bool}"#)
             .when(has_reading),
@@ -1311,8 +1314,8 @@ impl Session {
         .ok_or_else(|| CmdError::Failed("the message isn't downloaded".into()))
     }
 
-    /// The open message as a PDF: subject, header, text and the names of its attachments.
-    pub fn message_pdf(&self) -> Result<Vec<u8>, CmdError> {
+    /// The open message as pages: subject, header, text and the names of its attachments.
+    pub fn message_doc(&self) -> Result<mailcraft_print::Doc, CmdError> {
         let r = self.reading.as_ref().ok_or_else(|| CmdError::Disabled("open a message first".into()))?;
         let m = r.parsed.as_ref().ok_or_else(|| CmdError::Disabled("the message is still downloading".into()))?;
         let mut header = vec![("From".to_string(), m.from.to_string())];
@@ -1329,10 +1332,23 @@ impl Session {
         if !files.is_empty() {
             header.push(("Attachments".into(), files.join(", ")));
         }
-        let doc = mailcraft_print::Doc { title: m.subject.clone(), header, body: m.text.clone() };
-        let fonts = self.print_fonts.as_ref().map(|(r, b)| mailcraft_print::Fonts { regular: r, bold: b.as_deref() });
-        mailcraft_print::pdf(&doc, fonts).map_err(CmdError::Failed)
+        Ok(mailcraft_print::Doc { title: m.subject.clone(), header, body: m.text.clone() })
     }
+
+    /// The open message as a PDF, in `fonts` (the system's: [`mailcraft_print::Fonts`]).
+    pub fn message_pdf(&self, fonts: &mailcraft_print::Fonts) -> Result<Vec<u8>, CmdError> {
+        render_pdf(&self.message_doc()?, fonts).map_err(CmdError::Failed)
+    }
+}
+
+/// Pages as a PDF in `fonts`; what the fonts lacked is said in the log.
+pub fn render_pdf(doc: &mailcraft_print::Doc, fonts: &mailcraft_print::Fonts) -> Result<Vec<u8>, String> {
+    let (pdf, report) = mailcraft_print::pdf_report(doc, fonts)?;
+    if !report.missing.is_empty() || report.dropped_fonts > 0 {
+        let shown: String = report.missing.iter().take(20).map(|c| format!("U+{:04X}", u32::from(*c))).collect::<Vec<_>>().join(" ");
+        log::info!("print: no font for {} characters ({shown}); {} fonts left out as too large", report.missing.len(), report.dropped_fonts);
+    }
+    Ok(pdf)
 }
 
 fn save_attachment(s: &mut Session, v: &Value) -> CmdResult {
@@ -1401,10 +1417,20 @@ fn save_message(s: &mut Session, v: &Value) -> CmdResult {
     Ok(json!({"saved": path, "bytes": raw.len()}))
 }
 
+/// The open message, queued for a printer: the app lays it out in the system's fonts and hands it
+/// to the print system (the engine runs no processes).
+fn print_message(s: &mut Session, v: &Value) -> CmdResult {
+    let doc = s.message_doc()?;
+    let copies = p::u64(v, "copies").map_or(1, |n| u32::try_from(n.clamp(1, 99)).unwrap_or(1));
+    let printer = p::str(v, "printer").map(str::trim).filter(|x| !x.is_empty()).map(str::to_string);
+    s.print_requests.push(crate::PrintRequest { doc, printer: printer.clone(), copies });
+    Ok(json!({"queued": true, "printer": printer, "copies": copies}))
+}
+
 /// The open message as a PDF.
 fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
     let path = p::req_str(v, "path")?;
-    let bytes = s.message_pdf()?;
+    let bytes = s.message_pdf(&s.print_fonts)?;
     std::fs::write(path, &bytes).map_err(|e| CmdError::Failed(format!("{path}: {e}")))?;
     Ok(json!({"saved": path, "bytes": bytes.len()}))
 }

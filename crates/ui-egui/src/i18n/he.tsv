@@ -886,3 +886,13 @@ month	May	מאי
 	Troubleshooting	פתרון בעיות
 	mailcraft.log, in MailCraft's app folder, says what each account did. It never has passwords or what messages say.	mailcraft.log, בתיקיית היישום של MailCraft, מתאר מה כל חשבון עשה. הוא אף פעם לא מכיל סיסמאות או את תוכן ההודעות.
 	Detailed log (every request to the server)	יומן מפורט (כל בקשה לשרת)
+	Printing isn't available here. Save the message as a PDF instead.	ההדפסה אינה זמינה כאן. שמור את ההודעה כ-PDF במקום זאת.
+	The PDF app asks which printer to use.	אפליקציית ה-PDF תשאל באיזו מדפסת להשתמש.
+	No printers were found. Open the message as a PDF and print it from the viewer.	לא נמצאו מדפסות. פתח את ההודעה כ-PDF והדפס אותה מהמציג.
+	Printer	מדפסת
+	{name} (default)	{name} (ברירת מחדל)
+	Copies	עותקים
+	Open as a PDF instead	פתח כ-PDF במקום זאת
+	Sent to {printer}	נשלח אל {printer}
+	Sent to print	נשלח להדפסה
+	The message couldn't be printed: {error}	לא ניתן היה להדפיס את ההודעה: {error}

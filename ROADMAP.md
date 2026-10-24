@@ -218,3 +218,10 @@ local-first, media-aware v1); the fuller request is
   backs `Clock`; events keep their zone, recurrences expand in it, CalDAV, Graph and EWS read and
   write it, and the platform's zone is read with its daylight-saving changes (desktop, CLI,
   browser). Regression tests span 2026-10-25 in the model, CalDAV, Graph, EWS, engine and UI.
+- **2026-10-24** — Printing: every character the interface font lacked printed as a box (table
+  borders, arrows, check marks, emoji, other scripts), and the only way out was a PDF opened in a
+  viewer. The print crate now draws each character from the first font that has it (fallbacks
+  from the system's font collection, CFF and `.ttc` fonts embedded, invisible characters dropped,
+  `?` for what nothing has), and Print lists the system's printers (CUPS `lpstat`/`lp`; the PDF
+  app's Print verb on Windows) with copies and Quick print; `message.print` and
+  `mailcraft-cli print` do the same from scripts.

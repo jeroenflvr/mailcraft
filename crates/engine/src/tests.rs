@@ -528,6 +528,29 @@ fn pop_accounts_download_and_can_start_from_a_data_file() {
     let _ = std::fs::remove_dir_all(s.store.as_ref().unwrap().root());
 }
 
+/// Printing is a request for the app (which has the system's fonts and print system): the message
+/// as pages, the printer and the copies, kept as they were asked for.
+#[test]
+fn printing_queues_a_request_for_the_app() {
+    let mut s = sample_session("print");
+    assert!(s.run("message.print", &json!({})).is_err(), "nothing is open");
+    let k = key_of(&s, "Storyboard review on Thursday");
+    s.run("list.open", &k).unwrap();
+    let r = s.run("message.print", &json!({"printer": " Office_Laser ", "copies": 500})).unwrap();
+    assert_eq!((r["printer"].as_str(), r["copies"].as_u64()), (Some("Office_Laser"), Some(99)), "copies are 1 to 99");
+    s.run("message.print", &json!({"printer": "", "copies": 0})).unwrap();
+    s.run("message.print", &json!({"copies": "many", "printer": 5})).unwrap();
+    let wanted = s.take_print_requests();
+    assert_eq!(wanted.len(), 3);
+    assert_eq!((wanted[0].printer.as_deref(), wanted[0].copies), (Some("Office_Laser"), 99));
+    assert_eq!((wanted[1].printer.clone(), wanted[1].copies), (None, 1));
+    assert_eq!((wanted[2].printer.clone(), wanted[2].copies), (None, 1), "what isn't understood is the default");
+    assert_eq!(wanted[0].doc.title, "Storyboard review on Thursday");
+    assert!(!wanted[0].doc.body.is_empty() && wanted[0].doc.header.iter().any(|(k, _)| k == "From"));
+    assert!(s.take_print_requests().is_empty());
+    let _ = std::fs::remove_dir_all(s.store.as_ref().unwrap().root());
+}
+
 #[test]
 fn messages_save_as_eml_and_pdf() {
     let mut s = sample_session("export");
@@ -541,7 +564,7 @@ fn messages_save_as_eml_and_pdf() {
     if let Some(font) =
         ["C:\\Windows\\Fonts\\segoeui.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"].iter().find_map(|p| std::fs::read(p).ok())
     {
-        s.print_fonts = Some((font, None));
+        s.print_fonts = mailcraft_print::Fonts { regular: Some(mailcraft_print::FontFile::new(font, 0)), ..Default::default() };
     }
     let pdf = dir.join("m.pdf");
     s.run("message.exportPdf", &json!({"path": pdf.to_string_lossy()})).unwrap();
