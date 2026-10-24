@@ -247,7 +247,7 @@ impl PageRange {
     pub fn pages(&self, total: u32) -> Vec<u32> {
         match self {
             PageRange::All => (1..=total).collect(),
-            PageRange::Range(r) => r.iter().flat_map(|&(a, b)| a..=b.min(total)).collect(),
+            PageRange::Range(r) => r.iter().flat_map(|&(a, b)| a.max(1)..=b.min(total)).collect(),
         }
     }
 }
@@ -378,6 +378,7 @@ mod tests {
         assert_eq!(r.pages(5), vec![2, 3, 5]);
         assert!(r.pages(1).is_empty());
         assert!(r.contains(9) && !r.contains(4));
+        assert_eq!(PageRange::Range(vec![(0, 2)]).pages(5), vec![1, 2]);
         assert_eq!(PageRange::All.pages(3), vec![1, 2, 3]);
         assert_eq!(PageRange::parse("1-4000000000").unwrap().pages(2), vec![1, 2]);
     }
@@ -430,7 +431,13 @@ mod tests {
 
     #[test]
     fn normalizes_and_remembers() {
-        let o = PrintOptions { copies: 500, scale: Scale::Percent(9000), printer: Some(" ".into()), pages: PageRange::Range(vec![(2, 3)]), ..Default::default() };
+        let o = PrintOptions {
+            copies: 500,
+            scale: Scale::Percent(9000),
+            printer: Some(" ".into()),
+            pages: PageRange::Range(vec![(2, 3)]),
+            ..Default::default()
+        };
         let n = o.clone().normalized();
         assert_eq!((n.copies, n.scale, n.printer), (MAX_COPIES, Scale::Percent(MAX_SCALE), None));
         assert_eq!(PrintOptions { copies: 0, ..Default::default() }.normalized().copies, 1);

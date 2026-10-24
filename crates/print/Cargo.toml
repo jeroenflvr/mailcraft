@@ -10,6 +10,8 @@ description = "MailCraft print and export: a message laid out on pages as a PDF 
 workspace = true
 
 [dependencies]
+# The print options (paper, orientation, scale, page range) a document is laid out for.
+mailcraft-model = { workspace = true }
 # The formatted body and its layout (`RichText`, `layout::Block`), as the reading pane shows them.
 mailcraft-mime = { workspace = true }
 # Glyph ids and widths of the system font that gets embedded.

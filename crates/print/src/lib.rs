@@ -21,6 +21,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 pub use mailcraft_mime::layout::Block;
+pub use mailcraft_model::{Orientation, PageRange, Paper, PrintOptions, Scale};
 
 use layout::{Canvas, Item, Rect, Text};
 
@@ -74,9 +75,56 @@ pub struct Fonts {
     pub fallbacks: Vec<FontFile>,
 }
 
+/// The paper and how the message sits on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageSetup {
+    pub paper: Paper,
+    pub orientation: Orientation,
+    /// `FitToPage` is 100 % (the content is laid out as wide as the page); a percentage lays the
+    /// content out `100 / p` times as wide and draws it scaled by `p`.
+    pub scale: Scale,
+    /// The pages written; the numbers in the footers still count all of them.
+    pub pages: PageRange,
+    /// The subject, From, To and Date block and the rule under it.
+    pub headers: bool,
+}
+
+impl Default for PageSetup {
+    /// A4, portrait, fit to the page, every page, with the header.
+    fn default() -> Self {
+        PageSetup { paper: Paper::A4, orientation: Orientation::Portrait, scale: Scale::FitToPage, pages: PageRange::All, headers: true }
+    }
+}
+
+impl From<&PrintOptions> for PageSetup {
+    fn from(o: &PrintOptions) -> Self {
+        PageSetup { paper: o.paper, orientation: o.orientation, scale: o.scale, pages: o.pages.clone(), headers: o.headers }
+    }
+}
+
+impl PageSetup {
+    /// The sheet's width and height in points, as laid on the page (swapped for landscape).
+    pub fn size(&self) -> (f32, f32) {
+        let (w, h) = match self.paper {
+            Paper::A4 => (595.28, 841.89),
+            Paper::Letter => (612.0, 792.0),
+            Paper::Legal => (612.0, 1008.0),
+            Paper::A3 => (841.89, 1190.55),
+            Paper::A5 => (419.53, 595.28),
+        };
+        match self.orientation {
+            Orientation::Portrait => (w, h),
+            Orientation::Landscape => (h, w),
+        }
+    }
+}
+
 /// What a document needed that it didn't get.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Report {
+    /// Pages the message takes on this paper, and how many of them were written (the page range).
+    pub total_pages: usize,
+    pub pages: usize,
     /// Characters no font had (drawn as `?`), each once, the first 50.
     pub missing: Vec<char>,
     /// Fallback fonts left out because the embedded fonts would have passed [`MAX_EMBEDDED`].
@@ -86,8 +134,6 @@ pub struct Report {
 /// The most font data one document embeds; the largest fallbacks beyond it are left out.
 pub const MAX_EMBEDDED: usize = 40 << 20;
 
-const PAGE_W: f32 = 595.28;
-const PAGE_H: f32 = 841.89;
 const MARGIN: f32 = 56.0;
 /// Most pages written (a very long message is cut, with a note).
 const MAX_PAGES: usize = 500;
@@ -506,10 +552,16 @@ pub fn pdf(doc: &Doc, fonts: &Fonts) -> Result<Vec<u8>, String> {
 
 /// The document as PDF bytes, and what it asked of the fonts that it didn't get.
 pub fn pdf_report(doc: &Doc, fonts: &Fonts) -> Result<(Vec<u8>, Report), String> {
-    pdf_capped(doc, fonts, MAX_EMBEDDED)
+    pdf_report_with(doc, fonts, &PageSetup::default())
 }
 
-fn pdf_capped(doc: &Doc, fonts: &Fonts, cap: usize) -> Result<(Vec<u8>, Report), String> {
+/// The document as PDF bytes on the paper `setup` describes. A page range that has none of the
+/// document's pages is an error (a PDF needs a page).
+pub fn pdf_report_with(doc: &Doc, fonts: &Fonts, setup: &PageSetup) -> Result<(Vec<u8>, Report), String> {
+    pdf_capped(doc, fonts, setup, MAX_EMBEDDED)
+}
+
+fn pdf_capped(doc: &Doc, fonts: &Fonts, setup: &PageSetup, cap: usize) -> Result<(Vec<u8>, Report), String> {
     let title = match clean(&doc.title) {
         t if t.trim().is_empty() => "(no subject)".to_string(),
         t => t,
@@ -539,30 +591,37 @@ fn pdf_capped(doc: &Doc, fonts: &Fonts, cap: usize) -> Result<(Vec<u8>, Report),
             missing.push(c);
         }
     }
-    let width = PAGE_W - 2.0 * MARGIN;
-    let page_h = PAGE_H - 2.0 * MARGIN;
+    // The sheet in points, and the "layout page": the sheet as seen through the scale. At 50 %
+    // the layout page is twice as big as the sheet, and the content is drawn scaled by a half.
+    let (sheet_w, sheet_h) = setup.size();
+    let scale = f32::from(setup.scale.percent()) / 100.0;
+    let width = (sheet_w - 2.0 * MARGIN) / scale;
+    let page_h = (sheet_h - 2.0 * MARGIN) / scale;
+    let layout_h = page_h + 2.0 * MARGIN;
 
     // Lay out into one tall column, a page's height per page.
     let mut canvas = Canvas::new(&faces, page_h);
     let mut y = 0.0;
-    for line in wrap(&faces, 1, &title, 16.0, width) {
-        y = canvas.line(MARGIN, y, 1, 16.0, 21.0, [0, 0, 0], &line);
-    }
-    y += 6.0;
-    let label_w = header.iter().map(|(k, _)| faces.text_width(1, &format!("{k}:"), 9.5)).fold(0.0f32, f32::max) + 6.0;
-    for (k, v) in &header {
-        for (i, line) in wrap(&faces, 0, v, 9.5, width - label_w).into_iter().enumerate() {
-            let bottom = canvas.line(MARGIN + label_w, y, 0, 9.5, 13.0, [0, 0, 0], &line);
-            if i == 0 {
-                canvas.line(MARGIN, bottom - 13.0, 1, 9.5, 13.0, [0, 0, 0], &format!("{k}:"));
-            }
-            y = bottom;
+    if setup.headers {
+        for line in wrap(&faces, 1, &title, 16.0, width) {
+            y = canvas.line(MARGIN, y, 1, 16.0, 21.0, [0, 0, 0], &line);
         }
+        y += 6.0;
+        let label_w = header.iter().map(|(k, _)| faces.text_width(1, &format!("{k}:"), 9.5)).fold(0.0f32, f32::max) + 6.0;
+        for (k, v) in &header {
+            for (i, line) in wrap(&faces, 0, v, 9.5, width - label_w).into_iter().enumerate() {
+                let bottom = canvas.line(MARGIN + label_w, y, 0, 9.5, 13.0, [0, 0, 0], &line);
+                if i == 0 {
+                    canvas.line(MARGIN, bottom - 13.0, 1, 9.5, 13.0, [0, 0, 0], &format!("{k}:"));
+                }
+                y = bottom;
+            }
+        }
+        y += 8.0;
+        y = canvas.fit(y, 20.0);
+        canvas.rule(MARGIN, y, width);
+        y += 6.0;
     }
-    y += 8.0;
-    y = canvas.fit(y, 20.0);
-    canvas.rule(MARGIN, y, width);
-    y += 6.0;
     if doc.blocks.is_empty() {
         for line in wrap(&faces, 0, &body, layout::BODY, width) {
             y = canvas.line(MARGIN, y, 0, layout::BODY, 14.5, [0, 0, 0], &line);
@@ -576,7 +635,7 @@ fn pdf_capped(doc: &Doc, fonts: &Fonts, cap: usize) -> Result<(Vec<u8>, Report),
     let mut pages: Vec<Vec<OnPage>> = vec![Vec::new()];
     let mut truncated = false;
     let page_of = |y: f32| usize::try_from((y / page_h).floor() as i64).unwrap_or(0);
-    let on_page = |p: usize, y: f32| PAGE_H - MARGIN - (y - p as f32 * page_h);
+    let on_page = |p: usize, y: f32| layout_h - MARGIN - (y - p as f32 * page_h);
     let mut put = |pages: &mut Vec<Vec<OnPage>>, p: usize, item: OnPage| {
         if p >= MAX_PAGES {
             truncated = true;
@@ -634,11 +693,23 @@ fn pdf_capped(doc: &Doc, fonts: &Fonts, cap: usize) -> Result<(Vec<u8>, Report),
 
     // Content streams, and each page's links.
     let n = pages.len();
-    let mut contents: Vec<String> = Vec::with_capacity(n);
-    let mut links: Vec<Vec<(f32, f32, f32, f32, String)>> = Vec::with_capacity(n);
-    for (i, page) in pages.iter().enumerate() {
+    let chosen = setup.pages.pages(u32::try_from(n).unwrap_or(u32::MAX));
+    if chosen.is_empty() {
+        return Err(format!("the page range is past the end: the message has {n} page{}", if n == 1 { "" } else { "s" }));
+    }
+    // From the layout page to the sheet (the content scales about its top left corner).
+    let (tx, ty) = (MARGIN * (1.0 - scale), (sheet_h - MARGIN) - scale * (layout_h - MARGIN));
+    let to_sheet = |x: f32, y: f32| (scale * x + tx, scale * y + ty);
+    let mut contents: Vec<String> = Vec::with_capacity(chosen.len());
+    let mut links: Vec<Vec<(f32, f32, f32, f32, String)>> = Vec::with_capacity(chosen.len());
+    for number in &chosen {
+        let i = usize::try_from(*number).unwrap_or(1).saturating_sub(1);
+        let Some(page) = pages.get(i) else { continue };
         let mut c = String::new();
         let mut page_links = Vec::new();
+        if scale != 1.0 {
+            let _ = writeln!(c, "q {scale:.4} 0 0 {scale:.4} {tx:.2} {ty:.2} cm");
+        }
         for item in page {
             match item {
                 OnPage::Rule { x, y, w } => {
@@ -655,15 +726,20 @@ fn pdf_capped(doc: &Doc, fonts: &Fonts, cap: usize) -> Result<(Vec<u8>, Report),
                         let _ = writeln!(c, "{} RG 0.5 w {:.2} {:.2} m {:.2} {:.2} l S", rgb(t.color), t.x, y - 1.5, t.x + t.width, y - 1.5);
                     }
                     if let Some(url) = &t.link {
-                        page_links.push((t.x, y - t.size * 0.3, t.x + t.width, y + t.size, url.clone()));
+                        let (x0, y0) = to_sheet(t.x, y - t.size * 0.3);
+                        let (x1, y1) = to_sheet(t.x + t.width, y + t.size);
+                        page_links.push((x0, y0, x1, y1, url.clone()));
                     }
                 }
             }
         }
-        let footer = format!("{} / {n}", i + 1);
+        if scale != 1.0 {
+            c.push_str("Q\n");
+        }
+        let footer = format!("{number} / {n}");
         let fw = faces.text_width(0, &footer, 8.0);
         c.push_str("BT 0.45 g\n");
-        show(&mut c, &mut faces, 0, 8.0, false, ((PAGE_W - fw) / 2.0, MARGIN / 2.0), &footer);
+        show(&mut c, &mut faces, 0, 8.0, false, ((sheet_w - fw) / 2.0, MARGIN / 2.0), &footer);
         c.push_str("0 g ET\n");
         contents.push(c);
         links.push(page_links);
@@ -779,7 +855,7 @@ fn pdf_capped(doc: &Doc, fonts: &Fonts, cap: usize) -> Result<(Vec<u8>, Report),
             .collect();
         let annots = if annots.is_empty() { String::new() } else { format!(" /Annots [{}]", annots.join(" ")) };
         let page = format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W:.2} {PAGE_H:.2}] /Resources << /Font << {fonts_dict} >> >> /Contents {content_ref} 0 R{annots} >>"
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {sheet_w:.2} {sheet_h:.2}] /Rotate 0 /Resources << /Font << {fonts_dict} >> >> /Contents {content_ref} 0 R{annots} >>"
         );
         kids.push(add(&mut objects, page.into_bytes()));
     }
@@ -806,7 +882,7 @@ fn pdf_capped(doc: &Doc, fonts: &Fonts, cap: usize) -> Result<(Vec<u8>, Report),
         out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
     }
     out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R /Info 3 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
-    Ok((out, Report { missing, dropped_fonts }))
+    Ok((out, Report { total_pages: n, pages: chosen.len(), missing, dropped_fonts }))
 }
 
 impl Fonts {
@@ -1062,7 +1138,7 @@ mod tests {
         let (p, report) = pdf_report(&doc("a \u{10FFFD} →"), &fonts).unwrap();
         assert_eq!(report.missing, vec!['\u{10FFFD}']);
         assert!(!glyph_ids(&p).iter().any(|g| g == "0000"));
-        let (p, report) = pdf_capped(&doc("a →"), &fonts, 1000).unwrap();
+        let (p, report) = pdf_capped(&doc("a →"), &fonts, &PageSetup::default(), 1000).unwrap();
         assert_eq!((report.dropped_fonts, report.missing.clone()), (1, vec!['→']), "{report:?}");
         assert!(!glyph_ids(&p).iter().any(|g| g == "0000"), "drawn as ?, not a box");
     }
@@ -1183,5 +1259,170 @@ mod tests {
             Doc { blocks: vec![Block::Text(vec![vec![mailcraft_mime::Span { text: "y".repeat(100), ..Default::default() }]; 40_000])], ..doc("") };
         let p = pdf(&huge, &Fonts::default()).unwrap();
         assert!(String::from_utf8_lossy(&p).contains(&format!("/Count {MAX_PAGES}")));
+    }
+
+    /// A message of numbered lines, `n` of them.
+    fn numbered(n: usize) -> Doc {
+        doc(&(0..n).map(|i| format!("Line {i}")).collect::<Vec<_>>().join("\n"))
+    }
+
+    fn media_boxes(pdf: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(pdf);
+        text.split("/MediaBox [").skip(1).filter_map(|r| r.split(']').next()).map(str::to_string).collect()
+    }
+
+    fn setup(f: impl FnOnce(&mut PageSetup)) -> PageSetup {
+        let mut s = PageSetup::default();
+        f(&mut s);
+        s
+    }
+
+    fn footers(pdf: &[u8]) -> Vec<String> {
+        placed(pdf).iter().map(|p| p.iter().map(|(_, _, t)| t.clone()).filter(|t| t.contains(" / ")).collect::<String>()).collect()
+    }
+
+    #[test]
+    fn the_default_setup_is_the_old_a4_portrait_layout() {
+        let d = numbered(300);
+        let (a, ra) = pdf_report(&d, &Fonts::default()).unwrap();
+        let (b, rb) = pdf_report_with(&d, &Fonts::default(), &PageSetup::default()).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(ra, rb);
+        assert_eq!(media_boxes(&a)[0], "0 0 595.28 841.89");
+        assert!(!page_texts(&a)[0].contains(" cm"));
+    }
+
+    #[test]
+    fn landscape_and_paper_set_the_media_box() {
+        let d = numbered(10);
+        let land = pdf_report_with(&d, &Fonts::default(), &setup(|s| s.orientation = Orientation::Landscape)).unwrap().0;
+        assert_eq!(media_boxes(&land)[0], "0 0 841.89 595.28");
+        assert!(String::from_utf8_lossy(&land).contains("/Rotate 0"));
+        for (paper, want) in [
+            (Paper::Letter, "0 0 612.00 792.00"),
+            (Paper::Legal, "0 0 612.00 1008.00"),
+            (Paper::A3, "0 0 841.89 1190.55"),
+            (Paper::A5, "0 0 419.53 595.28"),
+        ] {
+            let p = pdf_report_with(&d, &Fonts::default(), &setup(|s| s.paper = paper)).unwrap().0;
+            assert_eq!(media_boxes(&p)[0], want, "{paper:?}");
+        }
+        // The text is laid out wide, not just rotated: a long line wraps later.
+        let wide = doc(&"word ".repeat(60));
+        let lines = |s: &PageSetup| {
+            placed(&pdf_report_with(&wide, &Fonts::default(), s).unwrap().0)[0].iter().filter(|(_, _, t)| t.starts_with("word")).count()
+        };
+        assert!(lines(&setup(|s| s.orientation = Orientation::Landscape)) < lines(&PageSetup::default()));
+    }
+
+    #[test]
+    fn half_scale_puts_twice_the_lines_on_a_page() {
+        let d = numbered(400);
+        let count = |s: &PageSetup| {
+            let p = pdf_report_with(&d, &Fonts::default(), &PageSetup { headers: false, ..s.clone() }).unwrap().0;
+            let pages = placed(&p);
+            (pages[0].iter().filter(|(_, _, t)| t.starts_with("Line ")).count(), pages.len(), page_texts(&p)[0].clone())
+        };
+        let (full, full_pages, _) = count(&PageSetup::default());
+        let (half, half_pages, stream) = count(&setup(|s| s.scale = Scale::Percent(50)));
+        assert!(half.abs_diff(2 * full) <= 2, "{full} -> {half}");
+        assert!(half_pages < full_pages);
+        assert!(stream.contains("q 0.5000 0 0 0.5000") && stream.contains("cm"), "{stream}");
+        let (fit, _, _) = count(&setup(|s| s.scale = Scale::FitToPage));
+        assert_eq!(fit, full);
+        // Bigger than the page: fewer lines, and the width shrinks the other way.
+        let (big, _, _) = count(&setup(|s| s.scale = Scale::Percent(200)));
+        assert!(big < full);
+    }
+
+    #[test]
+    fn scaled_content_stays_inside_the_sheet() {
+        let d = numbered(30);
+        for pct in [25u16, 50, 150, 400] {
+            let p = pdf_report_with(&d, &Fonts::default(), &setup(|s| (s.scale, s.headers) = (Scale::Percent(pct), false))).unwrap().0;
+            let stream = &page_texts(&p)[0];
+            let cm = stream.lines().next().unwrap();
+            let f: Vec<f32> = cm.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+            let (s, tx, ty) = (f[0], f[4], f[5]);
+            // The first line sits at the sheet's top left corner of the margins.
+            let (x, y, _) = placed(&p)[0].iter().find(|(_, _, t)| t == "Line 0").cloned().unwrap();
+            let (sx, sy) = (s * x + tx, s * y + ty);
+            assert!((sx - MARGIN).abs() < 0.5, "{pct}: {sx}");
+            assert!(sy < 841.89 - MARGIN + 1.0 && sy > 841.89 - MARGIN - 20.0 * s, "{pct}: {sy}");
+        }
+    }
+
+    #[test]
+    fn a_page_range_keeps_the_numbering_honest() {
+        let d = numbered(400);
+        let all = pdf_report(&d, &Fonts::default()).unwrap();
+        let total = all.1.total_pages;
+        assert!(total >= 5, "{total}");
+        let (p, report) = pdf_report_with(&d, &Fonts::default(), &setup(|s| s.pages = PageRange::parse("2-3").unwrap())).unwrap();
+        assert_eq!((report.pages, report.total_pages), (2, total));
+        assert_eq!(footers(&p), vec![format!("2 / {total}"), format!("3 / {total}")]);
+        assert!(String::from_utf8_lossy(&p).contains("/Count 2"));
+        objects_are_where_the_xref_says(&p);
+        // The pages written are the same ones, line for line.
+        let first_of = |pdf: &[u8], i: usize| placed(pdf)[i].iter().find(|(_, _, t)| t.starts_with("Line ")).map(|(_, _, t)| t.clone());
+        assert_eq!(first_of(&p, 0), first_of(&all.0, 1));
+        assert_eq!(first_of(&p, 1), first_of(&all.0, 2));
+        // A range hanging over the end is cut there.
+        let (_, r) =
+            pdf_report_with(&d, &Fonts::default(), &setup(|s| s.pages = PageRange::parse(&format!("{total}-{}", total + 40)).unwrap())).unwrap();
+        assert_eq!(r.pages, 1);
+    }
+
+    #[test]
+    fn no_headers_means_no_title_block_and_no_rule() {
+        let d = numbered(5);
+        let with = pdf_report(&d, &Fonts::default()).unwrap().0;
+        let without = pdf_report_with(&d, &Fonts::default(), &setup(|s| s.headers = false)).unwrap().0;
+        assert!(page_texts(&with)[0].contains(" l S"));
+        let page = &page_texts(&without)[0];
+        assert!(!page.contains(" l S"), "{page}");
+        let texts: Vec<String> = placed(&without)[0].iter().map(|(_, _, t)| t.clone()).collect();
+        assert!(!texts.iter().any(|t| t.starts_with("Storyboard") || t.starts_with("From")), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Line 0"));
+        // The body starts at the top margin instead of under the block.
+        assert!(placed(&without)[0][0].1 > placed(&with)[0].iter().find(|(_, _, t)| t == "Line 0").unwrap().1);
+    }
+
+    #[test]
+    fn links_follow_the_scale() {
+        let blocks = mailcraft_mime::layout::html_layout(
+            r#"<div style="width:100%;max-width:600px;margin:0 auto"><table><tr><td>Order:</td><td>12</td></tr></table><p>Questions? <a href="https://example.test/x">link</a>.</p></div>"#,
+        );
+        assert!(!blocks.is_empty());
+        let d = Doc { blocks, ..doc("") };
+        let rect = |s: &PageSetup| {
+            let p = pdf_report_with(&d, &Fonts::default(), s).unwrap().0;
+            let text = String::from_utf8_lossy(&p).to_string();
+            let r = text.split("/Rect [").nth(1).unwrap().split(']').next().unwrap().to_string();
+            r.split_whitespace().map(|n| n.parse::<f32>().unwrap()).collect::<Vec<_>>()
+        };
+        let full = rect(&PageSetup::default());
+        let half = rect(&setup(|s| s.scale = Scale::Percent(50)));
+        assert!(((half[2] - half[0]) * 2.0 - (full[2] - full[0])).abs() < 0.5, "{full:?} {half:?}");
+        assert!(half[0] >= 0.0 && half[2] <= 595.28, "inside the sheet: {half:?}");
+        assert!(half[1] > full[1], "the link rises with the content: {full:?} {half:?}");
+    }
+
+    #[test]
+    fn junk_setups_never_panic() {
+        let d = numbered(120);
+        let fonts = Fonts::default();
+        for scale in [Scale::Percent(0), Scale::Percent(1), Scale::Percent(u16::MAX)] {
+            for orientation in [Orientation::Portrait, Orientation::Landscape] {
+                let r = pdf_report_with(&d, &fonts, &PageSetup { scale, orientation, paper: Paper::A5, ..PageSetup::default() });
+                assert!(r.is_ok(), "{scale:?}");
+            }
+        }
+        // Past the end, and a range that is empty after cutting: an error, not a panic.
+        assert!(pdf_report_with(&d, &fonts, &setup(|s| s.pages = PageRange::Range(vec![(900, 901)]))).is_err());
+        assert!(pdf_report_with(&d, &fonts, &setup(|s| s.pages = PageRange::Range(Vec::new()))).is_err());
+        assert!(pdf_report_with(&d, &fonts, &setup(|s| s.pages = PageRange::Range(vec![(0, 0), (5, 2), (u32::MAX - 1, u32::MAX)]))).is_err());
+        assert!(pdf_report_with(&d, &fonts, &setup(|s| s.pages = PageRange::Range(vec![(1, u32::MAX)]))).is_ok());
+        assert!(pdf_report_with(&Doc::default(), &fonts, &setup(|s| s.headers = false)).is_ok());
     }
 }
