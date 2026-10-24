@@ -558,3 +558,39 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   narrow column whose content fits (an icon, a short label) stays beside its row instead of
   stacking the row; `max-width` caps a fluid box and a `margin: 0 auto` wrapper is centred. The
   sample mailbox has a receipt laid out that way (*Your receipt from Print Shop*).
+
+### Unreleased — the Print dialog
+- **Printer options:** *Print* (File › Print, the reading pane, `message.print`) is a dialog of
+  Outlook's Print page, simplified: the printer, copies and *Collate*, the pages (all, or a list
+  such as `1-3, 5`, checked as it is typed and against the pages the message takes), portrait or
+  landscape, paper (A4, Letter, Legal, A3, A5, or what the printer offers), printing on both
+  sides (long or short edge), color or black and white, the scale (fit to the page, 100, 75, 50
+  or a percentage from 25 to 400) and whether the subject / From / To / Date block prints. On
+  the right is a preview of the page as it will print ("Page 1 of N"), drawn again once the
+  settings have rested for a moment, with the PDF thumbnail renderer the attachment previews
+  use. Enter prints, Escape cancels, and *Save as PDF instead* saves the same setup. The last
+  settings (except the page list) are kept in the preferences (`prefs.print`); *Quick print*
+  uses them on the default printer.
+- **How they are applied:** orientation, paper, scale, the page list and the header are in the
+  PDF itself (`mailcraft-print`'s `PageSetup`: the MediaBox, a layout as wide as the sheet
+  divided by the scale and a `cm` matrix, only the listed pages written with the footers still
+  counting all of them), so they work on every platform. Copies, collating, both sides, color
+  and the paper name go to CUPS as `lp -o collate / sides / print-color-mode / media`, every
+  value from a closed set; the printer name is still checked. What a printer can do comes from
+  `lpoptions -p NAME -l` (`Duplex`, `ColorModel`, `PageSize`): the dialog greys out what a
+  printer lacks and offers everything when it can't tell. A missing or failing `lpoptions`
+  leaves the capabilities unknown, never an error.
+- **Commands:** `message.print` takes the options as flat params (all optional; `{"printer",
+  "copies"}` still works; wrong types are the default, a choice that doesn't exist, a scale out
+  of range or a bad page list is an error; `remember` keeps them as the dialog's), and
+  `message.exportPdf` takes the page setup. `mailcraft-cli print KEY` gets `--landscape`,
+  `--duplex long|short`, `--mono`, `--paper`, `--scale`, `--pages`, `--no-header`; the new
+  `mailcraft-cli pdf KEY OUT.pdf` takes the page setup flags. `mailcraft --cmd ui.print` opens
+  the dialog.
+- **The browser:** the dialog becomes a *Page setup* for Save as PDF (orientation, paper, scale,
+  pages, header; no printer, copies, sides or color), and the PDF is downloaded.
+- **Not in:** the printer driver's own properties dialog, several pages to a sheet and booklets.
+  On Windows the PDF app's Print verb takes no options, so only the copies are applied here
+  (by repeating it) and the PDF app's dialog decides the rest; orientation, paper, scale and the
+  page list still apply because they are in the PDF. Orientation isn't passed to CUPS (the PDF
+  is laid out in it), and the paper size is the PDF's, so no `fit-to-page` is asked for.

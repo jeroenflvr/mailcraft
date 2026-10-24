@@ -230,3 +230,8 @@ local-first, media-aware v1); the fuller request is
   the reading pane does: headings, bold and italic, colours, clickable links, and tables with
   their columns and backgrounds, rows kept whole over page breaks. The reading pane sizes
   tables without widths to their content, so a receipt's label stays beside its value.
+- **2026-10-24** — The Print dialog: printer, copies and collating, pages, orientation, paper,
+  both sides, color, scale and the message header, with a preview of the page; the last settings
+  are kept. Orientation, paper, scale and the page list are in the PDF (so they work on Windows
+  and as Save as PDF in the browser, where the dialog is a page setup); the rest goes to CUPS.
+  `message.print`, `message.exportPdf` and `mailcraft-cli print` / `pdf` take the same options.
