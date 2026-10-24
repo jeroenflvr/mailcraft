@@ -13,6 +13,7 @@ pub mod ical;
 pub mod job;
 pub mod organize;
 pub mod pim;
+pub mod printing;
 pub mod search;
 pub mod thread;
 pub mod utf7;
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 pub use addr::EmailAddress;
 pub use job::{Connections, Event, Job, Op, SyncStatus};
+pub use printing::{ColorMode, Duplex, Orientation, PageRange, Paper, PrintOptions, Scale};
 
 /// A printer the system knows.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +33,14 @@ pub struct Printer {
     /// The one the system prints to when none is named.
     #[serde(default)]
     pub default: bool,
+    /// Whether it prints on both sides / in colour (`None`: not known, so the dialog offers it).
+    #[serde(default)]
+    pub duplex: Option<bool>,
+    #[serde(default)]
+    pub color: Option<bool>,
+    /// The paper sizes it takes, when known (empty: offer them all).
+    #[serde(default)]
+    pub papers: Vec<Paper>,
 }
 
 /// How a message gets to paper from where MailCraft runs.
