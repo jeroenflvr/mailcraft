@@ -6,7 +6,7 @@ the items it deferred (calendar, contacts, Exchange, PST import, a web build) ar
 limits below. What each version brought is under [Done](#done); the milestones are in
 [ROADMAP.md](../ROADMAP.md).
 
-_Status: v0.18, 2026-10-19._
+_Status: v0.19.1, 2026-10-24._
 
 ## Open
 
@@ -501,7 +501,7 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   again at every sync. Every request in a batch now carries it; the fake Graph answers
   without it as Graph does.
 
-### Unreleased — calendar time zones
+### v0.19 — calendar time zones
 - **Calendar times an hour off:** the clock held one UTC offset (the one now), so next week's
   events, across a change of clocks, were an hour late (or early), recurrences repeated at their
   UTC time, `TZID`s were lost on reading (CalDAV read bare Olson names as UTC) and editing a series
@@ -516,7 +516,7 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   zone is read for 30 years each way; zones the table doesn't know and a server doesn't describe
   are written in UTC.
 
-### Unreleased — printing and the squares in printed text
+### v0.19 — printing and the squares in printed text
 - **Squares in the printed text:** a PDF embedded one font and drew every character it lacked as
   that font's missing-glyph box: box drawing (every HTML table), arrows, check marks, emoji,
   other scripts. Printing now picks each character from the first font that has it. The app asks
@@ -540,3 +540,21 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   workspace forbids). The browser keeps Save as PDF. `message.print` (`printer`, `copies`) queues
   the request; the app lays it out in the system's fonts and hands it over, so the engine runs no
   processes; `mailcraft-cli print KEY [--printer NAME] [--copies N]` and `print --list`.
+
+### v0.19.1 — mail printed as it is shown
+- **Printed mail lost its layout:** Print and Save as PDF wrote the message's plain text, so a
+  receipt's label and value columns, its prices and totals came out as one word per line, a
+  heading as `# Factuur` and a table as box drawing. The PDF now carries the body as the reading
+  pane shows it: formatted text (headings sized, bold and italic faces, colours and highlights
+  as the message set them, links underlined and clickable) and the table layout (columns sized
+  as on screen, cell and table backgrounds, boxes placed over others), laid out in one column
+  and cut into pages so a line never crosses a break and a row that fits a page stays on one;
+  the plain-text view prints plain text, as before. Pictures print as their description where
+  it fits (an icon column too narrow for one stays beside its row). `print` moves to L2 (it
+  reads `mime`'s layout).
+- **Receipts in the reading pane:** a table without a width is as wide as its content (CSS's
+  shrink-to-fit) and its columns share the room as their content compares (automatic table
+  layout), so a label column stays next to its value instead of being pushed across the pane; a
+  narrow column whose content fits (an icon, a short label) stays beside its row instead of
+  stacking the row; `max-width` caps a fluid box and a `margin: 0 auto` wrapper is centred. The
+  sample mailbox has a receipt laid out that way (*Your receipt from Print Shop*).

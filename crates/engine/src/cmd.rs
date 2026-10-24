@@ -1314,7 +1314,9 @@ impl Session {
         .ok_or_else(|| CmdError::Failed("the message isn't downloaded".into()))
     }
 
-    /// The open message as pages: subject, header, text and the names of its attachments.
+    /// The open message as pages: subject, header, the body as the reading pane shows it
+    /// (formatted, with its table layout, unless the view is plain text) and the names of its
+    /// attachments.
     pub fn message_doc(&self) -> Result<mailcraft_print::Doc, CmdError> {
         let r = self.reading.as_ref().ok_or_else(|| CmdError::Disabled("open a message first".into()))?;
         let m = r.parsed.as_ref().ok_or_else(|| CmdError::Disabled("the message is still downloading".into()))?;
@@ -1332,7 +1334,12 @@ impl Session {
         if !files.is_empty() {
             header.push(("Attachments".into(), files.join(", ")));
         }
-        Ok(mailcraft_print::Doc { title: m.subject.clone(), header, body: m.text.clone() })
+        let blocks = if self.prefs.show_html && !m.rich.is_empty() {
+            if m.layout.is_empty() { vec![mailcraft_print::Block::Text(m.rich.clone())] } else { m.layout.clone() }
+        } else {
+            Vec::new()
+        };
+        Ok(mailcraft_print::Doc { title: m.subject.clone(), header, body: m.text.clone(), blocks })
     }
 
     /// The open message as a PDF, in `fonts` (the system's: [`mailcraft_print::Fonts`]).

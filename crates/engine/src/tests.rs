@@ -71,13 +71,13 @@ fn every_command_survives_junk_params() {
 fn sample_inbox_lists_newest_first_with_groups() {
     let s = sample_session("inbox");
     assert_eq!(s.view_title(), "Inbox");
-    assert_eq!(s.list.len(), 7);
+    assert_eq!(s.list.len(), 8);
     assert_eq!(s.list[0].subject, "Re: Storyboard review on Thursday");
     let rows = s.rows();
     assert_eq!(rows[0], Row::Header("Today"));
     assert!(rows.contains(&Row::Header("Yesterday")));
     let inbox = s.account(sample::SAMPLE_ACCOUNT).unwrap().folder(FolderRole::Inbox).unwrap();
-    assert_eq!((inbox.unread, inbox.total), (3, 7));
+    assert_eq!((inbox.unread, inbox.total), (3, 8));
     done(s);
 }
 
@@ -185,7 +185,7 @@ fn flags_filters_and_conversations() {
 
     s.run("view.conversations", &json!({"on": true})).unwrap();
     let msgs = s.rows().into_iter().filter(|r| matches!(r, Row::Message { .. })).count();
-    assert_eq!(msgs, 6, "the reply folds into its conversation");
+    assert_eq!(msgs, 7, "the reply folds into its conversation");
     assert!(s.rows().iter().any(|r| matches!(r, Row::Message { count: 2, .. })));
     s.run("list.next", &json!({})).unwrap();
     s.run("list.next", &json!({})).unwrap();
@@ -207,7 +207,7 @@ fn search_finds_bodies_fields_and_attachment_names() {
     assert!(s.view_title().contains("turnaround") || s.view_title().contains("jun"));
     s.run("search.clear", &json!({})).unwrap();
     assert!(s.search.is_none());
-    assert_eq!(s.list.len(), 7);
+    assert_eq!(s.list.len(), 8);
     let _ = SearchScope::All;
     done(s);
 }
@@ -776,7 +776,7 @@ fn categories_pins_and_focused_inbox() {
     s.run("mail.moveToFocused", &json!({})).unwrap();
     assert!(s.list.is_empty());
     s.run("list.focusTab", &json!({"value": "focused"})).unwrap();
-    assert_eq!(s.list.len(), 7);
+    assert_eq!(s.list.len(), 8);
     done(s);
 }
 

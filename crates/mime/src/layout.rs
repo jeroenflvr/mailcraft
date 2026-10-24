@@ -60,6 +60,9 @@ pub enum Align {
 pub struct Table {
     pub rows: Vec<Vec<Cell>>,
     pub width: Option<Width>,
+    /// The most it may be, in pixels (`max-width`): a fluid newsletter is 100% wide up to this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
     /// Where the table sits (`align`, or `margin: 0 auto`).
     pub align: Align,
     pub background: Option<[u8; 3]>,
@@ -308,6 +311,18 @@ impl Node {
         }
         let px = v.trim_end_matches("px").trim().parse::<f32>().ok()?;
         (px >= 1.0).then(|| Width::Px(px.min(4000.0) as u32))
+    }
+
+    /// `max-width` in pixels (a percentage caps nothing the layout can resolve).
+    fn max_width(&self) -> Option<u32> {
+        let v = self.style("max-width")?;
+        let px = v.trim().trim_end_matches("px").trim().parse::<f32>().ok()?;
+        (px >= 1.0 && !v.contains('%')).then(|| px.min(4000.0) as u32)
+    }
+
+    /// Whether the box sets a size the content inside must keep to.
+    fn sized(&self) -> bool {
+        self.width().is_some() || self.max_width().is_some()
     }
 
     fn background(&self) -> Option<[u8; 3]> {
@@ -805,6 +820,7 @@ fn blocks(kids: &[Kid], ctx: &mut Ctx, depth: usize) -> Vec<Block> {
                 out.push(Block::Table(Table {
                     rows,
                     width: n.width(),
+                    max_width: n.max_width(),
                     align: n.table_align(),
                     background: n.background(),
                     background_image: n.background_image(),
@@ -842,7 +858,13 @@ fn blocks(kids: &[Kid], ctx: &mut Ctx, depth: usize) -> Vec<Block> {
                     overlays,
                     ..Default::default()
                 };
-                out.push(Block::Table(Table { rows: vec![vec![cell]], width: n.width(), align: n.table_align(), ..Default::default() }));
+                out.push(Block::Table(Table {
+                    rows: vec![vec![cell]],
+                    width: n.width(),
+                    max_width: n.max_width(),
+                    align: n.table_align(),
+                    ..Default::default()
+                }));
             }
             // A box with a picture behind it (a banner): one cell that carries it.
             Kid::El(n) if depth < MAX_DEPTH && !matches!(n.tag.as_str(), "img" | "td" | "th" | "tr") && n.background_image().is_some() => {
@@ -857,7 +879,13 @@ fn blocks(kids: &[Kid], ctx: &mut Ctx, depth: usize) -> Vec<Block> {
                     span: 1,
                     ..Default::default()
                 };
-                out.push(Block::Table(Table { rows: vec![vec![cell]], width: n.width(), align: n.table_align(), ..Default::default() }));
+                out.push(Block::Table(Table {
+                    rows: vec![vec![cell]],
+                    width: n.width(),
+                    max_width: n.max_width(),
+                    align: n.table_align(),
+                    ..Default::default()
+                }));
             }
             // Boxes side by side with CSS: a table of one row per line of boxes.
             Kid::El(n) if depth < MAX_DEPTH && n.columns().is_some() => {
@@ -892,6 +920,7 @@ fn blocks(kids: &[Kid], ctx: &mut Ctx, depth: usize) -> Vec<Block> {
                     out.push(Block::Table(Table {
                         rows,
                         width: n.width(),
+                        max_width: n.max_width(),
                         align: n.table_align(),
                         background: n.background(),
                         background_image: n.background_image(),
@@ -913,22 +942,26 @@ fn blocks(kids: &[Kid], ctx: &mut Ctx, depth: usize) -> Vec<Block> {
                     out.push(Block::Table(Table {
                         rows: vec![vec![Cell { blocks: inner, align: Align::Center, background: n.background(), span: 1, ..Default::default() }]],
                         width: None,
+                        max_width: None,
                         align: Align::Center,
                         background: None,
                         background_image: None,
                     }));
                 }
             }
-            // A wrapper around tables (`<div>`, `<center>`): its parts in turn.
+            // A wrapper around tables (`<div>`, `<center>`): its parts in turn; one that is centred
+            // or sized (`max-width: 600px; margin: 0 auto`) as a one-cell table that keeps that.
             Kid::El(n) if depth < MAX_DEPTH && n.has_table(0) => {
                 flush(&mut pending, &mut out, ctx);
                 let inner = colored(ctx, n, |ctx| blocks(&n.kids, ctx, depth));
-                if n.tag == "center" || n.align() == Align::Center {
-                    // Centred: as a one-cell table that sits in the middle.
+                let content_align = if n.tag == "center" { Align::Center } else { n.align() };
+                let align = if content_align == Align::Center { Align::Center } else { n.table_align() };
+                if align == Align::Center || n.sized() {
                     out.push(Block::Table(Table {
-                        rows: vec![vec![Cell { blocks: inner, align: Align::Center, span: 1, ..Default::default() }]],
+                        rows: vec![vec![Cell { blocks: inner, align: content_align, span: 1, ..Default::default() }]],
                         width: n.width(),
-                        align: Align::Center,
+                        max_width: n.max_width(),
+                        align,
                         background: n.background(),
                         background_image: None,
                     }));
@@ -1239,6 +1272,27 @@ mod tests {
         let far = html_layout(r#"<div style="position:relative"><p>a</p><b style="position:absolute;top:99999999px;left:-50px">b</b></div>"#);
         let Block::Table(t) = &far[0] else { panic!("{far:?}") };
         assert_eq!((t.rows[0][0].overlays[0].x, t.rows[0][0].overlays[0].y), (0, MAX_OFFSET));
+    }
+
+    #[test]
+    fn fluid_wrappers_keep_their_largest_width() {
+        // A receipt: a fluid wrapper, 100% wide up to 600 pixels and centred, around a table
+        // without a width whose cells have none either (label and value).
+        let b = html_layout(
+            r#"<div style="width:100%; max-width:600px; margin:0 auto">
+               <table role="presentation" style="max-width: 600px"><tr><td>Order ID:</td><td>MQ5T4V3M0F</td></tr>
+               <tr><td>Document:</td><td>792208831645</td></tr></table></div>"#,
+        );
+        let Block::Table(wrapper) = &b[0] else { panic!("{b:?}") };
+        assert_eq!((wrapper.width, wrapper.max_width, wrapper.align), (Some(Width::Percent(100)), Some(600), Align::Center));
+        assert_eq!(wrapper.rows[0][0].align, Align::Left, "`margin: auto` centres the box, not its text");
+        let Block::Table(inner) = &wrapper.rows[0][0].blocks[0] else { panic!("{b:?}") };
+        assert_eq!((inner.width, inner.max_width), (None, Some(600)));
+        assert_eq!(inner.rows.len(), 2);
+        assert_eq!(inner.rows[1].len(), 2);
+        // A percentage caps nothing; a plain wrapper adds no box.
+        let pc = html_layout(r#"<div style="max-width:80%"><table><tr><td>a</td><td>b</td></tr></table></div>"#);
+        assert!(matches!(&pc[0], Block::Table(t) if t.max_width.is_none() && t.rows[0].len() == 2), "{pc:?}");
     }
 
     #[test]

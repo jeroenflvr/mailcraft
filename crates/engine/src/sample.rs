@@ -226,6 +226,21 @@ pub fn sample_banner_png() -> Vec<u8> {
     })
 }
 
+/// A shop's mark drawn in code (a disc with a lighter ring), the size of a receipt's icon.
+pub fn sample_logo_png() -> Vec<u8> {
+    png_of(40, 40, |x, y| {
+        let (dx, dy) = (x as f32 - 19.5, y as f32 - 19.5);
+        let d = (dx * dx + dy * dy).sqrt();
+        if d > 19.0 {
+            [0xFF, 0xFF, 0xFF]
+        } else if d > 14.0 {
+            [0x8F, 0xA8, 0xE0]
+        } else {
+            [0x3B, 0x5B, 0xDB]
+        }
+    })
+}
+
 /// An RGB PNG of `w`×`h` from a colour per pixel (small: one uncompressed DEFLATE block).
 fn png_of(w: u32, h: u32, pixel: impl Fn(u32, u32) -> [u8; 3]) -> Vec<u8> {
     // Uncompressed DEFLATE (stored blocks) keeps this dependency-free.
@@ -325,6 +340,48 @@ fn mails() -> Vec<Mail> {
             ],
             reply_to_index: None,
             html: None,
+        },
+        Mail {
+            folder: "INBOX",
+            from: ("Print Shop", "orders@printshop.example"),
+            to: &[ME],
+            cc: &[],
+            subject: "Your receipt from Print Shop",
+            body: "Receipt\n\n22 October\n\nOrder ID: 4471\nDocument: 792208831645\nAccount: riley@studio.example\n\nFestival poster, A2, matte, 40 copies: EUR 99.00 (incl. VAT 21% EUR 17.18)\n\nBilling and payment\nStudio Riley, Les Bruyeres 36, 7910 Anvaing, Belgium\nSubtotal EUR 81.82\nVAT 21% EUR 17.18\nCard **** 4411: EUR 99.00\n\nIf you have questions about this receipt, contact support at https://printshop.example/support.",
+            ago: 60 * 24,
+            seen: true,
+            flagged: false,
+            attachments: &[],
+            reply_to_index: None,
+            // Laid out like a shop's receipt: a fluid box no wider than 600 pixels, label and
+            // value tables without widths, an item row with a narrow icon column and prices on
+            // the right, and the totals beside the address.
+            html: Some(
+                "<div style=\"width:100%;max-width:600px;margin:0 auto;font-family:sans-serif\">\
+                 <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">\
+                 <tr><td style=\"padding-top:12px\"><img src=\"cid:logo@printshop.example\" alt=\"Print Shop\" width=\"40\" height=\"40\"></td></tr>\
+                 <tr><td><span style=\"font-size:28px;font-weight:bold\">Receipt</span></td></tr>\
+                 <tr><td style=\"font-size:12px;color:#555555\">22 October</td></tr></table>\
+                 <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" style=\"font-size:12px;margin-top:12px\">\
+                 <tr><td style=\"color:#555555\">Order ID:</td><td>4471</td></tr>\
+                 <tr><td style=\"color:#555555\">Document:</td><td>792208831645</td></tr>\
+                 <tr><td style=\"color:#555555\">Account:</td><td><a href=\"mailto:riley@studio.example\">riley@studio.example</a></td></tr></table>\
+                 <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"margin-top:24px;border-top:1px solid #dddddd\">\
+                 <tr><td width=\"48\" valign=\"top\"><img src=\"cid:logo@printshop.example\" alt=\"\" width=\"40\" height=\"40\"></td>\
+                 <td valign=\"top\"><b>Festival poster</b><br>A2, matte, 40 copies<br><span style=\"color:#555555;font-size:12px\">Delivered 24 October</span></td>\
+                 <td align=\"right\" valign=\"top\">&euro; 99,00<br><span style=\"color:#555555;font-size:11px\">incl. VAT 21% &euro; 17,18</span></td></tr></table>\
+                 <h3 style=\"margin-top:24px\">Billing and payment</h3>\
+                 <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr>\
+                 <td valign=\"top\" width=\"50%\" style=\"font-size:12px\">Studio Riley<br>Les Bruy&egrave;res 36<br>7910 Anvaing<br>Belgium</td>\
+                 <td valign=\"top\"><table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"font-size:12px\">\
+                 <tr><td>Subtotal</td><td align=\"right\">&euro; 81,82</td></tr>\
+                 <tr><td>VAT 21%</td><td align=\"right\">&euro; 17,18</td></tr>\
+                 <tr><td><b>Card &bull;&bull;&bull;&bull; 4411</b></td><td align=\"right\"><b>&euro; 99,00</b></td></tr>\
+                 </table></td></tr></table>\
+                 <p style=\"font-size:11px;color:#555555;margin-top:24px\">If you have questions about this receipt, \
+                 <a href=\"https://printshop.example/support\">contact support</a>. This message confirms the payment for the order above.</p>\
+                 </div>",
+            ),
         },
         Mail {
             folder: "INBOX",
@@ -564,24 +621,15 @@ pub fn seed_if_empty_at(store: &Store, now: i64, offset: i64) -> Result<bool, St
             references,
             attachments,
             html: m.html.map(str::to_string),
-            inline: if m.html.is_some_and(|h| h.contains("cid:poster@gallery.example")) {
-                vec![
-                    mime::InlinePicture {
-                        cid: "poster@gallery.example".into(),
-                        name: "poster.png".into(),
-                        mime: "image/png".into(),
-                        data: sample_png(),
-                    },
-                    mime::InlinePicture {
-                        cid: "banner@gallery.example".into(),
-                        name: "banner.png".into(),
-                        mime: "image/png".into(),
-                        data: sample_banner_png(),
-                    },
-                ]
-            } else {
-                Vec::new()
-            },
+            inline: [
+                ("poster@gallery.example", "poster.png", sample_png as fn() -> Vec<u8>),
+                ("banner@gallery.example", "banner.png", sample_banner_png),
+                ("logo@printshop.example", "logo.png", sample_logo_png),
+            ]
+            .into_iter()
+            .filter(|(cid, _, _)| m.html.is_some_and(|h| h.contains(&format!("cid:{cid}"))))
+            .map(|(cid, name, data)| mime::InlinePicture { cid: cid.into(), name: name.into(), mime: "image/png".into(), data: data() })
+            .collect(),
             importance: 0,
             read_receipt: false,
         };

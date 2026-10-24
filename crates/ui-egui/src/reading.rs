@@ -712,8 +712,15 @@ struct Body<'a> {
     acts: &'a mut Vec<Action>,
 }
 
-/// Narrower than this, a table's columns go one under the other.
+/// Narrower than this, a table's column whose content doesn't fit goes under the others.
 const MIN_COLUMN: f32 = 140.0;
+/// The space inside a table cell, each side.
+const CELL_PAD: f32 = 6.0;
+
+/// How wide `text` is in `font` on one line.
+fn text_w(ui: &Ui, text: &str, font: egui::FontId) -> f32 {
+    ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, Color32::WHITE).size().x)
+}
 
 fn span_font(sp: &mime::Span) -> egui::FontId {
     if sp.heading > 0 {
@@ -776,8 +783,7 @@ impl Body<'_> {
                     });
                     continue;
                 }
-                let line_w: f32 =
-                    line.iter().map(|sp| ui.fonts_mut(|f| f.layout_no_wrap(sp.text.clone(), span_font(sp), Color32::WHITE).size().x)).sum();
+                let line_w: f32 = line.iter().map(|sp| text_w(ui, &sp.text, span_font(sp))).sum();
                 if line.iter().all(|sp| sp.image.is_none()) && line_w < width {
                     let space = if align == Align::Center { (width - line_w) / 2.0 } else { width - line_w };
                     ui.horizontal(|ui| {
@@ -858,12 +864,18 @@ impl Body<'_> {
             match b {
                 Block::Text(lines) => self.lines(st, ui, lines, width, page, main_align(align)),
                 Block::Table(table) if depth < 16 => {
+                    // What the columns ask for and what their content needs, measured once.
+                    let columns = column_widths(&table.rows);
+                    let measured: Vec<Vec<Option<f32>>> =
+                        table.rows.iter().map(|r| r.iter().map(|c| self.natural(st, ui, &c.blocks, depth + 1)).collect()).collect();
+                    let natural = column_naturals(&table.rows, &measured);
+                    // A table without a width is as wide as its content (CSS's shrink-to-fit).
                     let tw = match table.width {
                         Some(Width::Px(px)) => (px as f32).min(width),
                         Some(Width::Percent(pc)) => width * f32::from(pc) / 100.0,
-                        None => width,
-                    }
-                    .max(1.0);
+                        None => table_natural(&table.rows, &columns, &natural, &measured).map_or(width, |n| n.min(width)),
+                    };
+                    let tw = table.max_width.map_or(tw, |m| tw.min(m as f32)).max(1.0);
                     let indent = match table.align {
                         A::Center => (width - tw) / 2.0,
                         A::Right => width - tw,
@@ -882,9 +894,8 @@ impl Body<'_> {
                                 // Its place in the drawing: above the fill, under the content.
                                 let slot = ui.painter().add(egui::Shape::Noop);
                                 ui.spacing_mut().item_spacing = vec2(0.0, 4.0);
-                                let columns = column_widths(&table.rows);
-                                for row in &table.rows {
-                                    self.row(st, ui, row, &columns, tw, page, depth);
+                                for (row, measured) in table.rows.iter().zip(&measured) {
+                                    self.row(st, ui, row, &columns, &natural, measured, tw, page, depth);
                                 }
                                 slot
                             });
@@ -920,7 +931,7 @@ impl Body<'_> {
             Some(Width::Px(px)) => px as f32,
             Some(Width::Percent(pc)) => over.width() * f32::from(pc) / 100.0,
             // As wide as its text (CSS's shrink-to-fit), at most what's left of the box.
-            None => natural_width(ui, &o.blocks).map_or(over.width() - x, |n| n + 2.0 * PAD + 1.0).min(over.width() - x).max(24.0),
+            None => self.natural(st, ui, &o.blocks, depth + 1).map_or(over.width() - x, |n| n + 2.0 * PAD + 1.0).min(over.width() - x).max(24.0),
         }
         .clamp(1.0, over.width().max(1.0));
         let left = if o.from_right { over.right() - x - w } else { over.left() + x }.max(over.left() - w);
@@ -952,7 +963,8 @@ impl Body<'_> {
 
     /// A table row: its cells side by side, or one under the other when there's no room.
     /// `columns`: the widths the table's columns ask for (a width set in one row is the whole
-    /// column's, as HTML sizes columns).
+    /// column's, as HTML sizes columns); `natural`: the widest each column's content is unwrapped
+    /// (`None`: unknown); `measured`: the same for this row's cells.
     #[allow(clippy::too_many_arguments)]
     fn row(
         &mut self,
@@ -960,40 +972,62 @@ impl Body<'_> {
         ui: &mut Ui,
         row: &[mime::layout::Cell],
         columns: &[Option<mime::layout::Width>],
+        natural: &[Option<f32>],
+        measured: &[Option<f32>],
         width: f32,
         page: [u8; 3],
         depth: usize,
     ) {
         use mime::layout::Width;
-        const PAD: f32 = 6.0;
         let px = |w: Width| match w {
             Width::Px(px) => px as f32,
             Width::Percent(pc) => width * f32::from(pc) / 100.0,
         };
-        // Widths: what cells (or their columns) ask for, the rest shared by the others.
+        // Widths: what cells (or their columns) ask for, the rest shared by the others as their
+        // content compares (CSS's automatic table layout).
         let mut col = 0usize;
-        let asked: Vec<Option<f32>> = row
-            .iter()
-            .map(|c| {
-                let span = usize::from(c.span.max(1));
-                let from_columns = || {
-                    let parts = columns.get(col..col + span)?;
-                    (parts.len() == span && parts.iter().all(Option::is_some)).then(|| parts.iter().flatten().map(|w| px(*w)).sum::<f32>())
-                };
-                let w = c.width.map(px).or_else(from_columns);
-                col += span;
-                w
-            })
-            .collect();
+        let mut asked: Vec<Option<f32>> = Vec::with_capacity(row.len());
+        let mut wants: Vec<Option<f32>> = Vec::with_capacity(row.len());
+        for (i, c) in row.iter().enumerate() {
+            let span = usize::from(c.span.max(1));
+            let from_columns = || {
+                let parts = columns.get(col..col + span)?;
+                (parts.len() == span && parts.iter().all(Option::is_some)).then(|| parts.iter().flatten().map(|w| px(*w)).sum::<f32>())
+            };
+            asked.push(c.width.map(px).or_else(from_columns));
+            let from_natural = || natural.get(col..col + span).filter(|p| p.len() == span)?.iter().copied().sum::<Option<f32>>();
+            wants.push(from_natural().or_else(|| measured.get(i).copied().flatten()));
+            col = col.saturating_add(span);
+        }
         let fixed: f32 = asked.iter().flatten().sum();
         let free = asked.iter().filter(|a| a.is_none()).count();
-        let mut widths: Vec<f32> = if fixed > width || (free > 0 && width - fixed < MIN_COLUMN * free as f32) {
+        let known: Vec<f32> = asked.iter().zip(&wants).filter(|(a, _)| a.is_none()).filter_map(|(_, w)| *w).collect();
+        let fallback = if known.is_empty() { MIN_COLUMN } else { known.iter().sum::<f32>() / known.len() as f32 };
+        // What a free cell wants: its content unwrapped, with its padding; what it needs at least.
+        let want = |i: usize| wants.get(i).copied().flatten().unwrap_or(fallback).max(0.0) + 2.0 * CELL_PAD;
+        let need = |i: usize| want(i).min(MIN_COLUMN);
+        let remaining = width - fixed;
+        let needs: f32 = (0..row.len()).filter(|i| asked.get(*i).is_some_and(Option::is_none)).map(need).sum();
+        let mut widths: Vec<f32> = if fixed > width || (free > 0 && remaining < needs) {
             // Asked for more than there is: shared out in proportion.
-            let total: f32 = asked.iter().map(|a| a.unwrap_or(MIN_COLUMN)).sum::<f32>().max(1.0);
-            asked.iter().map(|a| a.unwrap_or(MIN_COLUMN) / total * width).collect()
+            let total: f32 = asked.iter().enumerate().map(|(i, a)| a.unwrap_or(need(i))).sum::<f32>().max(1.0);
+            asked.iter().enumerate().map(|(i, a)| a.unwrap_or(need(i)) / total * width).collect()
+        } else if free > 0 {
+            let total_want: f32 = (0..row.len()).filter(|i| asked.get(*i).is_some_and(Option::is_none)).map(want).sum::<f32>().max(1.0);
+            if total_want <= remaining {
+                // Room for every line unwrapped: the rest is shared out in the same proportion.
+                asked.iter().enumerate().map(|(i, a)| a.unwrap_or(want(i) / total_want * remaining)).collect()
+            } else {
+                // Not enough: short content gets its width, long content shares the rest and wraps.
+                let growth: f32 = (0..row.len()).filter(|i| asked.get(*i).is_some_and(Option::is_none)).map(|i| want(i) - need(i)).sum();
+                asked
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| a.unwrap_or(need(i) + if growth > 0.0 { (remaining - needs) * (want(i) - need(i)) / growth } else { 0.0 }))
+                    .collect()
+            }
         } else {
-            let each = if free > 0 { (width - fixed) / free as f32 } else { 0.0 };
-            asked.iter().map(|a| a.unwrap_or(each)).collect()
+            asked.iter().map(|a| a.unwrap_or(0.0)).collect()
         };
         // Cells that ask for nothing extra (spacers) next to wider ones.
         let used: f32 = widths.iter().sum();
@@ -1002,7 +1036,15 @@ impl Body<'_> {
         {
             *last += width - used;
         }
-        let stack = row.len() > 1 && widths.iter().zip(row).any(|(w, c)| *w < MIN_COLUMN && !c.blocks.is_empty());
+        // Columns go one under the other when one is narrow and its content doesn't fit (a
+        // narrow column that holds a small picture or a short label stays beside the others).
+        let stack = row.len() > 1
+            && widths
+                .iter()
+                .zip(row)
+                .enumerate()
+                .any(|(i, (w, c))| *w < MIN_COLUMN && !c.blocks.is_empty() && wants.get(i).copied().flatten().is_none_or(|n| *w < n));
+        const PAD: f32 = CELL_PAD;
         let cell = |this: &mut Self, st: &mut UiState, ui: &mut Ui, c: &mime::layout::Cell, w: f32| {
             let bg = theme::box_color(c.background, page, &st.tokens);
             let fill = bg.map_or(Color32::TRANSPARENT, |b| Color32::from_rgb(b[0], b[1], b[2]));
@@ -1066,20 +1108,107 @@ fn picture(s: &Session, st: &mut UiState, ui: &mut Ui, key: &MessageKey, p: &mim
     true
 }
 
-/// How wide formatted text is unwrapped (its widest line); `None` for anything but text.
-fn natural_width(ui: &Ui, blocks: &[mime::layout::Block]) -> Option<f32> {
-    let mut widest: f32 = 0.0;
-    for b in blocks {
-        let mime::layout::Block::Text(lines) = b else { return None };
-        for line in lines {
-            if line.iter().any(|sp| sp.image.is_some()) {
-                return None;
+impl Body<'_> {
+    /// How wide laid-out parts are unwrapped (the widest line, or the widest table): what CSS
+    /// calls the max-content width. `None` past the depth tables are drawn to.
+    fn natural(&mut self, st: &mut UiState, ui: &mut Ui, blocks: &[mime::layout::Block], depth: usize) -> Option<f32> {
+        use mime::layout::{Block, Width};
+        if depth > 16 {
+            return None;
+        }
+        let mut widest: f32 = 0.0;
+        for b in blocks {
+            match b {
+                Block::Text(lines) => {
+                    for line in lines {
+                        let mut w = 0.0;
+                        for sp in line {
+                            w += self.span_natural(st, ui, sp);
+                        }
+                        widest = widest.max(w);
+                    }
+                }
+                Block::Table(t) => {
+                    let w = match t.width {
+                        Some(Width::Px(px)) => px as f32,
+                        // A percentage of a box that is itself being measured: its content's.
+                        _ => {
+                            let measured: Vec<Vec<Option<f32>>> =
+                                t.rows.iter().map(|r| r.iter().map(|c| self.natural(st, ui, &c.blocks, depth + 1)).collect()).collect();
+                            table_natural(&t.rows, &column_widths(&t.rows), &column_naturals(&t.rows, &measured), &measured)?
+                        }
+                    };
+                    widest = widest.max(t.max_width.map_or(w, |m| w.min(m as f32)));
+                }
             }
-            let w: f32 = line.iter().map(|sp| ui.fonts_mut(|f| f.layout_no_wrap(sp.text.clone(), span_font(sp), Color32::WHITE).size().x)).sum();
-            widest = widest.max(w);
+        }
+        Some(widest)
+    }
+
+    /// How wide one span is: its text on one line, or its picture as it will be drawn (a picture
+    /// not shown is its description in brackets, as [`Body::span`] draws it).
+    fn span_natural(&mut self, st: &mut UiState, ui: &mut Ui, sp: &mime::Span) -> f32 {
+        let Some(src) = &sp.image else { return text_w(ui, &sp.text, span_font(sp)) };
+        match picture_texture(self.s, st, ui.ctx(), self.key, self.p, src, self.allowed) {
+            Pic::Ready(tex) => {
+                let sz = tex.size_vec2();
+                if sz.x <= 3.0 && sz.y <= 3.0 { 0.0 } else { sz.x.min(900.0) }
+            }
+            Pic::Loading => 20.0,
+            Pic::Missing => {
+                let alt = if sp.text.trim().is_empty() { "picture" } else { sp.text.trim() };
+                text_w(ui, &format!("[{alt}]"), span_font(sp))
+            }
         }
     }
-    Some(widest)
+}
+
+/// The widest content of each column of a table (`measured`: each cell's, row by row), from the
+/// cells that span one column; `None` where one can't be measured.
+fn column_naturals(rows: &[Vec<mime::layout::Cell>], measured: &[Vec<Option<f32>>]) -> Vec<Option<f32>> {
+    const MAX_COLUMNS: usize = 64;
+    let mut out: Vec<Option<f32>> = Vec::new();
+    for (row, m) in rows.iter().zip(measured) {
+        let mut col = 0usize;
+        for (c, n) in row.iter().zip(m) {
+            let span = usize::from(c.span.max(1));
+            if span == 1 && col < MAX_COLUMNS {
+                if out.len() <= col {
+                    out.resize(col + 1, Some(0.0));
+                }
+                // A column once unmeasurable stays so.
+                match (n, out.get_mut(col)) {
+                    (Some(n), Some(Some(w))) => *w = w.max(*n),
+                    (None, Some(slot)) => *slot = None,
+                    _ => {}
+                }
+            }
+            col = col.saturating_add(span);
+        }
+    }
+    out
+}
+
+/// How wide a table is when nothing sizes it: its columns' widths (asked for in pixels, or
+/// their content's with the cells' padding), or a row of spanning cells if that is more.
+fn table_natural(
+    rows: &[Vec<mime::layout::Cell>],
+    columns: &[Option<mime::layout::Width>],
+    natural: &[Option<f32>],
+    measured: &[Vec<Option<f32>>],
+) -> Option<f32> {
+    use mime::layout::Width;
+    let of = |asked: Option<Width>, content: Option<f32>| match asked {
+        Some(Width::Px(px)) => Some(px as f32),
+        _ => content.map(|n| n + 2.0 * CELL_PAD),
+    };
+    let col_sum: f32 = natural.iter().enumerate().map(|(i, n)| of(columns.get(i).copied().flatten(), *n)).sum::<Option<f32>>()?;
+    let mut widest = col_sum;
+    for (row, m) in rows.iter().zip(measured) {
+        let w: f32 = row.iter().zip(m).map(|(c, n)| of(c.width, *n)).sum::<Option<f32>>()?;
+        widest = widest.max(w);
+    }
+    Some(widest.min(4000.0))
 }
 
 /// Right-click on right-to-left text (which can't be selected): copy the line, or the whole

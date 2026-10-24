@@ -1,6 +1,6 @@
 # Roadmap
 
-**Stage:** v0.18 — Shared mailboxes and the contact card (2026-10-19). Each milestone below is a version: v0.1 was
+**Stage:** v0.19.1 — Mail printed as it is shown (2026-10-24). Each milestone below is a version: v0.1 was
 the first working client, and every later one is named for what it added.
 Scope: [storytold/artcraft#2177](https://github.com/storytold/artcraft/issues/2177) (lightweight,
 local-first, media-aware v1); the fuller request is
@@ -225,3 +225,8 @@ local-first, media-aware v1); the fuller request is
   `?` for what nothing has), and Print lists the system's printers (CUPS `lpstat`/`lp`; the PDF
   app's Print verb on Windows) with copies and Quick print; `message.print` and
   `mailcraft-cli print` do the same from scripts.
+- **2026-10-24** — **v0.19.1**: printed mail kept only its text (one word per line for a receipt's
+  columns, `#` for headings, box drawing for tables). The PDF now lays out the formatted body as
+  the reading pane does: headings, bold and italic, colours, clickable links, and tables with
+  their columns and backgrounds, rows kept whole over page breaks. The reading pane sizes
+  tables without widths to their content, so a receipt's label stays beside its value.

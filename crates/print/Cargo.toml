@@ -10,6 +10,8 @@ description = "MailCraft print and export: a message laid out on pages as a PDF 
 workspace = true
 
 [dependencies]
+# The formatted body and its layout (`RichText`, `layout::Block`), as the reading pane shows them.
+mailcraft-mime = { workspace = true }
 # Glyph ids and widths of the system font that gets embedded.
 ttf-parser = { version = "0.25", default-features = false, features = ["std", "opentype-layout", "apple-layout", "variable-fonts", "glyph-names"] }
 # Compressed page and font streams.

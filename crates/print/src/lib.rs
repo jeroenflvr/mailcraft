@@ -7,15 +7,22 @@
 //! collection is cut out of it, and every embedded face carries a `ToUnicode` map so the text
 //! can be searched and copied. A character no face has is drawn as `?`, never as the font's
 //! missing-glyph box. Without any font the standard Helvetica is used and characters outside
-//! Windows-1252 print as `?`. Pages carry the subject, the header, the text and page numbers.
+//! Windows-1252 print as `?`. Pages carry the subject, the header, the body (formatted, with its
+//! table layout, as the reading pane shows it: [`layout`]) and page numbers; links are clickable.
 //! Pure Rust, no I/O: the caller reads the fonts and writes the bytes.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+
+mod layout;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::sync::Arc;
+
+pub use mailcraft_mime::layout::Block;
+
+use layout::{Canvas, Item, Rect, Text};
 
 /// What goes on the pages.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -24,15 +31,24 @@ pub struct Doc {
     pub title: String,
     /// `From`, `To`, `Date`… lines under it.
     pub header: Vec<(String, String)>,
-    /// The text.
+    /// The text (printed when `blocks` is empty).
     pub body: String,
+    /// The body formatted and laid out, as the reading pane shows it: formatted text alone is
+    /// one [`Block::Text`]; mail laid out with tables has its columns.
+    pub blocks: Vec<Block>,
 }
 
 impl Doc {
     /// Everything on the pages as one text: what fonts must have characters for.
     pub fn text(&self) -> String {
         let header: Vec<String> = self.header.iter().map(|(k, v)| format!("{k}: {v}")).collect();
-        format!("{}\n{}\n{}", self.title, header.join("\n"), self.body)
+        let mut body = String::new();
+        if self.blocks.is_empty() {
+            body.push_str(&self.body);
+        } else {
+            layout::text_of(&self.blocks, &mut body, 0);
+        }
+        format!("{}\n{}\n{}", self.title, header.join("\n"), body)
     }
 }
 
@@ -327,6 +343,10 @@ impl<'a> Faces<'a> {
         s.chars().map(|c| self.locate(style, c).2).sum::<f32>() * size / 1000.0
     }
 
+    fn char_width(&self, style: usize, c: char, size: f32) -> f32 {
+        self.locate(style, c).2 * size / 1000.0
+    }
+
     /// `s` as runs, each in one face: (face, text drawn, width in thousandths).
     fn runs(&self, style: usize, s: &str) -> Vec<(usize, String, f32)> {
         let mut out: Vec<(usize, String, f32)> = Vec::new();
@@ -361,13 +381,25 @@ impl<'a> Faces<'a> {
     }
 }
 
-/// A line of text to place: style (0 regular, 1 bold), size, position.
-struct Placed {
-    style: usize,
-    size: f32,
-    x: f32,
-    y: f32,
-    text: String,
+/// Something drawn on a page, in PDF coordinates (`y` up from the page's bottom edge).
+enum OnPage {
+    /// Text with its baseline at `y`.
+    Text {
+        t: Text,
+        y: f32,
+    },
+    Rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [u8; 3],
+    },
+    Rule {
+        x: f32,
+        y: f32,
+        w: f32,
+    },
 }
 
 /// Split `text` into lines no wider than `width` (words, then characters for long words).
@@ -432,14 +464,39 @@ fn info_string(s: &str) -> String {
     out
 }
 
-/// Draw `text` at `at` as one `Tj` per run of one face.
-fn show(c: &mut String, faces: &mut Faces<'_>, style: usize, size: f32, at: (f32, f32), text: &str) {
+/// Draw `text` at `at` as one `Tj` per run of one face (inside `BT … ET`); italics are slanted.
+fn show(c: &mut String, faces: &mut Faces<'_>, style: usize, size: f32, italic: bool, at: (f32, f32), text: &str) {
     let mut x = at.0;
+    let skew = if italic { "0.2" } else { "0" };
     for (face, run, w) in faces.runs(style, text) {
         let enc = faces.list.get_mut(face).map(|f| f.encode(&run)).unwrap_or_default();
-        let _ = writeln!(c, "/F{} {size:.1} Tf 1 0 0 1 {x:.2} {:.2} Tm {enc} Tj", face + 1, at.1);
+        let _ = writeln!(c, "/F{} {size:.1} Tf 1 0 {skew} 1 {x:.2} {:.2} Tm {enc} Tj", face + 1, at.1);
         x += w * size / 1000.0;
     }
+}
+
+/// A colour as a PDF operand (`r g b`).
+fn rgb(c: [u8; 3]) -> String {
+    format!("{:.3} {:.3} {:.3}", f32::from(c[0]) / 255.0, f32::from(c[1]) / 255.0, f32::from(c[2]) / 255.0)
+}
+
+/// A link's address as a PDF string: the characters a URI may hold, the rest percent-encoded.
+fn uri_string(url: &str) -> String {
+    let mut out = String::from("(");
+    for b in url.bytes().take(2048) {
+        match b {
+            b'(' | b')' | b'\\' => {
+                out.push('\\');
+                out.push(char::from(b));
+            }
+            b'!'..=b'~' => out.push(char::from(b)),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out.push(')');
+    out
 }
 
 /// The document as PDF bytes.
@@ -466,7 +523,12 @@ fn pdf_capped(doc: &Doc, fonts: &Fonts, cap: usize) -> Result<(Vec<u8>, Report),
         .map(|f| f.and_then(sfnt))
         .collect();
     let mut faces = Faces::new(&sources);
-    let mut everything = format!("{title}\n{body}\n0123456789 /");
+    let mut everything = format!("{title}\n0123456789 /");
+    if doc.blocks.is_empty() {
+        everything.push_str(&body);
+    } else {
+        layout::text_of(&doc.blocks, &mut everything, 0);
+    }
     for (k, v) in &header {
         everything.push_str(&format!("\n{k}:{v}"));
     }
@@ -478,76 +540,133 @@ fn pdf_capped(doc: &Doc, fonts: &Fonts, cap: usize) -> Result<(Vec<u8>, Report),
         }
     }
     let width = PAGE_W - 2.0 * MARGIN;
+    let page_h = PAGE_H - 2.0 * MARGIN;
 
-    // Lay out.
-    let mut pages: Vec<Vec<Placed>> = vec![Vec::new()];
-    let mut y = PAGE_H - MARGIN;
-    let mut truncated = false;
-    let place = |pages: &mut Vec<Vec<Placed>>, y: &mut f32, style: usize, size: f32, lead: f32, x: f32, text: String| -> bool {
-        if *y - lead < MARGIN + 20.0 {
-            if pages.len() >= MAX_PAGES {
-                return false;
-            }
-            pages.push(Vec::new());
-            *y = PAGE_H - MARGIN;
-        }
-        *y -= lead;
-        if let Some(p) = pages.last_mut() {
-            p.push(Placed { style, size, x, y: *y, text });
-        }
-        true
-    };
+    // Lay out into one tall column, a page's height per page.
+    let mut canvas = Canvas::new(&faces, page_h);
+    let mut y = 0.0;
     for line in wrap(&faces, 1, &title, 16.0, width) {
-        place(&mut pages, &mut y, 1, 16.0, 21.0, MARGIN, line);
+        y = canvas.line(MARGIN, y, 1, 16.0, 21.0, [0, 0, 0], &line);
     }
-    y -= 6.0;
+    y += 6.0;
     let label_w = header.iter().map(|(k, _)| faces.text_width(1, &format!("{k}:"), 9.5)).fold(0.0f32, f32::max) + 6.0;
     for (k, v) in &header {
-        let lines = wrap(&faces, 0, v, 9.5, width - label_w);
-        for (i, line) in lines.into_iter().enumerate() {
+        for (i, line) in wrap(&faces, 0, v, 9.5, width - label_w).into_iter().enumerate() {
+            let bottom = canvas.line(MARGIN + label_w, y, 0, 9.5, 13.0, [0, 0, 0], &line);
             if i == 0 {
-                let ok = place(&mut pages, &mut y, 1, 9.5, 13.0, MARGIN, format!("{k}:"));
-                if ok && let Some(p) = pages.last_mut() {
-                    p.push(Placed { style: 0, size: 9.5, x: MARGIN + label_w, y, text: line });
+                canvas.line(MARGIN, bottom - 13.0, 1, 9.5, 13.0, [0, 0, 0], &format!("{k}:"));
+            }
+            y = bottom;
+        }
+    }
+    y += 8.0;
+    y = canvas.fit(y, 20.0);
+    canvas.rule(MARGIN, y, width);
+    y += 6.0;
+    if doc.blocks.is_empty() {
+        for line in wrap(&faces, 0, &body, layout::BODY, width) {
+            y = canvas.line(MARGIN, y, 0, layout::BODY, 14.5, [0, 0, 0], &line);
+        }
+    } else {
+        canvas.blocks(&doc.blocks, MARGIN, y, width, [255, 255, 255], mailcraft_mime::layout::Align::Left, 0);
+    }
+
+    // Cut into pages: an item goes on the page its top is on (lines never cross a break); a
+    // box crossing one is cut there.
+    let mut pages: Vec<Vec<OnPage>> = vec![Vec::new()];
+    let mut truncated = false;
+    let page_of = |y: f32| usize::try_from((y / page_h).floor() as i64).unwrap_or(0);
+    let on_page = |p: usize, y: f32| PAGE_H - MARGIN - (y - p as f32 * page_h);
+    let mut put = |pages: &mut Vec<Vec<OnPage>>, p: usize, item: OnPage| {
+        if p >= MAX_PAGES {
+            truncated = true;
+            return;
+        }
+        if pages.len() <= p {
+            pages.resize_with(p + 1, Vec::new);
+        }
+        if let Some(page) = pages.get_mut(p) {
+            page.push(item);
+        }
+    };
+    for item in std::mem::take(&mut canvas.items) {
+        match item {
+            Item::Text(t) => {
+                let p = page_of(t.top);
+                let y = on_page(p, t.top + t.size);
+                put(&mut pages, p, OnPage::Text { t, y });
+            }
+            Item::Rule { x, y, w } => {
+                let p = page_of(y);
+                put(&mut pages, p, OnPage::Rule { x, y: on_page(p, y), w });
+            }
+            Item::Rect(Rect { x, y, w, h, color }) => {
+                let (mut from, end) = (y, y + h);
+                let mut guard = 0;
+                while from < end - 0.01 && guard < MAX_PAGES {
+                    let p = page_of(from);
+                    let to = end.min((p + 1) as f32 * page_h);
+                    put(&mut pages, p, OnPage::Rect { x, y: on_page(p, to), w, h: to - from, color });
+                    from = to;
+                    guard += 1;
                 }
-            } else {
-                place(&mut pages, &mut y, 0, 9.5, 13.0, MARGIN + label_w, line);
             }
         }
     }
-    y -= 8.0;
-    let rule_page = pages.len() - 1;
-    let rule_y = y;
-    y -= 6.0;
-    for line in wrap(&faces, 0, &body, 11.0, width) {
-        if !place(&mut pages, &mut y, 0, 11.0, 14.5, MARGIN, line) {
-            truncated = true;
-            break;
-        }
-    }
-    if truncated {
-        place(&mut pages, &mut y, 1, 11.0, 18.0, MARGIN, "(The rest of the message didn't fit in this document.)".into());
+    if truncated && let Some(last) = pages.last_mut() {
+        let note = "(The rest of the message didn't fit in this document.)";
+        let width = faces.text_width(1, note, layout::BODY);
+        last.push(OnPage::Rect { x: MARGIN, y: MARGIN + 16.0, w: width + 8.0, h: 20.0, color: [255, 255, 255] });
+        let t = Text {
+            x: MARGIN + 4.0,
+            top: 0.0,
+            style: 1,
+            size: layout::BODY,
+            italic: false,
+            underline: false,
+            color: [0, 0, 0],
+            link: None,
+            text: note.to_string(),
+            width,
+        };
+        last.push(OnPage::Text { t, y: MARGIN + 22.0 });
     }
 
-    // Content streams: each line in runs, one per face.
+    // Content streams, and each page's links.
     let n = pages.len();
     let mut contents: Vec<String> = Vec::with_capacity(n);
+    let mut links: Vec<Vec<(f32, f32, f32, f32, String)>> = Vec::with_capacity(n);
     for (i, page) in pages.iter().enumerate() {
         let mut c = String::new();
-        if i == rule_page {
-            let _ = writeln!(c, "0.75 G 0.6 w {MARGIN:.2} {rule_y:.2} m {:.2} {rule_y:.2} l S 0 G", PAGE_W - MARGIN);
-        }
-        c.push_str("BT\n");
-        for p in page {
-            show(&mut c, &mut faces, p.style, p.size, (p.x, p.y), &p.text);
+        let mut page_links = Vec::new();
+        for item in page {
+            match item {
+                OnPage::Rule { x, y, w } => {
+                    let _ = writeln!(c, "0.75 G 0.6 w {x:.2} {y:.2} m {:.2} {y:.2} l S", x + w);
+                }
+                OnPage::Rect { x, y, w, h, color } => {
+                    let _ = writeln!(c, "{} rg {x:.2} {y:.2} {w:.2} {h:.2} re f", rgb(*color));
+                }
+                OnPage::Text { t, y } => {
+                    let _ = writeln!(c, "BT {} rg", rgb(t.color));
+                    show(&mut c, &mut faces, t.style, t.size, t.italic, (t.x, *y), &t.text);
+                    c.push_str("ET\n");
+                    if t.underline {
+                        let _ = writeln!(c, "{} RG 0.5 w {:.2} {:.2} m {:.2} {:.2} l S", rgb(t.color), t.x, y - 1.5, t.x + t.width, y - 1.5);
+                    }
+                    if let Some(url) = &t.link {
+                        page_links.push((t.x, y - t.size * 0.3, t.x + t.width, y + t.size, url.clone()));
+                    }
+                }
+            }
         }
         let footer = format!("{} / {n}", i + 1);
         let fw = faces.text_width(0, &footer, 8.0);
-        c.push_str("0.45 g\n");
-        show(&mut c, &mut faces, 0, 8.0, ((PAGE_W - fw) / 2.0, MARGIN / 2.0), &footer);
-        c.push_str("0 g\n");
-        c.push_str("ET\n");
+        c.push_str("BT 0.45 g\n");
+        show(&mut c, &mut faces, 0, 8.0, false, ((PAGE_W - fw) / 2.0, MARGIN / 2.0), &footer);
+        c.push_str("0 g ET\n");
         contents.push(c);
+        links.push(page_links);
     }
 
     // Objects: 1 catalog, 2 pages, 3 info, then the fonts used, then page + content pairs.
@@ -645,10 +764,22 @@ fn pdf_capped(doc: &Doc, fonts: &Fonts, cap: usize) -> Result<(Vec<u8>, Report),
     let fonts_dict: String =
         font_refs.iter().enumerate().filter_map(|(i, r)| r.map(|r| format!("/F{} {r} 0 R", i + 1))).collect::<Vec<_>>().join(" ");
     let mut kids = Vec::new();
-    for c in &contents {
+    for (c, page_links) in contents.iter().zip(&links) {
         let content_ref = add(&mut objects, stream("", &compress(c.as_bytes())));
+        let annots: Vec<String> = page_links
+            .iter()
+            .take(2000)
+            .map(|(x0, y0, x1, y1, url)| {
+                let a = format!(
+                    "<< /Type /Annot /Subtype /Link /Rect [{x0:.2} {y0:.2} {x1:.2} {y1:.2}] /Border [0 0 0] /A << /S /URI /URI {} >> >>",
+                    uri_string(url)
+                );
+                format!("{} 0 R", add(&mut objects, a.into_bytes()))
+            })
+            .collect();
+        let annots = if annots.is_empty() { String::new() } else { format!(" /Annots [{}]", annots.join(" ")) };
         let page = format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W:.2} {PAGE_H:.2}] /Resources << /Font << {fonts_dict} >> >> /Contents {content_ref} 0 R >>"
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W:.2} {PAGE_H:.2}] /Resources << /Font << {fonts_dict} >> >> /Contents {content_ref} 0 R{annots} >>"
         );
         kids.push(add(&mut objects, page.into_bytes()));
     }
@@ -709,6 +840,7 @@ mod tests {
             title: "Storyboard (v2) review".into(),
             header: vec![("From".into(), "Zoe Park <zoe@studio.example>".into()), ("Date".into(), "Wed 14 Oct 2026 09:30".into())],
             body: body.into(),
+            blocks: Vec::new(),
         }
     }
 
@@ -766,11 +898,12 @@ mod tests {
             let Some(len) = pdf[from..].windows(10).position(|w| w == b"\nendstream") else { break };
             if let Ok(raw) = miniz_oxide::inflate::decompress_to_vec_zlib(&pdf[from..from + len])
                 && let Ok(text) = String::from_utf8(raw)
-                && text.starts_with("0.75 G") | text.starts_with("BT")
+                && text.contains("BT")
             {
                 out.push(text);
             }
-            at = from + len;
+            // Past `endstream`, so its own "stream\n" isn't taken for the next one's start.
+            at = from + len + 10;
         }
         out
     }
@@ -932,5 +1065,123 @@ mod tests {
         let (p, report) = pdf_capped(&doc("a →"), &fonts, 1000).unwrap();
         assert_eq!((report.dropped_fonts, report.missing.clone()), (1, vec!['→']), "{report:?}");
         assert!(!glyph_ids(&p).iter().any(|g| g == "0000"), "drawn as ?, not a box");
+    }
+
+    /// The x and y of every Helvetica string on each page, with its text.
+    fn placed(pdf: &[u8]) -> Vec<Vec<(f32, f32, String)>> {
+        page_texts(pdf)
+            .iter()
+            .map(|page| {
+                page.lines()
+                    .filter(|l| l.contains(" Tj"))
+                    .filter_map(|l| {
+                        let mut it = l.split_whitespace();
+                        let tm = it.clone().position(|w| w == "Tm")?;
+                        let x: f32 = it.nth(tm - 2)?.parse().ok()?;
+                        let y: f32 = it.next()?.parse().ok()?;
+                        let text = l.split('(').nth(1)?.rsplit(')').nth(1)?.to_string();
+                        Some((x, y, text))
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A receipt's layout prints as the reading pane shows it: the label and value columns of a
+    /// table without widths side by side, a price on the right of its row, the totals beside the
+    /// address, a coloured band behind white text, a heading large and bold, a link underlined
+    /// and clickable, a picture as its description; a row crossing the page break moves whole.
+    #[test]
+    fn formatted_mail_keeps_its_columns_on_paper() {
+        let html = r##"<div style="width:100%;max-width:600px;margin:0 auto">
+            <table width="100%"><tr><td bgcolor="#1d3f8a" style="color:#ffffff"><h1>Receipt</h1></td></tr></table>
+            <table><tr><td>Order ID:</td><td>MQ5T4V3M0F</td></tr><tr><td>Document:</td><td>792208831645</td></tr></table>
+            <table width="100%"><tr><td width="48"><img src="cid:logo@x" alt="Shop"></td><td><b>Poster</b><br>A2, matte</td><td align="right">EUR 99,00</td></tr></table>
+            <table width="100%"><tr><td width="50%">Studio Riley<br>7910 Anvaing</td>
+            <td><table width="100%"><tr><td>Subtotal</td><td align="right">EUR 81,82</td></tr><tr><td>VAT 21%</td><td align="right">EUR 17,18</td></tr></table></td></tr></table>
+            <p>Questions? <a href="https://shop.example/support?a=1&b=(2)">contact support</a>.</p>
+            <p><img src="cid:big@x" alt="Shop logo, large"></p></div>"##;
+        let blocks = mailcraft_mime::layout::html_layout(html);
+        assert!(!blocks.is_empty());
+        let d = Doc { blocks, ..doc("") };
+        let p = pdf(&d, &Fonts::default()).unwrap();
+        objects_are_where_the_xref_says(&p);
+        let pages = placed(&p);
+        let page = &pages[0];
+        let at = |text: &str| page.iter().find(|(_, _, t)| t == text).unwrap_or_else(|| panic!("{text:?} not on the page: {page:?}")).clone();
+        // Label and value on one line, the value in the next column.
+        let (lx, ly, _) = at("Order ID:");
+        let (vx, vy, _) = at("MQ5T4V3M0F");
+        assert!((ly - vy).abs() < 0.5 && vx > lx + 40.0, "{lx},{ly} / {vx},{vy}");
+        let (_, dy, _) = at("792208831645");
+        assert!(dy < ly, "the next row is under");
+        // The price on the right of the item's row, the picture as its description.
+        let (px, py, _) = at("EUR 99,00");
+        let (_, iy, _) = at("Poster");
+        assert!((py - iy).abs() < 0.5 && px > 350.0, "{px},{py} / {iy}");
+        assert!(!page.iter().any(|(_, _, t)| t == "[Shop]"), "a description wider than its narrow column is left out, not stacked");
+        assert!(page.iter().any(|(_, _, t)| t == "[Shop logo, large]"), "{page:?}");
+        // The totals beside the address, right-aligned in their column.
+        let (ax, ay, _) = at("Studio Riley");
+        let (sx, sy, _) = at("Subtotal");
+        let (tx, _, _) = at("EUR 81,82");
+        assert!((ay - sy).abs() < 6.0 && sx > ax + 100.0 && tx > sx + 50.0, "{ax},{ay} / {sx},{sy} / {tx}");
+        let text = String::from_utf8_lossy(&p);
+        // The band, the heading in bold, the link underlined and clickable.
+        let streams = page_texts(&p).join("\n");
+        assert!(streams.contains("0.114 0.247 0.541 rg") && streams.contains(" re f"), "the band is filled");
+        assert!(streams.lines().any(|l| l.contains("/F2 20.0 Tf") && l.contains("(Receipt)")), "{streams}");
+        assert!(streams.contains(" RG 0.5 w "), "the link is underlined");
+        assert!(text.contains("/Subtype /Link") && text.contains("/URI (https://shop.example/support?a=1&b=\\(2\\))"), "{text}");
+        // A fluid box is centred in the page: its content starts right of the margin.
+        assert!(lx > MARGIN + 5.0, "{lx}");
+        // Without blocks, the text prints as before.
+        let plain = pdf(&doc("Just text"), &Fonts::default()).unwrap();
+        assert!(placed(&plain)[0].iter().any(|(_, _, t)| t == "Just text"));
+    }
+
+    /// A row that would cross the page break moves to the next page whole; one taller than a
+    /// page flows over it, with its background cut at the break.
+    #[test]
+    fn rows_stay_together_over_page_breaks() {
+        let rows: String =
+            (0..60).map(|i| format!("<tr><td>Row {i}</td><td bgcolor=\"#eeeeee\">Line one<br>Line two<br>Line three</td></tr>")).collect();
+        let html = format!("<table>{rows}</table>");
+        let d = Doc { blocks: mailcraft_mime::layout::html_layout(&html), ..doc("") };
+        let p = pdf(&d, &Fonts::default()).unwrap();
+        let pages = placed(&p);
+        assert!(pages.len() >= 2, "{} pages", pages.len());
+        for page in &pages {
+            for (_, y, t) in page.iter().filter(|(_, _, t)| t.starts_with("Row ")) {
+                let n = t.trim_start_matches("Row ").trim();
+                let last = page.iter().filter(|(_, ly, lt)| lt == "Line three" && *ly < *y && *ly > y - 50.0).count();
+                assert!(last >= 1, "row {n}'s last line is on another page");
+            }
+        }
+        // One cell taller than a page: its lines flow over pages and nothing is lost.
+        let tall = format!("<table><tr><td>Side</td><td>{}</td></tr></table>", "Long<br>".repeat(120));
+        let d = Doc { blocks: mailcraft_mime::layout::html_layout(&tall), ..doc("") };
+        let p = pdf(&d, &Fonts::default()).unwrap();
+        let longs: usize = placed(&p).iter().flatten().filter(|(_, _, t)| t == "Long").count();
+        assert_eq!(longs, 120);
+        objects_are_where_the_xref_says(&p);
+    }
+
+    /// Junk layouts (deep, huge, absurd sizes) print something or nothing, never panic.
+    #[test]
+    fn hostile_layouts_are_survived() {
+        let deep = "<table><tr><td>".repeat(40) + "x" + &"</td></tr></table>".repeat(40);
+        let many = "<table><tr>".to_string() + &"<td>c</td>".repeat(1000) + "</tr></table>";
+        let wide = r#"<table width="99999"><tr><td width="99999">a</td><td width="0">b</td></tr></table>"#;
+        let placed_over = r#"<div style="position:relative"><p>a</p><b style="position:absolute;top:99999999px;right:-50px;bottom:3px">b</b></div>"#;
+        for html in [deep.as_str(), many.as_str(), wide, placed_over] {
+            let d = Doc { blocks: mailcraft_mime::layout::html_layout(html), ..doc("") };
+            let p = pdf(&d, &Fonts::default()).unwrap();
+            objects_are_where_the_xref_says(&p);
+        }
+        let huge =
+            Doc { blocks: vec![Block::Text(vec![vec![mailcraft_mime::Span { text: "y".repeat(100), ..Default::default() }]; 40_000])], ..doc("") };
+        let p = pdf(&huge, &Fonts::default()).unwrap();
+        assert!(String::from_utf8_lossy(&p).contains(&format!("/Count {MAX_PAGES}")));
     }
 }
