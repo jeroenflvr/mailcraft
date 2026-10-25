@@ -13,7 +13,7 @@
 //!   list [--account ID] [--folder PATH] [--limit N]
 //!   read KEY                       print a message (KEY from `list`)
 //!   print KEY [--printer NAME] [--copies N] [--landscape] [--duplex long|short] [--mono]
-//!             [--paper a4|letter|legal|a3|a5] [--scale fit|NN] [--pages 1-3,5] [--no-header]
+//!             [--quality draft|normal|high] [--paper a4|letter|legal|a3|a5] [--scale fit|NN] [--pages 1-3,5] [--no-header]
 //!                                  send a message to a printer (`print --list`: the printers)
 //!   pdf KEY OUT.pdf [--landscape] [--paper …] [--scale fit|NN] [--pages 1-3,5] [--no-header]
 //!                                  save a message as a PDF on that paper
@@ -64,7 +64,14 @@ impl Args {
         if let Some(c) = number("--copies")? {
             v["copies"] = json!(c);
         }
-        for (flag, key) in [("--printer", "printer"), ("--duplex", "duplex"), ("--paper", "paper"), ("--scale", "scale"), ("--pages", "pages")] {
+        for (flag, key) in [
+            ("--printer", "printer"),
+            ("--duplex", "duplex"),
+            ("--quality", "quality"),
+            ("--paper", "paper"),
+            ("--scale", "scale"),
+            ("--pages", "pages"),
+        ] {
             if let Some(x) = self.opt(flag) {
                 v[key] = json!(x);
             }
@@ -203,7 +210,7 @@ fn open_message(s: &mut Session, store: &Store, key: &str) -> Result<Value, Stri
     s.run("message.read", &json!({})).map_err(|e| e.to_string())
 }
 
-const PRINT_USAGE: &str = "print KEY [--printer NAME] [--copies N] [--landscape] [--duplex long|short] [--mono] [--paper a4|letter|legal|a3|a5] [--scale fit|NN] [--pages 1-3,5] [--no-header]   (print --list shows the printers)";
+const PRINT_USAGE: &str = "print KEY [--printer NAME] [--copies N] [--landscape] [--duplex long|short] [--mono] [--quality draft|normal|high] [--paper a4|letter|legal|a3|a5] [--scale fit|NN] [--pages 1-3,5] [--no-header]   (print --list shows the printers)";
 
 fn print(v: &Value) {
     println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());

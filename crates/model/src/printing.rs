@@ -78,6 +78,31 @@ impl ColorMode {
     }
 }
 
+/// How carefully the printer prints: draft saves ink and time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Quality {
+    #[serde(alias = "fast", alias = "economy")]
+    Draft,
+    #[default]
+    Normal,
+    #[serde(alias = "best")]
+    High,
+}
+
+impl Quality {
+    pub const ALL: [Quality; 3] = [Quality::Draft, Quality::Normal, Quality::High];
+
+    /// IPP's `print-quality`: 3 draft, 4 normal, 5 high.
+    pub fn ipp(self) -> u8 {
+        match self {
+            Quality::Draft => 3,
+            Quality::Normal => 4,
+            Quality::High => 5,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Paper {
     #[default]
@@ -304,6 +329,8 @@ pub struct PrintOptions {
     pub orientation: Orientation,
     pub duplex: Duplex,
     pub color: ColorMode,
+    /// Normal leaves the printer's own setting.
+    pub quality: Quality,
     pub paper: Paper,
     pub scale: Scale,
     pub pages: PageRange,
@@ -320,6 +347,7 @@ impl Default for PrintOptions {
             orientation: Orientation::Portrait,
             duplex: Duplex::Off,
             color: ColorMode::Color,
+            quality: Quality::Normal,
             paper: Paper::A4,
             scale: Scale::FitToPage,
             pages: PageRange::All,
@@ -405,13 +433,14 @@ mod tests {
     #[test]
     fn full_options_round_trip() {
         let o: PrintOptions = serde_json::from_str(
-            r#"{"printer":"P","copies":2,"collate":false,"orientation":"landscape","duplex":"long","color":"mono",
+            r#"{"printer":"P","copies":2,"collate":false,"orientation":"landscape","duplex":"long","color":"mono","quality":"draft",
                 "paper":"letter","scale":75,"pages":"1-3, 5","headers":false}"#,
         )
         .unwrap();
         assert_eq!(o.orientation, Orientation::Landscape);
         assert_eq!(o.duplex, Duplex::LongEdge);
         assert_eq!(o.color, ColorMode::Monochrome);
+        assert_eq!(o.quality, Quality::Draft);
         assert_eq!(o.paper, Paper::Letter);
         assert_eq!(o.scale, Scale::Percent(75));
         assert_eq!(o.pages, PageRange::Range(vec![(1, 3), (5, 5)]));
@@ -424,7 +453,15 @@ mod tests {
 
     #[test]
     fn junk_is_an_error_not_a_panic() {
-        for bad in [r#"{"copies":-1}"#, r#"{"scale":"x"}"#, r#"{"pages":"3-1"}"#, r#"{"paper":"B7"}"#, r#"{"copies":"many"}"#, "7"] {
+        for bad in [
+            r#"{"copies":-1}"#,
+            r#"{"scale":"x"}"#,
+            r#"{"pages":"3-1"}"#,
+            r#"{"paper":"B7"}"#,
+            r#"{"quality":"best-ever"}"#,
+            r#"{"copies":"many"}"#,
+            "7",
+        ] {
             assert!(serde_json::from_str::<PrintOptions>(bad).is_err(), "{bad}");
         }
     }

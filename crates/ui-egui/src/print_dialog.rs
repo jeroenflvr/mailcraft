@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use egui::{Align2, Rect, RichText, Sense, Ui, vec2};
-use mailcraft_engine::model::{Capabilities, ColorMode, Duplex, Orientation, PageRange, Paper, PrintOptions, Printer, Printing, Scale};
+use mailcraft_engine::model::{Capabilities, ColorMode, Duplex, Orientation, PageRange, Paper, PrintOptions, Printer, Printing, Quality, Scale};
 use mailcraft_engine::print::Fonts;
 use serde_json::{Value, json};
 
@@ -588,6 +588,21 @@ pub fn body(ui: &mut Ui, f: &mut PrintForm, t: &Tokens, acts: &mut Vec<Action>) 
                     if !ok {
                         r.on_hover_text(tl!("Not offered by this printer"));
                     }
+                    ui.end_row();
+                }
+
+                if choosing {
+                    setting(ui, t, tl!("Quality"));
+                    let name = |q: Quality| match q {
+                        Quality::Draft => tl!("Draft"),
+                        Quality::Normal => tl!("Normal"),
+                        Quality::High => tl!("High"),
+                    };
+                    egui::ComboBox::from_id_salt("print-quality").width(140.0).selected_text(name(f.options.quality)).show_ui(ui, |ui| {
+                        for q in Quality::ALL {
+                            ui.selectable_value(&mut f.options.quality, q, name(q));
+                        }
+                    });
                     ui.end_row();
                 }
 

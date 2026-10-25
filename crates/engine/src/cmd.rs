@@ -6,7 +6,7 @@
 
 use mailcraft_mime::{OutAttachment, ReplyMode, mime_from_name, sanitize_filename};
 use mailcraft_model::{
-    AccountConfig, ColorMode, Duplex, Flag, FolderRole, Orientation, PageRange, Paper, PrintOptions, Scale, Security, ServerConfig,
+    AccountConfig, ColorMode, Duplex, Flag, FolderRole, Orientation, PageRange, Paper, PrintOptions, Quality, Scale, Security, ServerConfig,
 };
 use serde_json::{Value, json};
 
@@ -226,7 +226,7 @@ pub fn registry() -> Registry {
             .params(r#"{"path": string, "paper"?: "a4"|"letter"|"legal"|"a3"|"a5", "orientation"?: "portrait"|"landscape", "scale"?: "fit"|number (25–400), "pages"?: string ("1-3, 5"), "headers"?: bool, "remember"?: bool (keep the paper, orientation, scale and header as the dialog's)}"#)
             .when(has_reading),
         CommandSpec::new("message.print", "Print", "File › Print", print_message)
-            .params(r#"{"printer"?: string (default: the system's), "copies"?: number (1–99), "collate"?: bool, "orientation"?: "portrait"|"landscape", "duplex"?: "off"|"long"|"short", "color"?: "color"|"mono", "paper"?: "a4"|"letter"|"legal"|"a3"|"a5", "scale"?: "fit"|number (25–400), "pages"?: string ("1-3, 5"), "headers"?: bool, "remember"?: bool (keep these as the dialog's settings)}"#)
+            .params(r#"{"printer"?: string (default: the system's), "copies"?: number (1–99), "collate"?: bool, "orientation"?: "portrait"|"landscape", "duplex"?: "off"|"long"|"short", "color"?: "color"|"mono", "quality"?: "draft"|"normal"|"high", "paper"?: "a4"|"letter"|"legal"|"a3"|"a5", "scale"?: "fit"|number (25–400), "pages"?: string ("1-3, 5"), "headers"?: bool, "remember"?: bool (keep these as the dialog's settings)}"#)
             .when(has_reading),
         CommandSpec::new("message.showPictures", "Show pictures", "Reading pane", |s, v| s.show_pictures(p::bool(v, "always").unwrap_or(false)))
             .params(r#"{"always"?: bool}"#)
@@ -1471,6 +1471,13 @@ pub fn print_options(v: &Value) -> Result<PrintOptions, CmdError> {
         Some("mono" | "monochrome" | "blackandwhite" | "bw" | "gray" | "grey") => ColorMode::Monochrome,
         Some(o) => return Err(bad("color", format!("`{o}` is not color or mono"))),
     };
+    let quality = match choice("quality").as_deref() {
+        None => d.quality,
+        Some("draft" | "fast" | "economy") => Quality::Draft,
+        Some("normal" | "standard") => Quality::Normal,
+        Some("high" | "best") => Quality::High,
+        Some(o) => return Err(bad("quality", format!("`{o}` is not draft, normal or high"))),
+    };
     let paper = match p::str(v, "paper") {
         None => d.paper,
         Some(t) => Paper::from_code(t)
@@ -1498,6 +1505,7 @@ pub fn print_options(v: &Value) -> Result<PrintOptions, CmdError> {
         orientation,
         duplex,
         color,
+        quality,
         paper,
         scale,
         pages,

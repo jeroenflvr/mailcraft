@@ -9,7 +9,7 @@ mailcraft-cli [--data DIR] <command>
   list [--account ID] [--folder PATH] [--limit N]
   read KEY                       print a message (KEY from `list`)
   print KEY [--printer NAME] [--copies N] [--landscape] [--duplex long|short] [--mono]
-            [--paper a4|letter|legal|a3|a5] [--scale fit|NN] [--pages 1-3,5] [--no-header]
+            [--quality draft|normal|high] [--paper a4|letter|legal|a3|a5] [--scale fit|NN] [--pages 1-3,5] [--no-header]
                                  send a message to a printer (`print --list`: the printers)
   pdf KEY OUT.pdf [--landscape] [--paper …] [--scale fit|NN] [--pages 1-3,5] [--no-header]
                                  save a message as a PDF on that paper

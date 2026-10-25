@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use mailcraft_model::{Capabilities, ColorMode, Duplex, Paper, PrintOptions, Printer, Printing};
+use mailcraft_model::{Capabilities, ColorMode, Duplex, Paper, PrintOptions, Printer, Printing, Quality};
 
 /// The most printers listed, and copies printed.
 const MAX_PRINTERS: usize = 200;
@@ -308,6 +308,10 @@ fn job_options(o: &PrintOptions, copies: u32) -> Vec<String> {
         }
         .to_string(),
     );
+    // Normal is the printer's own setting, left alone.
+    if o.quality != Quality::Normal {
+        option(format!("print-quality={}", o.quality.ipp()));
+    }
     option(format!("media={}", o.paper.code()));
     args
 }
@@ -477,6 +481,10 @@ mod tests {
             ..PrintOptions::default()
         };
         assert_eq!(args_of(&full), "-o collate=false -o sides=two-sided-long-edge -o print-color-mode=monochrome -o media=Letter");
+        let draft = PrintOptions { quality: Quality::Draft, ..Default::default() };
+        assert_eq!(args_of(&draft), "-o sides=one-sided -o print-color-mode=color -o print-quality=3 -o media=A4");
+        let high = PrintOptions { quality: Quality::High, ..Default::default() };
+        assert!(args_of(&high).contains("-o print-quality=5 "), "{}", args_of(&high));
         let short = PrintOptions { copies: 3, duplex: Duplex::ShortEdge, paper: Paper::A5, ..PrintOptions::default() };
         assert_eq!(args_of(&short), "-o collate=true -o sides=two-sided-short-edge -o print-color-mode=color -o media=A5");
     }

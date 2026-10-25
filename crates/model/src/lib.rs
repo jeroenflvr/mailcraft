@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 pub use addr::EmailAddress;
 pub use job::{Connections, Event, Job, Op, SyncStatus};
-pub use printing::{ColorMode, Duplex, Orientation, PageRange, Paper, PrintOptions, Scale};
+pub use printing::{ColorMode, Duplex, Orientation, PageRange, Paper, PrintOptions, Quality, Scale};
 
 /// A printer the system knows.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

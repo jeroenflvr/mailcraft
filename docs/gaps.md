@@ -596,6 +596,10 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   is laid out in it), and the paper size is the PDF's, so no `fit-to-page` is asked for.
 
 ### v0.19.3 — the Print dialog opens at once
+- **Quality:** the dialog has a *Quality* choice (draft, normal, high) next to Color, passed to CUPS
+  as `-o print-quality=3|5` (normal leaves the printer's own setting). `message.print` takes
+  `"quality"`, and `mailcraft-cli print` takes `--quality draft|normal|high`; the choice is
+  remembered with the other printer settings.
 - **Opens at once:** the dialog is drawn in the first frame after Print (about 25 ms on the
   sample mailbox, logged at `debug` as `print: dialog open in … ms`). The printers
   (`list_printers`: `lpstat` only), each printer's capabilities (`capabilities`: one `lpoptions`

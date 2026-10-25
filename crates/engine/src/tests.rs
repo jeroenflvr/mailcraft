@@ -565,12 +565,13 @@ fn print_options_are_parsed_and_remembered() {
     let mut s = sample_session("print-options");
     let k = key_of(&s, "Storyboard review on Thursday");
     s.run("list.open", &k).unwrap();
-    let full = json!({"printer": "P", "copies": 2, "collate": false, "orientation": "Landscape", "duplex": "long-edge", "color": "mono",
+    let full = json!({"printer": "P", "copies": 2, "collate": false, "orientation": "Landscape", "duplex": "long-edge", "color": "mono", "quality": "Draft",
                       "paper": "LETTER", "scale": "75%", "pages": "3, 1-2", "headers": false, "remember": true});
     s.run("message.print", &full).unwrap();
     let o = s.take_print_requests().remove(0).options;
     assert_eq!((o.orientation, o.duplex, o.color, o.paper), (Orientation::Landscape, Duplex::LongEdge, ColorMode::Monochrome, Paper::Letter));
     assert_eq!((o.scale, o.collate, o.headers, o.copies), (Scale::Percent(75), false, false, 2));
+    assert_eq!(o.quality, mailcraft_model::Quality::Draft);
     assert_eq!(o.pages, PageRange::Range(vec![(1, 3)]));
     assert_eq!(s.prefs.print, PrintOptions { pages: PageRange::All, ..o.clone() }, "kept, but not the page list");
     // Not asked to remember: the settings stay.
@@ -591,6 +592,7 @@ fn print_options_are_parsed_and_remembered() {
         json!({"orientation": "sideways"}),
         json!({"duplex": "triple"}),
         json!({"color": "purple"}),
+        json!({"quality": "ultra"}),
     ] {
         assert!(matches!(s.run("message.print", &bad), Err(CmdError::Params(_))), "{bad}");
     }
