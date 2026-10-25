@@ -200,14 +200,14 @@ pub(crate) fn tour() {
             },
             Dialog::OpenSharedCalendar { email: "ana@contoso.example".into(), error: Some("no access".into()) },
             Dialog::AddSharedMailbox { account: "sample".into(), address: "sales@contoso.example".into(), error: Some("already open".into()) },
-            Dialog::print(
-                mailcraft_engine::model::Printing::Choose,
-                Ok(vec![mailcraft_engine::model::Printer { name: "Office_Laser".into(), default: true, ..Default::default() }, plain_printer()]),
-                &Default::default(),
-            ),
-            Dialog::print(mailcraft_engine::model::Printing::Choose, Err("Scheduler is not running.".into()), &Default::default()),
-            Dialog::print(mailcraft_engine::model::Printing::Viewer, Ok(Vec::new()), &Default::default()),
-            Dialog::print(mailcraft_engine::model::Printing::None, Ok(Vec::new()), &Default::default()),
+            print_dialog_with(Some(Ok(vec![
+                mailcraft_engine::model::Printer { name: "Office_Laser".into(), default: true, ..Default::default() },
+                plain_printer(),
+            ]))),
+            print_dialog_with(Some(Err("Scheduler is not running.".into()))),
+            print_dialog_with(None),
+            Dialog::print(mailcraft_engine::model::Printing::Viewer, &Default::default()),
+            Dialog::print(mailcraft_engine::model::Printing::None, &Default::default()),
             Dialog::RemoveAccount { account: "sample".into(), email: "x".into() },
             Dialog::MailboxClosed {
                 account: "sample".into(),
@@ -510,6 +510,15 @@ fn the_week_across_a_change_of_clocks_draws_in_the_right_rows() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The Print dialog as it is while the printers are being asked for (`None`), or once they have come.
+fn print_dialog_with(printers: Option<Result<Vec<mailcraft_engine::model::Printer>, String>>) -> Dialog {
+    let mut d = Dialog::print(mailcraft_engine::model::Printing::Choose, &Default::default());
+    if let (Dialog::Print(f), Some(printers)) = (&mut d, printers) {
+        f.printers_arrived(printers);
+    }
+    d
+}
+
 /// A printer that prints on one side, in black and white, on A4 only.
 fn plain_printer() -> mailcraft_engine::model::Printer {
     mailcraft_engine::model::Printer {
@@ -521,10 +530,12 @@ fn plain_printer() -> mailcraft_engine::model::Printer {
     }
 }
 
+type Jobs = std::sync::Arc<std::sync::Mutex<Vec<(mailcraft_engine::model::PrintOptions, Vec<u8>)>>>;
+
 /// Services with a print system that records what it is given.
 #[derive(Default)]
 struct Printing {
-    jobs: std::rc::Rc<std::cell::RefCell<Vec<(mailcraft_engine::model::PrintOptions, Vec<u8>)>>>,
+    jobs: Jobs,
     fail: bool,
 }
 
@@ -544,15 +555,21 @@ impl crate::Services for Printing {
     fn printing(&self) -> mailcraft_engine::model::Printing {
         mailcraft_engine::model::Printing::Choose
     }
-    fn printers(&mut self) -> Result<Vec<mailcraft_engine::model::Printer>, String> {
-        Ok(vec![plain_printer(), mailcraft_engine::model::Printer { name: "Office_Laser".into(), default: true, ..Default::default() }])
+    fn printers(&mut self) -> crate::Printers {
+        crate::Printers::Ready(Ok(vec![
+            plain_printer(),
+            mailcraft_engine::model::Printer { name: "Office_Laser".into(), default: true, ..Default::default() },
+        ]))
     }
-    fn print_pdf(&mut self, options: &mailcraft_engine::model::PrintOptions, pdf: &[u8]) -> Result<(), String> {
-        if self.fail {
-            return Err("The printer or class does not exist.".into());
-        }
-        self.jobs.borrow_mut().push((options.clone(), pdf.to_vec()));
-        Ok(())
+    fn print_sender(&self) -> crate::PrintSender {
+        let (jobs, fail) = (self.jobs.clone(), self.fail);
+        std::sync::Arc::new(move |options, pdf| {
+            if fail {
+                return Err("The printer or class does not exist.".into());
+            }
+            jobs.lock().unwrap().push((options.clone(), pdf.to_vec()));
+            Ok(())
+        })
     }
 }
 
@@ -575,12 +592,13 @@ fn printing_goes_through_the_print_system() {
 
     a.act(crate::Action::Print);
     let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no print dialog: {:?}", a.ui.dialog) };
-    assert_eq!((f.printers.len(), f.options.printer.as_deref(), f.options.copies), (2, Some("Office_Laser"), 1), "the default is picked");
+    assert!(matches!(&f.printers, crate::print_dialog::PrinterList::Ready(p) if p.len() == 2));
+    assert_eq!((f.options.printer.as_deref(), f.options.copies), (Some("Office_Laser"), 1), "the default is picked");
     frame(&ctx, &mut a, vec![]);
     a.act(crate::Action::Submit("message.print", json!({"printer": "Label_Maker", "copies": 2})));
     assert!(a.ui.dialog.is_none());
     {
-        let sent = jobs.borrow();
+        let sent = jobs.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert_eq!((sent[0].0.printer.as_deref(), sent[0].0.copies), (Some("Label_Maker"), 2));
         assert!(sent[0].1.starts_with(b"%PDF-") && sent[0].1.ends_with(b"%%EOF\n"));
@@ -588,7 +606,9 @@ fn printing_goes_through_the_print_system() {
     assert!(a.session.notices.last().is_some_and(|n| !n.error && n.text.contains("Label_Maker")), "{:?}", a.session.notices.last());
 
     a.act(crate::Action::QuickPrint);
-    assert_eq!((jobs.borrow().len(), jobs.borrow()[1].0.printer.clone(), jobs.borrow()[1].0.copies), (2, None, 1), "the default printer, once");
+    let sent = jobs.lock().unwrap();
+    assert_eq!((sent.len(), sent[1].0.printer.clone(), sent[1].0.copies), (2, None, 1), "the default printer, once");
+    drop(sent);
 
     // A refusal is said, not lost.
     let mut failing =
@@ -661,7 +681,7 @@ fn the_print_dialog_sends_what_was_chosen() {
     frame(&ctx, &mut a, vec![key(Key::Enter, Modifiers::NONE)]);
     assert!(a.ui.dialog.is_none(), "Enter prints and closes");
     {
-        let sent = jobs.borrow();
+        let sent = jobs.lock().unwrap();
         assert_eq!(sent.len(), 1);
         let o = &sent[0].0;
         assert_eq!(
@@ -682,7 +702,7 @@ fn the_print_dialog_sends_what_was_chosen() {
     frame(&ctx, &mut a, vec![]);
     frame(&ctx, &mut a, vec![key(Key::Enter, Modifiers::NONE)]);
     assert!(matches!(a.ui.dialog, Some(Dialog::Print(_))), "still open");
-    assert_eq!(jobs.borrow().len(), 1, "nothing was sent");
+    assert_eq!(jobs.lock().unwrap().len(), 1, "nothing was sent");
     // Past the end of a message of a page or two: the same.
     if let Some(Dialog::Print(f)) = a.ui.dialog.as_mut() {
         f.range_text = "40".into();
@@ -691,7 +711,7 @@ fn the_print_dialog_sends_what_was_chosen() {
         frame(&ctx, &mut a, vec![]);
     }
     frame(&ctx, &mut a, vec![key(Key::Enter, Modifiers::NONE)]);
-    assert!(matches!(a.ui.dialog, Some(Dialog::Print(_))) && jobs.borrow().len() == 1);
+    assert!(matches!(a.ui.dialog, Some(Dialog::Print(_))) && jobs.lock().unwrap().len() == 1);
     // A good list prints just those pages.
     if let Some(Dialog::Print(f)) = a.ui.dialog.as_mut() {
         f.range_text = "1".into();
@@ -699,7 +719,7 @@ fn the_print_dialog_sends_what_was_chosen() {
     frame(&ctx, &mut a, vec![]);
     frame(&ctx, &mut a, vec![key(Key::Enter, Modifiers::NONE)]);
     assert!(a.ui.dialog.is_none());
-    assert_eq!(jobs.borrow()[1].0.pages, PageRange::Range(vec![(1, 1)]));
+    assert_eq!(jobs.lock().unwrap()[1].0.pages, PageRange::Range(vec![(1, 1)]));
     assert_eq!(a.session.prefs.print.pages, PageRange::All, "the page list isn't kept");
 
     // A printer without both sides or color: those are left off, however the dialog was left.
@@ -717,12 +737,248 @@ fn the_print_dialog_sends_what_was_chosen() {
     frame(&ctx, &mut a, vec![]);
     frame(&ctx, &mut a, vec![key(Key::Escape, Modifiers::NONE)]);
     assert!(a.ui.dialog.is_none(), "Escape cancels");
-    assert_eq!(jobs.borrow().len(), 2);
+    assert_eq!(jobs.lock().unwrap().len(), 2);
     // A printer that has gone away isn't kept: the default is used.
     a.session.prefs.print.printer = Some("Gone".into());
     a.act(crate::Action::Print);
     let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
     assert_eq!(f.options.printer.as_deref(), Some("Office_Laser"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+type Work = std::sync::Arc<std::sync::Mutex<Vec<(&'static str, Box<dyn FnOnce() + Send>)>>>;
+
+/// A print system that answers when the test says so: the printers and each one's capabilities
+/// stay pending until released, and the work handed to `spawn` waits in a queue until it is run.
+#[derive(Default)]
+struct SlowPrinting {
+    jobs: Jobs,
+    queue: Work,
+    printers: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    capabilities: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SlowPrinting {
+    /// The handles a test keeps after the services are given to the app.
+    #[allow(clippy::type_complexity)]
+    fn handles(&self) -> (Jobs, Work, std::sync::Arc<std::sync::atomic::AtomicBool>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        (self.jobs.clone(), self.queue.clone(), self.printers.clone(), self.capabilities.clone())
+    }
+}
+
+impl crate::Services for SlowPrinting {
+    fn clock(&self) -> (i64, i32) {
+        (NOW, 0)
+    }
+    fn pick_files(&mut self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    fn save_path(&mut self, _: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+    fn open_path(&mut self, _: &std::path::Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn printing(&self) -> mailcraft_engine::model::Printing {
+        mailcraft_engine::model::Printing::Choose
+    }
+    fn printers(&mut self) -> crate::Printers {
+        use std::sync::atomic::Ordering;
+        if !self.printers.load(Ordering::SeqCst) {
+            return crate::Printers::Pending;
+        }
+        let plain = mailcraft_engine::model::Printer { name: "Label_Maker".into(), ..Default::default() };
+        crate::Printers::Ready(Ok(vec![plain, mailcraft_engine::model::Printer { name: "Office_Laser".into(), default: true, ..Default::default() }]))
+    }
+    fn printer_capabilities(&mut self, name: &str) -> crate::PrinterCaps {
+        use std::sync::atomic::Ordering;
+        if !self.capabilities.load(Ordering::SeqCst) {
+            return crate::PrinterCaps::Pending;
+        }
+        match name {
+            "Label_Maker" => {
+                let p = plain_printer();
+                crate::PrinterCaps::Known(mailcraft_engine::model::Capabilities { duplex: p.duplex, color: p.color, papers: p.papers })
+            }
+            _ => crate::PrinterCaps::Unknown,
+        }
+    }
+    fn spawn(&mut self, name: &'static str, work: Box<dyn FnOnce() + Send + 'static>) {
+        self.queue.lock().unwrap().push((name, work));
+    }
+    fn print_sender(&self) -> crate::PrintSender {
+        let jobs = self.jobs.clone();
+        std::sync::Arc::new(move |options, pdf| {
+            jobs.lock().unwrap().push((options.clone(), pdf.to_vec()));
+            Ok(())
+        })
+    }
+}
+
+/// Run what has been handed to `spawn` (and say how many were preview jobs).
+fn run_queued(queue: &Work) -> usize {
+    let work: Vec<_> = std::mem::take(&mut *queue.lock().unwrap());
+    let previews = work.iter().filter(|(n, _)| *n == "print-preview").count();
+    for (_, w) in work {
+        w();
+    }
+    previews
+}
+
+fn queued(queue: &Work, name: &str) -> usize {
+    queue.lock().unwrap().iter().filter(|(n, _)| *n == name).count()
+}
+
+/// A frame at a given time (egui's clock is what the debounce reads).
+fn frame_at(ctx: &egui::Context, app: &mut MailApp, time: f64) {
+    let input = RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+        time: Some(time),
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+    out.textures_delta.clear();
+}
+
+fn slow_app(name: &str) -> (MailApp, SlowPrinting, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("mailcraft-ui-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    sample::seed_if_empty(&store, NOW).unwrap();
+    let s = Session::open(Some(store), Clock::new(NOW, 0));
+    let services = SlowPrinting::default();
+    let handles = SlowPrinting {
+        jobs: services.jobs.clone(),
+        queue: services.queue.clone(),
+        printers: services.printers.clone(),
+        capabilities: services.capabilities.clone(),
+    };
+    let mut a = MailApp::new(s, Box::new(NullBackend), Box::new(services));
+    let key = a.session.list.iter().find(|m| m.subject.contains("Storyboard review")).map(|m| m.key.clone()).unwrap();
+    a.session.open_message(&key);
+    (a, handles, dir)
+}
+
+/// Print puts the dialog up at once. The printers, then what the chosen one can do, come later,
+/// and what the user changed meanwhile is kept.
+#[test]
+fn the_print_dialog_opens_before_the_system_answers() {
+    use crate::print_dialog::PrinterList;
+    use mailcraft_engine::model::{ColorMode, Duplex, Paper, PrintOptions};
+    use std::sync::atomic::Ordering;
+    let (mut a, slow, dir) = slow_app("print-opens");
+    let (jobs, _queue, printers, capabilities) = slow.handles();
+    let ctx = egui::Context::default();
+    frame(&ctx, &mut a, vec![]);
+    a.session.prefs.print = PrintOptions {
+        printer: Some("Label_Maker".into()),
+        duplex: Duplex::ShortEdge,
+        color: ColorMode::Color,
+        paper: Paper::A3,
+        ..Default::default()
+    };
+    a.act(crate::Action::Print);
+    frame(&ctx, &mut a, vec![]);
+    let Some(Dialog::Print(f)) = a.ui.dialog.as_mut() else { panic!("the dialog is up after one frame") };
+    assert_eq!(f.printers, PrinterList::Loading);
+    assert!(f.loading() && f.unprobed().is_empty());
+    // The user gets on with it: the settings change, but Print has nowhere to send yet.
+    f.options.copies = 4;
+    frame(&ctx, &mut a, vec![key(Key::Enter, Modifiers::NONE)]);
+    assert!(matches!(a.ui.dialog, Some(Dialog::Print(_))), "Enter has nothing to print to yet");
+    assert!(jobs.lock().unwrap().is_empty());
+
+    // The printers are listed: the saved one is chosen, and the copies stay.
+    printers.store(true, Ordering::SeqCst);
+    frame(&ctx, &mut a, vec![]);
+    let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
+    assert!(matches!(&f.printers, PrinterList::Ready(p) if p.len() == 2));
+    assert_eq!((f.options.printer.as_deref(), f.options.copies), (Some("Label_Maker"), 4));
+    assert_eq!(
+        (f.options.duplex, f.options.color, f.options.paper),
+        (Duplex::ShortEdge, ColorMode::Color, Paper::A3),
+        "nothing is known about it yet"
+    );
+    assert_eq!(f.unprobed().len(), 2);
+
+    // What the printer can do: what it lacks is left off.
+    capabilities.store(true, Ordering::SeqCst);
+    frame(&ctx, &mut a, vec![]);
+    let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
+    assert!(f.unprobed().is_empty());
+    assert_eq!((f.options.duplex, f.options.color, f.options.paper), (Duplex::Off, ColorMode::Monochrome, Paper::A4));
+    assert_eq!(f.options.copies, 4);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The page is drawn on another thread, one job at a time, however much the settings change.
+#[test]
+fn the_preview_is_drawn_off_the_ui_thread() {
+    use mailcraft_engine::model::Orientation;
+    let (mut a, slow, dir) = slow_app("print-preview-thread");
+    let (_jobs, queue, printers, capabilities) = slow.handles();
+    printers.store(true, std::sync::atomic::Ordering::SeqCst);
+    capabilities.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ctx = egui::Context::default();
+    frame_at(&ctx, &mut a, 0.0);
+    a.act(crate::Action::Print);
+    for t in [0.1, 0.2, 0.3] {
+        frame_at(&ctx, &mut a, t);
+    }
+    let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
+    assert!(!f.preview.drawn());
+    assert_eq!(queued(&queue, "print-preview"), 1, "one job, started at once");
+    let set = |a: &mut MailApp, o: Orientation| {
+        if let Some(Dialog::Print(f)) = a.ui.dialog.as_mut() {
+            f.options.orientation = o;
+        }
+    };
+    set(&mut a, Orientation::Landscape);
+    frame_at(&ctx, &mut a, 1.0);
+    set(&mut a, Orientation::Portrait);
+    frame_at(&ctx, &mut a, 1.5);
+    set(&mut a, Orientation::Landscape);
+    for t in [2.0, 2.5, 3.0] {
+        frame_at(&ctx, &mut a, t);
+    }
+    assert_eq!(queued(&queue, "print-preview"), 1, "still the one in flight");
+    // It lands; the newer wish is then started, and only that.
+    assert_eq!(run_queued(&queue), 1);
+    frame_at(&ctx, &mut a, 3.5);
+    let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
+    assert!(f.preview.drawn() && f.preview.total.is_some());
+    assert_eq!(queued(&queue, "print-preview"), 1, "one more, for the new orientation");
+    run_queued(&queue);
+    for t in [4.0, 4.5] {
+        frame_at(&ctx, &mut a, t);
+    }
+    assert_eq!(queued(&queue, "print-preview"), 0, "nothing is left to draw");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Print closes the dialog at once; the message is laid out and sent on another thread, and the
+/// answer is said when it comes.
+#[test]
+fn printing_finishes_in_the_background() {
+    let (mut a, slow, dir) = slow_app("print-background");
+    let (jobs, queue, printers, capabilities) = slow.handles();
+    printers.store(true, std::sync::atomic::Ordering::SeqCst);
+    capabilities.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ctx = egui::Context::default();
+    frame_at(&ctx, &mut a, 0.0);
+    a.act(crate::Action::Print);
+    frame_at(&ctx, &mut a, 0.1);
+    let before = a.session.notices.len();
+    a.act(crate::Action::Submit("message.print", json!({"printer": "Label_Maker", "copies": 1})));
+    assert!(a.ui.dialog.is_none());
+    assert_eq!(queued(&queue, "print-send"), 1);
+    frame_at(&ctx, &mut a, 0.2);
+    assert_eq!(a.session.notices.len(), before, "nothing is said yet");
+    assert!(jobs.lock().unwrap().is_empty());
+    run_queued(&queue);
+    frame_at(&ctx, &mut a, 0.3);
+    assert!(a.session.notices.last().is_some_and(|n| !n.error && n.text.contains("Sent to Label_Maker")), "{:?}", a.session.notices.last());
+    assert_eq!(jobs.lock().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
 

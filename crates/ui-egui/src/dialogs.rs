@@ -807,13 +807,9 @@ impl Dialog {
         Dialog::MoveTo { filter: String::new() }
     }
 
-    /// Print: the printers the system listed (or why it couldn't), and the settings last used.
-    pub fn print(
-        printing: mailcraft_engine::model::Printing,
-        printers: Result<Vec<mailcraft_engine::model::Printer>, String>,
-        saved: &mailcraft_engine::model::PrintOptions,
-    ) -> Dialog {
-        Dialog::Print(Box::new(crate::print_dialog::PrintForm::new(printing, printers, saved)))
+    /// Print: the settings last used. The printers arrive later ([`MailApp`] asks the system).
+    pub fn print(printing: mailcraft_engine::model::Printing, saved: &mailcraft_engine::model::PrintOptions) -> Dialog {
+        Dialog::Print(Box::new(crate::print_dialog::PrintForm::new(printing, saved)))
     }
 
     /// A new event (at a time, or the next hour).

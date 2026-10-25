@@ -903,6 +903,8 @@ month	May	5月
 	Long edge	長辺とじ
 	No preview	プレビューなし
 	Not offered by this printer	このプリンターでは使えません
+	Looking for printers…	プリンターを探しています…
+	Asking the printer…	プリンターに問い合わせています…
 	Orientation	印刷の向き
 	Page setup	ページ設定
 	Page {page} of {total}	{page} / {total} ページ

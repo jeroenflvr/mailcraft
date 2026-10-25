@@ -2,11 +2,16 @@
 //! on the right. Where nothing prints from the app (the browser) it is a page setup for Save as
 //! PDF: orientation, paper, scale, pages and the header.
 //!
-//! The dialog only asks. The preview is rendered by the app ([`Action::PrintPreview`]) once the
-//! settings have rested for a moment, and the answer is handed back with [`Preview::finish`].
+//! The dialog only asks, and is drawn at once with whatever is known. The printers, what the
+//! chosen one can do, the fonts and the preview come in later, each on its own, and a spinner
+//! shows where they will be. The preview is rendered by the app ([`Action::PrintPreview`], on
+//! another thread) once the settings have rested for a moment, and the answer is left in a slot
+//! that [`Preview::update`] picks up.
+
+use std::sync::{Arc, Mutex, PoisonError};
 
 use egui::{Align2, Rect, RichText, Sense, Ui, vec2};
-use mailcraft_engine::model::{ColorMode, Duplex, Orientation, PageRange, Paper, PrintOptions, Printer, Printing, Scale};
+use mailcraft_engine::model::{Capabilities, ColorMode, Duplex, Orientation, PageRange, Paper, PrintOptions, Printer, Printing, Scale};
 use mailcraft_engine::print::Fonts;
 use serde_json::{Value, json};
 
@@ -45,9 +50,20 @@ impl PreviewKey {
     }
 }
 
+/// What a preview job leaves behind: the settings it drew, the fonts it found (if it had to look),
+/// and the page as a picture with the page count and the number of the page shown.
+pub(crate) type PreviewResult = (PreviewKey, Option<Fonts>, Result<(egui::ColorImage, usize, usize), String>);
+
+/// Where a preview job leaves its answer.
+pub(crate) type PreviewSlot = Arc<Mutex<Option<PreviewResult>>>;
+
 /// The page as it will print: asked for after the settings rest, shown when the app has drawn it.
 #[derive(Clone, Default)]
 pub struct Preview {
+    /// The preview being drawn on another thread (one at a time).
+    in_flight: Option<PreviewSlot>,
+    /// The fonts it is drawn with, asked of the platform once.
+    pub(crate) fonts: Option<Fonts>,
     wanted: Option<PreviewKey>,
     requested: Option<PreviewKey>,
     shown: Option<PreviewKey>,
@@ -87,17 +103,37 @@ impl Preview {
         }
     }
 
-    /// Ask for a new picture when the settings changed and have rested (the first one at once).
+    /// A picture is being drawn, answered in `slot`.
+    pub(crate) fn started(&mut self, slot: PreviewSlot) {
+        self.in_flight = Some(slot);
+    }
+
+    /// Ask for a new picture when the settings changed and have rested (the first one started at
+    /// once), and take the one that has been drawn.
     fn update(&mut self, ctx: &egui::Context, key: PreviewKey, options: &PrintOptions, acts: &mut Vec<Action>) {
         let now = ctx.input(|i| i.time);
         if self.wanted.as_ref() != Some(&key) {
             self.wanted = Some(key);
             self.changed_at = now;
         }
+        if let Some(slot) = &self.in_flight {
+            let answer = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+            match answer {
+                Some((key, fonts, result)) => {
+                    self.in_flight = None;
+                    if fonts.is_some() {
+                        self.fonts = fonts;
+                    }
+                    self.finish(key, result);
+                }
+                None => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+            }
+        }
         if let Some(image) = self.fresh.take() {
             self.texture = Some(ctx.load_texture("print-preview", image, egui::TextureOptions::LINEAR));
         }
-        if self.shown != self.wanted && self.requested != self.wanted {
+        // One at a time: a newer wish waits for the one being drawn.
+        if self.shown != self.wanted && self.requested != self.wanted && self.in_flight.is_none() {
             if self.shown.is_none() || now - self.changed_at >= PREVIEW_AFTER {
                 self.requested = self.wanted.clone();
                 acts.push(Action::PrintPreview(Box::new(options.clone())));
@@ -136,12 +172,24 @@ enum Problem {
     Past(usize),
 }
 
+/// The system's printers, as far as the dialog knows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrinterList {
+    /// Being asked.
+    Loading,
+    Ready(Vec<Printer>),
+    /// Why they couldn't be listed (no print system, its scheduler isn't running).
+    Failed(String),
+}
+
 #[derive(Clone, Debug)]
 pub struct PrintForm {
     pub printing: Printing,
-    pub printers: Vec<Printer>,
-    /// Why the printers couldn't be listed (no print system, its scheduler isn't running).
-    pub why: Option<String>,
+    pub printers: PrinterList,
+    /// The printers whose capabilities have been answered (or given up on).
+    probed: Vec<String>,
+    /// The time the dialog was asked for, until its first frame has been timed.
+    pub(crate) opened_at: Option<f64>,
     /// What the dialog has chosen; the printer is the chosen one's name.
     pub options: PrintOptions,
     pub(crate) range_all: bool,
@@ -149,8 +197,6 @@ pub struct PrintForm {
     scale: ScaleKind,
     custom: u16,
     pub(crate) preview: Preview,
-    /// The fonts the preview is drawn with, asked of the platform once.
-    pub(crate) fonts: Option<Fonts>,
     /// What the print command said was wrong.
     pub error: Option<String>,
 }
@@ -190,41 +236,102 @@ impl ScaleKind {
 }
 
 impl PrintForm {
-    /// The dialog as it opens: the printers the system listed (or why it couldn't), and the last
-    /// settings, with the printer they used if it is still there, else the default.
-    pub fn new(printing: Printing, printers: Result<Vec<Printer>, String>, saved: &PrintOptions) -> PrintForm {
-        let (printers, why) = match printers {
-            Ok(p) => (p, None),
-            Err(e) => (Vec::new(), Some(e)),
-        };
+    /// The dialog as it opens: the last settings, and the printers still to come
+    /// ([`PrintForm::printers_arrived`]). The printer they used is kept as the one to choose.
+    pub fn new(printing: Printing, saved: &PrintOptions) -> PrintForm {
         let mut options = PrintOptions { pages: PageRange::All, ..saved.clone() }.normalized();
-        options.printer = if printing == Printing::Choose {
-            let by_name = options.printer.as_ref().and_then(|n| printers.iter().find(|p| &p.name == n));
-            by_name.or_else(|| printers.iter().find(|p| p.default)).or_else(|| printers.first()).map(|p| p.name.clone())
-        } else {
-            None
-        };
+        if printing != Printing::Choose {
+            options.printer = None;
+        }
         let (scale, custom) = ScaleKind::of(options.scale);
-        let mut form = PrintForm {
+        PrintForm {
             printing,
-            printers,
-            why,
+            printers: if printing == Printing::Choose { PrinterList::Loading } else { PrinterList::Ready(Vec::new()) },
+            probed: Vec::new(),
+            opened_at: None,
             options,
             range_all: true,
             range_text: String::new(),
             scale,
             custom,
             preview: Preview::default(),
-            fonts: None,
             error: None,
-        };
-        form.fit_to_printer();
-        form
+        }
+    }
+
+    /// The printers listed, if they have been.
+    fn list(&self) -> &[Printer] {
+        match &self.printers {
+            PrinterList::Ready(p) => p,
+            _ => &[],
+        }
+    }
+
+    /// Whether the printers are still being asked for.
+    pub fn loading(&self) -> bool {
+        self.printers == PrinterList::Loading
+    }
+
+    /// The printers whose capabilities are still to come.
+    pub fn unprobed(&self) -> Vec<String> {
+        self.list().iter().filter(|p| !self.probed.contains(&p.name)).map(|p| p.name.clone()).collect()
+    }
+
+    /// Whether the chosen printer is still being asked what it can do.
+    fn asking(&self) -> bool {
+        self.options.printer.as_ref().is_some_and(|n| self.list().iter().any(|p| &p.name == n) && !self.probed.contains(n))
+    }
+
+    /// The system's answer about its printers: the one the dialog already has (the last used, or
+    /// chosen since) if it is still there, else the default, else the first. Nothing else the user
+    /// set is touched. The same answer again changes nothing.
+    pub fn printers_arrived(&mut self, result: Result<Vec<Printer>, String>) {
+        match result {
+            Ok(mut list) => {
+                if let PrinterList::Ready(old) = &self.printers {
+                    let same = |a: &Printer, b: &Printer| a.name == b.name && a.default == b.default;
+                    if old.len() == list.len() && old.iter().zip(&list).all(|(a, b)| same(a, b)) {
+                        return;
+                    }
+                    for p in &mut list {
+                        if let Some(o) = old.iter().find(|o| o.name == p.name) {
+                            (p.duplex, p.color, p.papers) = (o.duplex, o.color, o.papers.clone());
+                        }
+                    }
+                }
+                self.probed.retain(|n| list.iter().any(|p| &p.name == n));
+                let by_name = self.options.printer.as_ref().and_then(|n| list.iter().find(|p| &p.name == n));
+                self.options.printer = by_name.or_else(|| list.iter().find(|p| p.default)).or_else(|| list.first()).map(|p| p.name.clone());
+                self.printers = PrinterList::Ready(list);
+                self.fit_to_printer();
+            }
+            Err(e) => {
+                if self.printers != PrinterList::Failed(e.clone()) {
+                    self.options.printer = None;
+                    self.printers = PrinterList::Failed(e);
+                }
+            }
+        }
+    }
+
+    /// The system's answer about one printer (`None`: it couldn't be asked, so all is offered).
+    pub fn capabilities_arrived(&mut self, name: &str, caps: Option<Capabilities>) {
+        if !self.probed.iter().any(|n| n == name) {
+            self.probed.push(name.to_string());
+        }
+        if let (Some(caps), PrinterList::Ready(list)) = (caps, &mut self.printers)
+            && let Some(p) = list.iter_mut().find(|p| p.name == name)
+        {
+            p.learn(caps);
+        }
+        if self.options.printer.as_deref() == Some(name) {
+            self.fit_to_printer();
+        }
     }
 
     fn printer(&self) -> Option<&Printer> {
         let name = self.options.printer.as_ref()?;
-        self.printers.iter().find(|p| &p.name == name)
+        self.list().iter().find(|p| &p.name == name)
     }
 
     pub(crate) fn can_duplex(&self) -> bool {
@@ -328,8 +435,10 @@ pub fn body(ui: &mut Ui, f: &mut PrintForm, t: &Tokens, acts: &mut Vec<Action>) 
     } else {
         dialogs::title(ui, t, "Print");
     }
-    // Without printers nothing can be sent; the PDF is still offered.
-    let can = !choosing || !f.printers.is_empty();
+    // Until the printers are listed, and without any, nothing can be sent; the PDF is still offered.
+    let loading = choosing && f.loading();
+    let no_printers = choosing && !loading && f.list().is_empty();
+    let can = !choosing || !f.list().is_empty();
 
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
@@ -340,9 +449,9 @@ pub fn body(ui: &mut Ui, f: &mut PrintForm, t: &Tokens, acts: &mut Vec<Action>) 
                     note(ui, t, tl!("The PDF app's print dialog decides the rest, such as both sides and color."));
                     ui.add_space(6.0);
                 }
-                Printing::Choose if f.printers.is_empty() => {
+                Printing::Choose if no_printers => {
                     note(ui, t, tl!("No printers were found. Open the message as a PDF and print it from the viewer."));
-                    if let Some(w) = &f.why {
+                    if let PrinterList::Failed(w) = &f.printers {
                         ui.add_space(4.0);
                         ui.label(RichText::new(w.as_str()).color(t.danger).small());
                     }
@@ -351,16 +460,24 @@ pub fn body(ui: &mut Ui, f: &mut PrintForm, t: &Tokens, acts: &mut Vec<Action>) 
                 _ => {}
             }
             egui::Grid::new("print-settings").num_columns(2).spacing(vec2(12.0, 9.0)).show(ui, |ui| {
-                if choosing && can {
+                if loading {
+                    setting(ui, t, tl!("Printer"));
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.label(RichText::new(tl!("Looking for printers…")).color(t.dim).small());
+                    });
+                    ui.end_row();
+                } else if choosing && can {
                     setting(ui, t, tl!("Printer"));
                     let selected = f.options.printer.clone().unwrap_or_default();
-                    let label = match f.printers.iter().find(|p| p.name == selected) {
+                    let label = match f.list().iter().find(|p| p.name == selected) {
                         Some(p) if p.default => tf!("{name} (default)", name = p.name),
                         _ => selected,
                     };
                     let before = f.options.printer.clone();
+                    let list = f.list().to_vec();
                     egui::ComboBox::from_id_salt("print-printer").width(240.0).selected_text(label).show_ui(ui, |ui| {
-                        for p in &f.printers {
+                        for p in &list {
                             let text = if p.default { tf!("{name} (default)", name = p.name) } else { p.name.clone() };
                             ui.selectable_value(&mut f.options.printer, Some(p.name.clone()), text);
                         }
@@ -481,6 +598,13 @@ pub fn body(ui: &mut Ui, f: &mut PrintForm, t: &Tokens, acts: &mut Vec<Action>) 
                 });
                 ui.end_row();
             });
+            if choosing && f.asking() {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(12.0));
+                    ui.label(RichText::new(tl!("Asking the printer…")).color(t.dim).small());
+                });
+            }
             ui.add_space(8.0);
             ui.checkbox(&mut f.options.headers, tl!("Print the message header"));
         });
@@ -533,7 +657,7 @@ pub fn body(ui: &mut Ui, f: &mut PrintForm, t: &Tokens, acts: &mut Vec<Action>) 
     ui.add_space(6.0);
     let chosen = f.chosen();
     let mut as_pdf = false;
-    if choosing && !can {
+    if no_printers {
         as_pdf = ui.link(tl!("Open as a PDF instead")).clicked();
     } else if !saving {
         as_pdf = ui.link(tl!("Save as PDF instead")).clicked();
@@ -542,12 +666,15 @@ pub fn body(ui: &mut Ui, f: &mut PrintForm, t: &Tokens, acts: &mut Vec<Action>) 
     let (ok, cancel) = if saving { dialogs::buttons(ui, t, "Save as PDF", ok_enabled) } else { dialogs::buttons(ui, t, "Print", ok_enabled && can) };
 
     if as_pdf {
-        if choosing && !can {
+        if no_printers {
             acts.push(Action::OpenAsPdf);
         } else {
             acts.push(Action::SavePdf(Box::new(PrintForm::params(&f.for_preview(), true))));
         }
         return false;
+    }
+    if let Some(opened) = f.opened_at.take() {
+        log::debug!("print: dialog open in {:.0} ms", (ui.input(|i| i.time) - opened).max(0.0) * 1000.0);
     }
     if (ok || enter)
         && ok_enabled

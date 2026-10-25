@@ -22,7 +22,7 @@ use mailcraft_engine::model::dates::Clock;
 use mailcraft_engine::model::{AccountConfig, Event, Job};
 use mailcraft_engine::store::{Store, location};
 use mailcraft_net::worker::{Credentials, Pool};
-use mailcraft_ui_egui::{Backend, MailApp, Services, VideoFrame};
+use mailcraft_ui_egui::{Backend, MailApp, PrinterCaps, Printers, Services, VideoFrame};
 
 /// Passwords in the system keychain (Windows Credential Manager, macOS Keychain, Secret Service).
 struct Keychain;
@@ -65,12 +65,29 @@ impl Backend for PoolBackend {
     }
 }
 
+/// What the print system has said so far. The last answer stays until a newer one replaces it.
+#[derive(Default)]
+struct PrinterCache {
+    /// The listing, once made.
+    list: Option<Result<Vec<mailcraft_engine::model::Printer>, String>>,
+    /// What each printer can do, once asked (`None`: it couldn't be).
+    caps: std::collections::HashMap<String, Option<mailcraft_engine::model::Capabilities>>,
+    /// A thread is asking.
+    running: bool,
+}
+
+fn printer_cache(cache: &std::sync::Mutex<PrinterCache>) -> std::sync::MutexGuard<'_, PrinterCache> {
+    cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[derive(Default)]
 struct Desktop {
     /// Where video frames come from (looked up once).
     frame_source: Option<Option<video::Source>>,
     /// Video frames being made or made, by file.
     frames: std::collections::HashMap<PathBuf, Arc<std::sync::Mutex<Option<VideoFrame>>>>,
+    /// The system's printers and what each can do, found on a thread of their own.
+    printers: Arc<std::sync::Mutex<PrinterCache>>,
     /// The data files' folder in use, and the app folder whose data files can be moved (`None`
     /// when the place was chosen at start: `--data`, `--sample`, `MAILCRAFT_DATA`).
     data: Option<PathBuf>,
@@ -87,17 +104,85 @@ impl Services for Desktop {
     fn local_zone(&self) -> mailcraft_engine::model::dates::Zone {
         mailcraft_net::tz::local_zone()
     }
-    fn print_fonts(&mut self, text: &str) -> mailcraft_engine::print::Fonts {
-        mailcraft_net::fonts::print_fonts(text)
+    fn print_font_finder(&self) -> mailcraft_ui_egui::FontFinder {
+        Arc::new(mailcraft_net::fonts::print_fonts)
+    }
+    fn spawn(&mut self, name: &'static str, work: Box<dyn FnOnce() + Send + 'static>) {
+        // The work is handed back when no thread can be had, so it is never lost.
+        let work = Arc::new(std::sync::Mutex::new(Some(work)));
+        let handed = work.clone();
+        let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
+            if let Some(w) = handed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+                w();
+            }
+        });
+        if spawned.is_err()
+            && let Some(w) = work.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+        {
+            w();
+        }
     }
     fn printing(&self) -> mailcraft_engine::model::Printing {
         mailcraft_net::print::printing()
     }
-    fn printers(&mut self) -> Result<Vec<mailcraft_engine::model::Printer>, String> {
-        mailcraft_net::print::printers()
+    fn printers(&mut self) -> Printers {
+        let known = printer_cache(&self.printers).list.clone();
+        match known {
+            Some(list) => Printers::Ready(list),
+            None => {
+                self.refresh_printers();
+                Printers::Pending
+            }
+        }
     }
-    fn print_pdf(&mut self, options: &mailcraft_engine::model::PrintOptions, pdf: &[u8]) -> Result<(), String> {
-        mailcraft_net::print::print_pdf(options, pdf)
+    fn printer_capabilities(&mut self, name: &str) -> PrinterCaps {
+        let cache = printer_cache(&self.printers);
+        match cache.caps.get(name) {
+            Some(Some(c)) => PrinterCaps::Known(c.clone()),
+            Some(None) => PrinterCaps::Unknown,
+            // Not asked yet, and the thread is still going through the printers.
+            None => {
+                let to_come = match &cache.list {
+                    None => true,
+                    Some(Ok(l)) => l.iter().take(mailcraft_net::print::MAX_PROBED).any(|p| p.name == name),
+                    Some(Err(_)) => false,
+                };
+                if cache.running && to_come { PrinterCaps::Pending } else { PrinterCaps::Unknown }
+            }
+        }
+    }
+    fn refresh_printers(&mut self) {
+        {
+            let mut cache = printer_cache(&self.printers);
+            if cache.running {
+                return;
+            }
+            cache.running = true;
+        }
+        let cache = self.printers.clone();
+        let spawned = std::thread::Builder::new().name("print-list".into()).spawn(move || {
+            let list = mailcraft_net::print::list_printers();
+            let names: Vec<String> = match &list {
+                Ok(l) => l.iter().take(mailcraft_net::print::MAX_PROBED).map(|p| p.name.clone()).collect(),
+                Err(_) => Vec::new(),
+            };
+            printer_cache(&cache).list = Some(list);
+            for name in names {
+                let caps = mailcraft_net::print::capabilities(&name);
+                printer_cache(&cache).caps.insert(name, caps);
+            }
+            printer_cache(&cache).running = false;
+        });
+        if spawned.is_err() {
+            let mut cache = printer_cache(&self.printers);
+            cache.running = false;
+            if cache.list.is_none() {
+                cache.list = Some(Err("the printers couldn't be asked for".into()));
+            }
+        }
+    }
+    fn print_sender(&self) -> mailcraft_ui_egui::PrintSender {
+        Arc::new(mailcraft_net::print::print_pdf)
     }
     fn pick_files(&mut self) -> Vec<PathBuf> {
         rfd::FileDialog::new().set_title("Attach files").pick_files().unwrap_or_default()
@@ -599,12 +684,7 @@ fn main() -> eframe::Result {
                     "ui.options" => app.ui.backstage = Some(Backstage::new(Page::Options)),
                     "ui.openExport" => app.ui.backstage = Some(Backstage::new(Page::Open)),
                     "ui.about" => app.ui.backstage = Some(Backstage::new(Page::About)),
-                    "ui.print" => {
-                        use mailcraft_engine::model::Printing;
-                        let printing = mailcraft_net::print::printing();
-                        let printers = if printing == Printing::Choose { mailcraft_net::print::printers() } else { Ok(Vec::new()) };
-                        app.ui.dialog = Some(mailcraft_ui_egui::Dialog::print(printing, printers, &app.session.prefs.print));
-                    }
+                    "ui.print" => app.open_print_dialog(),
                     "ui.newEvent" => app.ui.dialog = Some(mailcraft_ui_egui::Dialog::new_event(&app.session, None)),
                     "ui.newContact" => app.ui.dialog = Some(mailcraft_ui_egui::Dialog::new_contact()),
                     _ => match serde_json::from_str(params) {

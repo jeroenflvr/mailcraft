@@ -44,6 +44,7 @@ mod widgets;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use egui::{Align, Color32, Key, Layout, Margin, RichText, Sense, Ui, vec2};
 use mailcraft_engine::model::{Event, Job, MessageKey, SyncStatus};
@@ -202,25 +203,67 @@ pub trait Services {
     fn take_picked(&mut self) -> Vec<(String, String, Vec<u8>)> {
         Vec::new()
     }
-    /// The fonts to print a message with: the interface's regular and bold faces, and fallbacks for
-    /// whatever of `text` they lack (symbols, other scripts). The default offers the fonts built in
-    /// from craft-fonts, if any.
-    fn print_fonts(&mut self, _text: &str) -> mailcraft_engine::print::Fonts {
-        let fallbacks = craft_fonts::fallbacks().map(|f| mailcraft_engine::print::FontFile::new(f.bytes, 0)).collect();
-        mailcraft_engine::print::Fonts { fallbacks, ..Default::default() }
+    /// How to find the fonts to print a message with, callable from any thread (it runs off the UI
+    /// thread): the interface's regular and bold faces, and fallbacks for whatever of the text they
+    /// lack (symbols, other scripts). The default offers the fonts built in from craft-fonts, if any.
+    fn print_font_finder(&self) -> FontFinder {
+        Arc::new(|_text| {
+            let fallbacks = craft_fonts::fallbacks().map(|f| mailcraft_engine::print::FontFile::new(f.bytes, 0)).collect();
+            mailcraft_engine::print::Fonts { fallbacks, ..Default::default() }
+        })
+    }
+    /// The fonts to print a message with (see [`Services::print_font_finder`]).
+    fn print_fonts(&mut self, text: &str) -> mailcraft_engine::print::Fonts {
+        (self.print_font_finder())(text)
+    }
+    /// Run `work` off the UI thread when there is one, so that slow things never freeze the window.
+    /// The default runs it now.
+    fn spawn(&mut self, _name: &'static str, work: Box<dyn FnOnce() + Send + 'static>) {
+        work();
     }
     /// How a message gets to a printer from here.
     fn printing(&self) -> mailcraft_engine::model::Printing {
         mailcraft_engine::model::Printing::None
     }
-    /// The printers the system knows, the default marked, or why they can't be listed.
-    fn printers(&mut self) -> Result<Vec<mailcraft_engine::model::Printer>, String> {
-        Ok(Vec::new())
+    /// The system's printers, the default marked, or why they can't be listed. Called each frame
+    /// until it isn't [`Printers::Pending`], so slow work belongs on another thread.
+    fn printers(&mut self) -> Printers {
+        Printers::Ready(Ok(Vec::new()))
     }
-    /// Print a PDF as the dialog chose (printer, copies, collating, both sides, color, paper).
-    fn print_pdf(&mut self, _options: &mailcraft_engine::model::PrintOptions, _pdf: &[u8]) -> Result<(), String> {
-        Err("not available".into())
+    /// What one printer can do (both sides, color, papers); [`PrinterCaps::Pending`] while it is
+    /// being asked. Called each frame until it isn't pending.
+    fn printer_capabilities(&mut self, _name: &str) -> PrinterCaps {
+        PrinterCaps::Unknown
     }
+    /// The Print dialog is opening: ask the system for its printers again (the last answer is
+    /// still given by [`Services::printers`] until the new one arrives).
+    fn refresh_printers(&mut self) {}
+    /// How to print a PDF as the dialog chose (printer, copies, collating, both sides, color,
+    /// paper), callable from any thread.
+    fn print_sender(&self) -> PrintSender {
+        Arc::new(|_, _| Err("not available".into()))
+    }
+}
+
+/// Finds the fonts to print a text with.
+pub type FontFinder = Arc<dyn Fn(&str) -> mailcraft_engine::print::Fonts + Send + Sync>;
+/// Hands a PDF to the print system.
+pub type PrintSender = Arc<dyn Fn(&mailcraft_engine::model::PrintOptions, &[u8]) -> Result<(), String> + Send + Sync>;
+
+/// The system's printers, which may take a while to list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Printers {
+    Pending,
+    Ready(Result<Vec<mailcraft_engine::model::Printer>, String>),
+}
+
+/// What one printer can do, which may take a while to ask.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrinterCaps {
+    Pending,
+    Known(mailcraft_engine::model::Capabilities),
+    /// It couldn't be asked: everything is offered.
+    Unknown,
 }
 
 /// The page setup of a saved PDF kept with the printing settings (the printer, copies and the
@@ -383,6 +426,17 @@ impl WindowPlace {
     }
 }
 
+/// A message being printed on another thread: the printer, and where the answer will be left.
+struct PrintJob {
+    printer: Option<String>,
+    slot: Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+}
+
+/// What a worker thread found when it was told to panic-proof itself: an escaped panic is an error.
+fn guarded<T>(work: impl FnOnce() -> Result<T, String>, what: &str) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_| Err(format!("{what} failed unexpectedly")))
+}
+
 /// UI-only state.
 pub struct UiState {
     /// Where the main window, the last message window and the last compose window were.
@@ -461,6 +515,10 @@ pub struct UiState {
     /// Video attachments written out for the platform to take a frame from, and the frames.
     pub(crate) video_files: HashMap<(MessageKey, usize), PathBuf>,
     pub(crate) video_frames: HashMap<PathBuf, VideoFrame>,
+    /// Messages being printed on other threads.
+    print_jobs: Vec<PrintJob>,
+    /// The time of the frame being drawn (egui's clock; nothing here reads the system's).
+    frame_time: f64,
     /// The File page, while it's open.
     pub backstage: Option<backstage::Backstage>,
     /// The month the calendar's small month shows (`year * 12 + month - 1`; `None`: the day on
@@ -564,6 +622,8 @@ impl MailApp {
                 focus_main: false,
                 video_files: HashMap::new(),
                 video_frames: HashMap::new(),
+                print_jobs: Vec::new(),
+                frame_time: 0.0,
                 backstage: None,
                 mini_month: None,
                 cal_scrolled: [false; 2],
@@ -679,6 +739,20 @@ impl MailApp {
         self.session.tick();
     }
 
+    /// File › Print: the dialog is up at once, with the printers still to come.
+    pub fn open_print_dialog(&mut self) {
+        let printing = self.services.printing();
+        if printing == mailcraft_engine::model::Printing::Choose {
+            self.services.refresh_printers();
+        }
+        let mut dialog = Dialog::print(printing, &self.session.prefs.print);
+        if let Dialog::Print(f) = &mut dialog {
+            f.opened_at = Some(self.ui.frame_time);
+        }
+        self.ui.dialog = Some(dialog);
+        self.poll_print_dialog();
+    }
+
     /// The fonts to print the open message with (the system's, chosen for its characters).
     fn fonts_for_open_message(&mut self) -> mailcraft_engine::print::Fonts {
         let text = self.session.message_doc().map(|d| d.text()).unwrap_or_default();
@@ -686,52 +760,120 @@ impl MailApp {
     }
 
     /// The Print dialog's preview: the message on the paper `options` describe, its first page
-    /// (or the first of the pages asked for) as a picture, handed to the dialog.
+    /// (or the first of the pages asked for) as a picture. It is drawn on another thread, and the
+    /// dialog picks the answer up from the slot when it is there.
     fn print_preview(&mut self, options: &mailcraft_engine::model::PrintOptions) {
         use mailcraft_engine::model::PageRange;
         let key = print_dialog::PreviewKey::of(options);
         let fonts = match &self.ui.dialog {
-            Some(Dialog::Print(f)) => f.fonts.clone(),
+            Some(Dialog::Print(f)) => f.preview.fonts.clone(),
             _ => return,
         };
-        let fonts = fonts.unwrap_or_else(|| self.fonts_for_open_message());
-        let result = (|| {
-            let doc = self.session.message_doc().map_err(|e| e.to_string())?;
-            // Every page is made, and the one to show is picked: the page count is the message's.
-            let setup = mailcraft_engine::print::PageSetup { pages: PageRange::All, ..mailcraft_engine::print::PageSetup::from(options) };
-            let pdf = mailcraft_engine::cmd::render_pdf(&doc, &fonts, &setup)?;
-            let fit = thumbs::Fit::Width(print_dialog::PREVIEW_PX);
-            let (mut image, total) = thumbs::pdf_page(&pdf, 0, fit, self.ui.fonts.clone()).ok_or("no preview")?;
-            let first = usize::try_from(key.first_page()).unwrap_or(1).clamp(1, total.max(1));
-            if first > 1 {
-                image = thumbs::pdf_page(&pdf, first - 1, fit, self.ui.fonts.clone()).ok_or("no preview")?.0;
+        let slot = print_dialog::PreviewSlot::default();
+        let doc = match self.session.message_doc() {
+            Ok(d) => d,
+            Err(e) => {
+                *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, None, Err(e.to_string())));
+                if let Some(Dialog::Print(f)) = self.ui.dialog.as_mut() {
+                    f.preview.started(slot);
+                }
+                return;
             }
-            Ok::<_, String>((image, total, first))
-        })();
+        };
+        // Every page is made, and the one to show is picked: the page count is the message's.
+        let setup = mailcraft_engine::print::PageSetup { pages: PageRange::All, ..mailcraft_engine::print::PageSetup::from(options) };
+        let (finder, ui_fonts, answer) = (self.services.print_font_finder(), self.ui.fonts.clone(), slot.clone());
         if let Some(Dialog::Print(f)) = self.ui.dialog.as_mut() {
-            f.fonts = Some(fonts);
-            f.preview.finish(key, result);
+            f.preview.started(slot);
         }
+        self.services.spawn(
+            "print-preview",
+            Box::new(move || {
+                let found = if fonts.is_none() { Some(finder(&doc.text())) } else { None };
+                let result = guarded(
+                    || {
+                        let used = found.as_ref().or(fonts.as_ref()).ok_or("no fonts")?;
+                        let pdf = mailcraft_engine::cmd::render_pdf(&doc, used, &setup)?;
+                        let fit = thumbs::Fit::Width(print_dialog::PREVIEW_PX);
+                        let (mut image, total) = thumbs::pdf_page(&pdf, 0, fit, ui_fonts.clone()).ok_or("no preview")?;
+                        let first = usize::try_from(key.first_page()).unwrap_or(1).clamp(1, total.max(1));
+                        if first > 1 {
+                            image = thumbs::pdf_page(&pdf, first - 1, fit, ui_fonts).ok_or("no preview")?.0;
+                        }
+                        Ok::<_, String>((image, total, first))
+                    },
+                    "The preview",
+                );
+                *answer.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, found, result));
+            }),
+        );
     }
 
     /// Messages asked to print (`message.print`): laid out in the system's fonts and handed to the
-    /// print system, and the answer said.
+    /// print system on another thread; the answer is said when it comes ([`MailApp::poll_print_jobs`]).
     fn send_print_requests(&mut self) {
         for r in self.session.take_print_requests() {
-            let fonts = self.services.print_fonts(&r.doc.text());
-            let setup = mailcraft_engine::print::PageSetup::from(&r.options);
-            let sent = mailcraft_engine::cmd::render_pdf(&r.doc, &fonts, &setup).and_then(|pdf| self.services.print_pdf(&r.options, &pdf));
-            match sent {
-                Ok(()) => {
-                    let said = match &r.options.printer {
+            let (finder, sender) = (self.services.print_font_finder(), self.services.print_sender());
+            let slot: Arc<std::sync::Mutex<Option<Result<(), String>>>> = Arc::default();
+            self.ui.print_jobs.push(PrintJob { printer: r.options.printer.clone(), slot: slot.clone() });
+            self.services.spawn(
+                "print-send",
+                Box::new(move || {
+                    let sent = guarded(
+                        || {
+                            let fonts = finder(&r.doc.text());
+                            let setup = mailcraft_engine::print::PageSetup::from(&r.options);
+                            mailcraft_engine::cmd::render_pdf(&r.doc, &fonts, &setup).and_then(|pdf| sender(&r.options, &pdf))
+                        },
+                        "Printing",
+                    );
+                    *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sent);
+                }),
+            );
+        }
+        self.poll_print_jobs();
+    }
+
+    /// Say how the messages sent to print on other threads got on.
+    fn poll_print_jobs(&mut self) {
+        let mut waiting = Vec::new();
+        for job in std::mem::take(&mut self.ui.print_jobs) {
+            let answer = job.slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            match answer {
+                None => waiting.push(job),
+                Some(Ok(())) => {
+                    let said = match &job.printer {
                         Some(p) => tf!("Sent to {printer}", printer = p),
                         None => tl!("Sent to print").to_string(),
                     };
                     self.session.notice(said, false);
                 }
-                Err(e) => self.session.notice(tf!("The message couldn't be printed: {error}", error = e), true),
+                Some(Err(e)) => self.session.notice(tf!("The message couldn't be printed: {error}", error = e), true),
             }
         }
+        self.ui.print_jobs = waiting;
+    }
+
+    /// The Print dialog's printers and what each can do, as the system answers (it is asked each
+    /// frame until it has, and a refreshed list is picked up as it comes). Whether it is still
+    /// waiting for something, or `None` when there is nothing to ask.
+    fn poll_print_dialog(&mut self) -> Option<bool> {
+        let Some(Dialog::Print(f)) = self.ui.dialog.as_mut() else { return None };
+        if f.printing != mailcraft_engine::model::Printing::Choose {
+            return None;
+        }
+        if let Printers::Ready(list) = self.services.printers() {
+            f.printers_arrived(list);
+        }
+        let mut waiting = f.loading();
+        for name in f.unprobed() {
+            match self.services.printer_capabilities(&name) {
+                PrinterCaps::Pending => waiting = true,
+                PrinterCaps::Known(c) => f.capabilities_arrived(&name, Some(c)),
+                PrinterCaps::Unknown => f.capabilities_arrived(&name, None),
+            }
+        }
+        Some(waiting)
     }
 
     fn flush_jobs(&mut self) {
@@ -754,8 +896,16 @@ impl MailApp {
             ctx.request_repaint();
             return;
         }
+        self.ui.frame_time = ctx.input(|i| i.time);
         self.apply_language(&ctx);
         self.pump();
+        if let Some(waiting) = self.poll_print_dialog() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(if waiting { 150 } else { 1000 }));
+        }
+        self.poll_print_jobs();
+        if !self.ui.print_jobs.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        }
         self.announce(&ctx);
         // A search started by a command or agent shows its query in the box.
         if let Some((q, _)) = &self.session.search
@@ -1393,11 +1543,7 @@ impl MailApp {
             }
             Action::InsertPicture if self.services.pick_later("picture") => {}
             Action::AttachFiles if self.services.pick_later("attach") => {}
-            Action::Print => {
-                let printing = self.services.printing();
-                let printers = if printing == mailcraft_engine::model::Printing::Choose { self.services.printers() } else { Ok(Vec::new()) };
-                self.ui.dialog = Some(Dialog::print(printing, printers, &self.session.prefs.print));
-            }
+            Action::Print => self.open_print_dialog(),
             Action::QuickPrint => {
                 if self.services.printing() == mailcraft_engine::model::Printing::None {
                     self.act(Action::OpenAsPdf);
