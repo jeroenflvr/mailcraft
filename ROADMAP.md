@@ -1,6 +1,6 @@
 # Roadmap
 
-**Stage:** v0.19.2 — The Print dialog (2026-10-24). Each milestone below is a version: v0.1 was
+**Stage:** v0.19.3 — The Print dialog opens at once (2026-10-25). Each milestone below is a version: v0.1 was
 the first working client, and every later one is named for what it added.
 Scope: [storytold/artcraft#2177](https://github.com/storytold/artcraft/issues/2177) (lightweight,
 local-first, media-aware v1); the fuller request is
@@ -235,6 +235,6 @@ local-first, media-aware v1); the fuller request is
   are kept. Orientation, paper, scale and the page list are in the PDF (so they work on Windows
   and as Save as PDF in the browser, where the dialog is a page setup); the rest goes to CUPS.
   `message.print`, `message.exportPdf` and `mailcraft-cli print` / `pdf` take the same options.
-- **2026-10-25** — The Print dialog opens at once: printers, each printer's capabilities, fonts and
+- **2026-10-25** — **v0.19.3**: the Print dialog opens at once: printers, each printer's capabilities, fonts and
   the preview load in the background with spinners, printing and the preview are rendered off the UI
   thread, and `lpstat` / `lpoptions` / `lp` have timeouts.

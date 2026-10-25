@@ -6,7 +6,7 @@ the items it deferred (calendar, contacts, Exchange, PST import, a web build) ar
 limits below. What each version brought is under [Done](#done); the milestones are in
 [ROADMAP.md](../ROADMAP.md).
 
-_Status: v0.19.2, 2026-10-24._
+_Status: v0.19.3, 2026-10-25._
 
 ## Open
 
@@ -594,6 +594,8 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   (by repeating it) and the PDF app's dialog decides the rest; orientation, paper, scale and the
   page list still apply because they are in the PDF. Orientation isn't passed to CUPS (the PDF
   is laid out in it), and the paper size is the PDF's, so no `fit-to-page` is asked for.
+
+### v0.19.3 — the Print dialog opens at once
 - **Opens at once:** the dialog is drawn in the first frame after Print (about 25 ms on the
   sample mailbox, logged at `debug` as `print: dialog open in … ms`). The printers
   (`list_printers`: `lpstat` only), each printer's capabilities (`capabilities`: one `lpoptions`
