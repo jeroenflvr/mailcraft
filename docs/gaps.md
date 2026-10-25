@@ -601,7 +601,7 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   (`list_printers`: `lpstat` only), each printer's capabilities (`capabilities`: one `lpoptions`
   each), the fonts and the preview arrive in the background, each with a spinner where it will
   appear; settings, the page list, *Save as PDF instead* and Escape work meanwhile, and what the
-  user set is kept when the answers land. *Print* waits for the printer list. Re-opening the
+  user set is kept when the answers land. The system's default printer is chosen when the list arrives (else the last one used, else none, and *Print* waits for a choice); *Print* also waits for the printer list. Re-opening the
   dialog shows the last list and refreshes it. `lpstat` (4 s), `lpoptions` (3 s per printer) and
   `lp` (20 s) have timeouts: a command that doesn't answer is killed and is an ordinary error.
   The preview (one in flight at a time) and the printing itself are laid out and sent off the UI

@@ -282,8 +282,8 @@ impl PrintForm {
         self.options.printer.as_ref().is_some_and(|n| self.list().iter().any(|p| &p.name == n) && !self.probed.contains(n))
     }
 
-    /// The system's answer about its printers: the one the dialog already has (the last used, or
-    /// chosen since) if it is still there, else the default, else the first. Nothing else the user
+    /// The system's answer about its printers. The default printer is chosen; without one, the
+    /// last used if it is still there, else none (Print waits for a choice). Nothing else the user
     /// set is touched. The same answer again changes nothing.
     pub fn printers_arrived(&mut self, result: Result<Vec<Printer>, String>) {
         match result {
@@ -300,8 +300,13 @@ impl PrintForm {
                     }
                 }
                 self.probed.retain(|n| list.iter().any(|p| &p.name == n));
-                let by_name = self.options.printer.as_ref().and_then(|n| list.iter().find(|p| &p.name == n));
-                self.options.printer = by_name.or_else(|| list.iter().find(|p| p.default)).or_else(|| list.first()).map(|p| p.name.clone());
+                // The system's default wins when the dialog opens. Later (a refreshed list) the
+                // printer in use stays; one that has gone, or none, leaves nothing chosen but the default.
+                let first_answer = !matches!(self.printers, PrinterList::Ready(_));
+                let default = list.iter().find(|p| p.default);
+                let current = self.options.printer.as_ref().and_then(|n| list.iter().find(|p| &p.name == n));
+                let chosen = if first_answer { default.or(current) } else { current.or(default) };
+                self.options.printer = chosen.map(|p| p.name.clone());
                 self.printers = PrinterList::Ready(list);
                 self.fit_to_printer();
             }
@@ -351,7 +356,7 @@ impl PrintForm {
     }
 
     /// What the printer lacks isn't left chosen.
-    fn fit_to_printer(&mut self) {
+    pub(crate) fn fit_to_printer(&mut self) {
         if !self.can_duplex() {
             self.options.duplex = Duplex::Off;
         }
@@ -472,7 +477,8 @@ pub fn body(ui: &mut Ui, f: &mut PrintForm, t: &Tokens, acts: &mut Vec<Action>) 
                     let selected = f.options.printer.clone().unwrap_or_default();
                     let label = match f.list().iter().find(|p| p.name == selected) {
                         Some(p) if p.default => tf!("{name} (default)", name = p.name),
-                        _ => selected,
+                        Some(_) => selected,
+                        None => tl!("Choose a printer").to_string(),
                     };
                     let before = f.options.printer.clone();
                     let list = f.list().to_vec();
@@ -662,7 +668,7 @@ pub fn body(ui: &mut Ui, f: &mut PrintForm, t: &Tokens, acts: &mut Vec<Action>) 
     } else if !saving {
         as_pdf = ui.link(tl!("Save as PDF instead")).clicked();
     }
-    let ok_enabled = (can || saving) && chosen.is_ok();
+    let ok_enabled = (can || saving) && chosen.is_ok() && (!choosing || f.options.printer.is_some());
     let (ok, cancel) = if saving { dialogs::buttons(ui, t, "Save as PDF", ok_enabled) } else { dialogs::buttons(ui, t, "Print", ok_enabled && can) };
 
     if as_pdf {

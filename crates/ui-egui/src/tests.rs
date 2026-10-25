@@ -731,7 +731,10 @@ fn the_print_dialog_sends_what_was_chosen() {
         ..Default::default()
     };
     a.act(crate::Action::Print);
-    let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
+    let Some(Dialog::Print(f)) = a.ui.dialog.as_mut() else { panic!("no dialog") };
+    assert_eq!(f.options.printer.as_deref(), Some("Office_Laser"), "the default printer wins over the last used");
+    f.options.printer = Some("Label_Maker".into());
+    f.fit_to_printer();
     assert!(!f.can_duplex() && !f.can_color());
     assert_eq!((f.options.duplex, f.options.color, f.options.paper), (Duplex::Off, ColorMode::Monochrome, Paper::A4));
     frame(&ctx, &mut a, vec![]);
@@ -888,12 +891,12 @@ fn the_print_dialog_opens_before_the_system_answers() {
     assert!(matches!(a.ui.dialog, Some(Dialog::Print(_))), "Enter has nothing to print to yet");
     assert!(jobs.lock().unwrap().is_empty());
 
-    // The printers are listed: the saved one is chosen, and the copies stay.
+    // The printers are listed: the default one is chosen (not the last used), and the copies stay.
     printers.store(true, Ordering::SeqCst);
     frame(&ctx, &mut a, vec![]);
     let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
     assert!(matches!(&f.printers, PrinterList::Ready(p) if p.len() == 2));
-    assert_eq!((f.options.printer.as_deref(), f.options.copies), (Some("Label_Maker"), 4));
+    assert_eq!((f.options.printer.as_deref(), f.options.copies), (Some("Office_Laser"), 4));
     assert_eq!(
         (f.options.duplex, f.options.color, f.options.paper),
         (Duplex::ShortEdge, ColorMode::Color, Paper::A3),
@@ -901,7 +904,10 @@ fn the_print_dialog_opens_before_the_system_answers() {
     );
     assert_eq!(f.unprobed().len(), 2);
 
-    // What the printer can do: what it lacks is left off.
+    // The user picks the other one; what it can do comes later, and what it lacks is left off.
+    if let Some(Dialog::Print(f)) = a.ui.dialog.as_mut() {
+        f.options.printer = Some("Label_Maker".into());
+    }
     capabilities.store(true, Ordering::SeqCst);
     frame(&ctx, &mut a, vec![]);
     let Some(Dialog::Print(f)) = &a.ui.dialog else { panic!("no dialog") };
@@ -909,6 +915,31 @@ fn the_print_dialog_opens_before_the_system_answers() {
     assert_eq!((f.options.duplex, f.options.color, f.options.paper), (Duplex::Off, ColorMode::Monochrome, Paper::A4));
     assert_eq!(f.options.copies, 4);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Without a default printer none is chosen (the last used one counts) and Print waits for a choice.
+#[test]
+fn no_default_printer_means_none_is_chosen() {
+    use crate::print_dialog::PrintForm;
+    use mailcraft_engine::model::{PrintOptions, Printer, Printing};
+    let list = vec![Printer { name: "A".into(), ..Default::default() }, Printer { name: "B".into(), ..Default::default() }];
+    let mut f = PrintForm::new(Printing::Choose, &Default::default());
+    f.printers_arrived(Ok(list.clone()));
+    assert_eq!(f.options.printer, None);
+    let saved = PrintOptions { printer: Some("B".into()), ..Default::default() };
+    let mut f = PrintForm::new(Printing::Choose, &saved);
+    f.printers_arrived(Ok(list.clone()));
+    assert_eq!(f.options.printer.as_deref(), Some("B"), "the last used, when there is no default");
+    // A default appearing wins at first, but a refreshed list keeps the user's choice.
+    let mut with_default = list;
+    with_default[0].default = true;
+    let mut f = PrintForm::new(Printing::Choose, &saved);
+    f.printers_arrived(Ok(with_default.clone()));
+    assert_eq!(f.options.printer.as_deref(), Some("A"));
+    f.options.printer = Some("B".into());
+    with_default.push(Printer { name: "C".into(), ..Default::default() });
+    f.printers_arrived(Ok(with_default));
+    assert_eq!(f.options.printer.as_deref(), Some("B"));
 }
 
 /// The page is drawn on another thread, one job at a time, however much the settings change.
