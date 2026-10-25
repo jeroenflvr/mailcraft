@@ -69,6 +69,12 @@ OAuth sign-in, data files) with an explanation. `Services` tells the UI files ar
 that the file picker answers on a later frame. `Session::jmap_only` keeps the account form to
 JMAP.
 
+Slow system work goes through `Services` and never blocks the UI thread: `spawn` runs a closure
+off the UI thread (inline by default, so tests and the browser stay deterministic);
+`print_font_finder` and `print_sender` give `Send` closures for finding fonts and printing;
+`printers` and `printer_capabilities` are polled each frame while `Pending` (the desktop app
+fills them from a `print-list` thread); `video_frame` works the same way.
+
 ## The session (`crates/engine`)
 
 `Session` holds the accounts (config, folders, connection status), the view (a folder, a role

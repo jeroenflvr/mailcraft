@@ -235,3 +235,6 @@ local-first, media-aware v1); the fuller request is
   are kept. Orientation, paper, scale and the page list are in the PDF (so they work on Windows
   and as Save as PDF in the browser, where the dialog is a page setup); the rest goes to CUPS.
   `message.print`, `message.exportPdf` and `mailcraft-cli print` / `pdf` take the same options.
+- **2026-10-25** — The Print dialog opens at once: printers, each printer's capabilities, fonts and
+  the preview load in the background with spinners, printing and the preview are rendered off the UI
+  thread, and `lpstat` / `lpoptions` / `lp` have timeouts.

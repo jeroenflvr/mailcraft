@@ -594,3 +594,13 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   (by repeating it) and the PDF app's dialog decides the rest; orientation, paper, scale and the
   page list still apply because they are in the PDF. Orientation isn't passed to CUPS (the PDF
   is laid out in it), and the paper size is the PDF's, so no `fit-to-page` is asked for.
+- **Opens at once:** the dialog is drawn in the first frame after Print (about 25 ms on the
+  sample mailbox, logged at `debug` as `print: dialog open in … ms`). The printers
+  (`list_printers`: `lpstat` only), each printer's capabilities (`capabilities`: one `lpoptions`
+  each), the fonts and the preview arrive in the background, each with a spinner where it will
+  appear; settings, the page list, *Save as PDF instead* and Escape work meanwhile, and what the
+  user set is kept when the answers land. *Print* waits for the printer list. Re-opening the
+  dialog shows the last list and refreshes it. `lpstat` (4 s), `lpoptions` (3 s per printer) and
+  `lp` (20 s) have timeouts: a command that doesn't answer is killed and is an ordinary error.
+  The preview (one in flight at a time) and the printing itself are laid out and sent off the UI
+  thread; the result is said when it arrives.
