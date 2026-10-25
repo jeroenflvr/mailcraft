@@ -3,20 +3,28 @@
 //! verb, which asks which printer. The system's own commands are run (nothing is linked), with
 //! the file in a temporary folder that is cleaned up afterwards.
 
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
-use mailcraft_model::{ColorMode, Duplex, Paper, PrintOptions, Printer, Printing};
+use mailcraft_model::{Capabilities, ColorMode, Duplex, Paper, PrintOptions, Printer, Printing};
 
 /// The most printers listed, and copies printed.
 const MAX_PRINTERS: usize = 200;
 const MAX_COPIES: u32 = mailcraft_model::printing::MAX_COPIES;
 /// Printers asked about their capabilities (each asks CUPS once).
-const MAX_PROBED: usize = 50;
+pub const MAX_PROBED: usize = 50;
+/// How long each command may take before it is given up on: a remote or sleepy CUPS, or a network
+/// printer that is off, must never leave a caller waiting for ever.
+const LIST_TIMEOUT: Duration = Duration::from_secs(4);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const PRINT_TIMEOUT: Duration = Duration::from_secs(20);
+/// The most a command's output is read (it is hostile like anything else).
+const MAX_OUTPUT: u64 = 1 << 20;
 /// Files left in the temporary folder by earlier runs (Windows can't delete one the PDF app is
 /// still reading) are removed after this long.
-const KEEP: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+const KEEP: Duration = Duration::from_secs(24 * 3600);
 
 /// How printing works here.
 pub fn printing() -> Printing {
@@ -28,21 +36,51 @@ struct Tools {
     lpstat: String,
     lp: String,
     lpoptions: String,
+    list_timeout: Duration,
+    probe_timeout: Duration,
+    print_timeout: Duration,
 }
 
 impl Tools {
     fn system() -> Tools {
-        Tools { lpstat: "lpstat".into(), lp: "lp".into(), lpoptions: "lpoptions".into() }
+        Tools {
+            lpstat: "lpstat".into(),
+            lp: "lp".into(),
+            lpoptions: "lpoptions".into(),
+            list_timeout: LIST_TIMEOUT,
+            probe_timeout: PROBE_TIMEOUT,
+            print_timeout: PRINT_TIMEOUT,
+        }
     }
 }
 
-/// The printers the system knows, the default marked. Empty on Windows (the PDF app asks). An
-/// error says why none can be listed (no CUPS, its scheduler isn't running).
+/// The printers the system knows, the default marked, with what each can do. Empty on Windows (the
+/// PDF app asks). An error says why none can be listed (no CUPS, its scheduler isn't running).
+/// Slow with many printers: an app with a screen lists them with `list_printers` and asks
+/// `capabilities` of each afterwards.
 pub fn printers() -> Result<Vec<Printer>, String> {
     if cfg!(windows) {
         return Ok(Vec::new());
     }
     list(&Tools::system())
+}
+
+/// The printers the system knows, the default marked, one quick question to the print system
+/// (`lpstat`). What each can do is left unknown: `capabilities` asks that.
+pub fn list_printers() -> Result<Vec<Printer>, String> {
+    if cfg!(windows) {
+        return Ok(Vec::new());
+    }
+    list_only(&Tools::system())
+}
+
+/// What one printer can do. `None` when it can't be asked (no `lpoptions`, it didn't answer in
+/// time, the name isn't one CUPS has), which leaves everything offered.
+pub fn capabilities(name: &str) -> Option<Capabilities> {
+    if cfg!(windows) {
+        return None;
+    }
+    probe(&Tools::system(), name)
 }
 
 /// Print a PDF as `options` say (the printer, copies, collating, both sides, colour, paper).
@@ -59,8 +97,50 @@ fn command(program: &str) -> Command {
     c
 }
 
+/// Run a command and collect its output, killing it when it takes longer than `timeout`
+/// (`ErrorKind::TimedOut`). The output is read on other threads so a full pipe can't stall the
+/// child, and is capped.
+fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> std::io::Result<Output> {
+    fn reader<R: Read + Send + 'static>(from: Option<R>) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("print-read".into()).spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(from) = from {
+                let _ = from.take(MAX_OUTPUT).read_to_end(&mut bytes);
+            }
+            let _ = tx.send(bytes);
+        });
+        if spawned.is_err() {
+            return std::sync::mpsc::channel().1;
+        }
+        rx
+    }
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let (out, err) = (reader(child.stdout.take()), reader(child.stderr.take()));
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            // The readers are left to end by themselves: something the command started may hold its pipes open.
+            return Err(std::io::Error::new(ErrorKind::TimedOut, "the command didn't answer in time"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // The command is done; anything it left running must not keep this waiting.
+    let grace = Duration::from_millis(500);
+    Ok(Output { status, stdout: out.recv_timeout(grace).unwrap_or_default(), stderr: err.recv_timeout(grace).unwrap_or_default() })
+}
+
 fn missing(program: &str, e: &std::io::Error) -> String {
-    if e.kind() == ErrorKind::NotFound { format!("the print system isn't installed (no `{program}` command)") } else { format!("`{program}`: {e}") }
+    match e.kind() {
+        ErrorKind::NotFound => format!("the print system isn't installed (no `{program}` command)"),
+        ErrorKind::TimedOut => format!("the print system didn't answer (`{program}`)"),
+        _ => format!("`{program}`: {e}"),
+    }
 }
 
 /// `lpstat -p -d` as printers.
@@ -88,7 +168,7 @@ fn parse(text: &str) -> Vec<Printer> {
 /// What `lpoptions -p NAME -l` says a printer can do. Lines look like
 /// `Duplex/2-Sided Printing: *None DuplexNoTumble DuplexTumble`, the current choice starred. A
 /// feature the output doesn't mention stays unknown (`None`), which the dialog treats as offered.
-fn capabilities(text: &str, into: &mut Printer) {
+fn parse_capabilities(text: &str, into: &mut Printer) {
     for line in text.lines().take(500) {
         let Some((head, values)) = line.split_once(':') else { continue };
         let key = head.split('/').next().unwrap_or("").trim();
@@ -115,22 +195,39 @@ fn capabilities(text: &str, into: &mut Printer) {
     }
 }
 
-fn list(tools: &Tools) -> Result<Vec<Printer>, String> {
-    let out = command(&tools.lpstat).args(["-p", "-d"]).output().map_err(|e| missing(&tools.lpstat, &e))?;
-    let mut printers = parse(&String::from_utf8_lossy(&out.stdout));
-    // A missing or failing `lpoptions` just leaves the capabilities unknown.
-    for p in printers.iter_mut().filter(|p| valid(&p.name)).take(MAX_PROBED) {
-        if let Ok(o) = command(&tools.lpoptions).arg("-p").arg(&p.name).arg("-l").output()
-            && o.status.success()
-        {
-            capabilities(&String::from_utf8_lossy(&o.stdout), p);
-        }
-    }
+/// `lpstat -p -d`, as printers with nothing known about what they can do.
+fn list_only(tools: &Tools) -> Result<Vec<Printer>, String> {
+    let out = run_with_timeout(command(&tools.lpstat).args(["-p", "-d"]), tools.list_timeout).map_err(|e| missing(&tools.lpstat, &e))?;
+    let printers = parse(&String::from_utf8_lossy(&out.stdout));
     if printers.is_empty() && !out.status.success() {
         let why = String::from_utf8_lossy(&out.stderr);
         // No printer added is an answer; a scheduler that isn't there is a reason.
         if !why.contains("No destinations added") {
             return Err(why.trim().trim_start_matches("lpstat: ").to_string());
+        }
+    }
+    Ok(printers)
+}
+
+/// `lpoptions -p NAME -l`. A missing or failing `lpoptions` just leaves the capabilities unknown.
+fn probe(tools: &Tools, name: &str) -> Option<Capabilities> {
+    if !valid(name) {
+        return None;
+    }
+    let out = run_with_timeout(command(&tools.lpoptions).arg("-p").arg(name).arg("-l"), tools.probe_timeout).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut p = Printer::default();
+    parse_capabilities(&String::from_utf8_lossy(&out.stdout), &mut p);
+    Some(Capabilities { duplex: p.duplex, color: p.color, papers: p.papers })
+}
+
+fn list(tools: &Tools) -> Result<Vec<Printer>, String> {
+    let mut printers = list_only(tools)?;
+    for p in printers.iter_mut().take(MAX_PROBED) {
+        if let Some(c) = probe(tools, &p.name) {
+            p.learn(c);
         }
     }
     Ok(printers)
@@ -229,11 +326,11 @@ fn send(tools: &Tools, options: &PrintOptions, pdf: &[u8]) -> Result<(), String>
         let file = Temp::new(pdf, true)?;
         let one = format!("Start-Process -FilePath {} -Verb Print -WindowStyle Hidden", quoted(&file.path.to_string_lossy()));
         let script = vec![one; copies as usize].join("; ");
-        let out = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| missing("powershell.exe", &e))?;
+        let out = run_with_timeout(
+            Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &script]).stdin(Stdio::null()),
+            tools.print_timeout,
+        )
+        .map_err(|e| missing("powershell.exe", &e))?;
         return if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) };
     }
     let file = Temp::new(pdf, false)?;
@@ -242,7 +339,7 @@ fn send(tools: &Tools, options: &PrintOptions, pdf: &[u8]) -> Result<(), String>
         cmd.arg("-d").arg(p);
     }
     cmd.arg("-n").arg(copies.to_string()).arg("-t").arg("MailCraft message").args(job_options(options, copies));
-    let out = cmd.arg(&file.path).output().map_err(|e| missing(&tools.lp, &e))?;
+    let out = run_with_timeout(cmd.arg(&file.path), tools.print_timeout).map_err(|e| missing(&tools.lp, &e))?;
     if out.status.success() {
         Ok(())
     } else {
@@ -279,7 +376,8 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             path.to_string_lossy().to_string()
         };
-        (Tools { lpstat: script("lpstat", lpstat), lp: script("lp", lp), lpoptions: script("lpoptions", lpoptions) }, dir)
+        let system = Tools::system();
+        (Tools { lpstat: script("lpstat", lpstat), lp: script("lp", lp), lpoptions: script("lpoptions", lpoptions), ..system }, dir)
     }
 
     const LPSTAT: &str = "printf 'printer Office_Laser is idle.  enabled since Sat 24 Oct 2026 11:42:37 AM CEST\\nprinter Label_Maker disabled since Sat 24 Oct 2026 - Paused\\n\\treason unknown\\nsystem default destination: Office_Laser\\n'";
@@ -303,7 +401,12 @@ mod tests {
         assert_eq!(list(&none).unwrap(), Vec::new());
         let (down, d3) = tools("down", "echo 'lpstat: Scheduler is not running.' >&2; exit 1", "exit 0");
         assert_eq!(list(&down).unwrap_err(), "Scheduler is not running.");
-        let gone = Tools { lpstat: "/nonexistent/lpstat".into(), lp: "/nonexistent/lp".into(), lpoptions: "/nonexistent/lpoptions".into() };
+        let gone = Tools {
+            lpstat: "/nonexistent/lpstat".into(),
+            lp: "/nonexistent/lp".into(),
+            lpoptions: "/nonexistent/lpoptions".into(),
+            ..Tools::system()
+        };
         assert!(list(&gone).unwrap_err().contains("isn't installed"));
         assert!(send(&gone, &PrintOptions::default(), b"%PDF").unwrap_err().contains("isn't installed"));
         for d in [dir, d2, d3] {
@@ -405,21 +508,21 @@ mod tests {
     #[test]
     fn reads_what_a_printer_can_do() {
         let mut p = Printer { name: "P".into(), ..Printer::default() };
-        capabilities(&LPOPTIONS.replace("\\n", "\n"), &mut p);
+        parse_capabilities(&LPOPTIONS.replace("\\n", "\n"), &mut p);
         assert_eq!((p.duplex, p.color), (Some(true), Some(true)));
         assert_eq!(p.papers, vec![Paper::Letter, Paper::A4, Paper::Legal]);
 
         let mut mono = Printer::default();
-        capabilities("Duplex/Two-Sided: *None\nColorModel/Output: *Gray\nPageSize/Paper: *A4\n", &mut mono);
+        parse_capabilities("Duplex/Two-Sided: *None\nColorModel/Output: *Gray\nPageSize/Paper: *A4\n", &mut mono);
         assert_eq!((mono.duplex, mono.color, mono.papers.clone()), (Some(false), Some(false), vec![Paper::A4]));
 
         // Nothing said, junk, and huge lines: unknown, not an error.
         let mut none = Printer::default();
-        capabilities("", &mut none);
-        capabilities("junk\n:::\nDuplex\n\u{0}/:\n", &mut none);
+        parse_capabilities("", &mut none);
+        parse_capabilities("junk\n:::\nDuplex\n\u{0}/:\n", &mut none);
         assert_eq!((none.duplex, none.color, none.papers.is_empty()), (None, None, true));
         let mut big = Printer::default();
-        capabilities(&format!("PageSize/x: {}\n", "A4 ".repeat(100_000)), &mut big);
+        parse_capabilities(&format!("PageSize/x: {}\n", "A4 ".repeat(100_000)), &mut big);
         assert_eq!(big.papers, vec![Paper::A4]);
     }
 
@@ -435,5 +538,52 @@ mod tests {
         let gone = Tools { lpoptions: "/nonexistent/lpoptions".into(), ..tools("nolpopt", LPSTAT, "exit 0").0 };
         assert_eq!(list(&gone).unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The list alone leaves what a printer can do unknown, and one printer is asked on its own.
+    #[test]
+    fn lists_first_and_asks_each_printer_after() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (t, dir) = tools_with("split", LPSTAT, "exit 0", &format!("printf '{LPOPTIONS}'"));
+        let p = list_only(&t).unwrap();
+        assert_eq!(p.len(), 2);
+        assert!(p.iter().all(|p| (p.duplex, p.color, p.papers.is_empty()) == (None, None, true)));
+        let c = probe(&t, "Office_Laser").unwrap();
+        assert_eq!((c.duplex, c.color, c.papers.len()), (Some(true), Some(true), 3));
+        assert_eq!(probe(&t, "-o"), None, "a name that isn't safe is never passed on");
+        let (broken, d2) = tools_with("split-fail", LPSTAT, "exit 0", "exit 1");
+        assert_eq!(probe(&broken, "Office_Laser"), None);
+        for d in [dir, d2] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// A command that doesn't answer is killed and is an ordinary error, quickly.
+    #[test]
+    fn gives_up_on_a_command_that_does_not_answer() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (t, dir) = tools_with("slow", "exec sleep 10", "exec sleep 10", "exec sleep 10");
+        let t = Tools {
+            list_timeout: Duration::from_millis(300),
+            probe_timeout: Duration::from_millis(300),
+            print_timeout: Duration::from_millis(300),
+            ..t
+        };
+        let start = Instant::now();
+        let e = list_only(&t).unwrap_err();
+        assert!(e.contains("didn't answer"), "{e}");
+        assert_eq!(probe(&t, "Office_Laser"), None);
+        let e = send(&t, &PrintOptions::default(), b"x").unwrap_err();
+        assert!(e.contains("didn't answer"), "{e}");
+        assert!(start.elapsed() < Duration::from_millis(1500), "{:?}", start.elapsed());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Output bigger than a pipe holds doesn't stall the command.
+    #[test]
+    fn reads_a_lot_of_output() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let out = run_with_timeout(Command::new("sh").args(["-c", "yes | head -c 300000"]), Duration::from_secs(5)).unwrap();
+        assert_eq!(out.stdout.len(), 300_000);
     }
 }

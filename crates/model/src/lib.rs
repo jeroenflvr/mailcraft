@@ -43,6 +43,23 @@ pub struct Printer {
     pub papers: Vec<Paper>,
 }
 
+/// What a printer can do, asked of the system separately from the list of printers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    pub duplex: Option<bool>,
+    pub color: Option<bool>,
+    pub papers: Vec<Paper>,
+}
+
+impl Printer {
+    /// Take what the system said this printer can do.
+    pub fn learn(&mut self, caps: Capabilities) {
+        self.duplex = caps.duplex;
+        self.color = caps.color;
+        self.papers = caps.papers;
+    }
+}
+
 /// How a message gets to paper from where MailCraft runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Printing {
