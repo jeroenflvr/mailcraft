@@ -546,21 +546,27 @@ pub struct WebPicture {
 impl Compose {
     /// The text, HTML and pictures to send: formatted when the text uses formatting or has
     /// pictures (and the message isn't set to plain text), else plain text alone. Under a reply
-    /// or forward, the original goes as it was received (its HTML and pictures) while its text
-    /// is as it was put in; changed, what the editor shows is sent.
+    /// or forward, the original goes as it was received (its HTML and pictures) after the
+    /// user's text; once the user edits inside it ([`Compose::edit_quote`]), it's part of the
+    /// text, and what the editor shows is sent.
     pub fn bodies(&self) -> (String, Option<String>, Vec<mime::InlinePicture>) {
         let mut styles = self.styles.clone();
         styles.fit(&self.body);
-        let text = mime::rich::to_text(&self.body, &styles);
+        let mut text = mime::rich::to_text(&self.body, &styles);
+        if let Some(q) = &self.quoted {
+            let mut qs = q.styles.clone();
+            qs.fit(&q.text);
+            text.push_str("\n\n");
+            text.push_str(&mime::rich::to_text(&q.text, &qs));
+        }
         if self.plain {
             return (text, None, Vec::new());
         }
-        if let Some((mine, q)) = self.quoted.as_ref().and_then(|q| self.before_quote(q).map(|b| (b, q))) {
-            let (part, part_styles) = mime::rich::slice(&self.body, &styles, 0..mine);
-            let used = mime::rich::pictures(&part, &part_styles);
+        if let Some(q) = &self.quoted {
+            let used = mime::rich::pictures(&self.body, &styles);
             let pictures: Vec<mime::InlinePicture> =
                 self.inline.iter().filter(|p| used.contains(&p.cid) || q.html.contains(&format!("cid:{}", p.cid))).cloned().collect();
-            let html = format!("{}{}{}", mime::rich::to_html(&part, &part_styles), q.header_html, q.html);
+            let html = format!("{}{}{}", mime::rich::to_html(&self.body, &styles), q.header_html, q.html);
             return (text, Some(self.web_addresses(html)), pictures);
         }
         let used = mime::rich::pictures(&self.body, &styles);
@@ -592,26 +598,30 @@ impl Compose {
         self.web_pictures.iter().filter(|w| !self.inline.iter().any(|p| p.cid == w.cid)).cloned().collect()
     }
 
-    /// Where the quoted original starts in the text (characters), when it's there unchanged
-    /// (trailing whitespace aside).
-    fn before_quote(&self, q: &mime::Quoted) -> Option<usize> {
-        let body = self.body.trim_end();
-        let quote = q.text.trim_end();
-        if quote.is_empty() || !body.ends_with(quote) {
-            return None;
-        }
-        let at = body.len() - quote.len();
-        Some(body.get(..at)?.chars().count())
-    }
-
-    /// Set the text (and forget its formatting, its pictures and the original under it).
+    /// Set the text (and forget its formatting). The original under it, if any, stays.
     pub fn set_text(&mut self, text: String) {
         self.styles = mime::rich::Styles::plain(&text);
         self.body = text;
+    }
+
+    /// Drop the original under the text (and its pictures).
+    pub fn clear_quote(&mut self) {
         self.quoted = None;
         self.inline.clear();
         self.web_pictures.clear();
         self.include_web = None;
+    }
+
+    /// Make the original under the text part of the text, to edit: from then on what the editor
+    /// shows is sent (the original's tables and colours as the editor approximates them). Where
+    /// it starts, in characters.
+    pub fn edit_quote(&mut self) -> Option<usize> {
+        let q = self.quoted.take()?;
+        self.styles.fit(&self.body);
+        let at = self.body.chars().count() + 2;
+        mime::rich::append(&mut self.body, &mut self.styles, "\n\n", &mime::rich::Styles::plain("\n\n"));
+        mime::rich::append(&mut self.body, &mut self.styles, &q.text, &q.styles);
+        Some(at)
     }
 }
 
@@ -2678,6 +2688,14 @@ impl Session {
         Ok(serde_json::json!({ "compose": id, "webPictures": asking }))
     }
 
+    /// Make the original under the message being written editable text (Outlook lets you type
+    /// inside a forwarded message; here that trades its exact look for the editor's).
+    pub fn edit_quote(&mut self) -> CmdResult {
+        let c = self.compose.as_mut().ok_or_else(|| CmdError::Disabled("no message is being written".into()))?;
+        let at = c.edit_quote().ok_or_else(|| CmdError::Disabled("there is no original under the message".into()))?;
+        Ok(serde_json::json!({ "at": at }))
+    }
+
     /// Carry (or not) the quoted original's pictures from the web in the message being written:
     /// `Some(true)` downloads them (what came already is carried now, the rest as it comes),
     /// `Some(false)` leaves them as addresses, `None` asks again.
@@ -2736,6 +2754,7 @@ impl Session {
         let subject = r.parsed.as_ref().map(|p| p.subject.trim().to_string()).unwrap_or_default();
         let name = format!("{}.eml", if subject.is_empty() { "message" } else { subject.as_str() });
         if let Some(c) = self.compose.as_mut() {
+            c.clear_quote();
             c.set_text(if sig.trim().is_empty() { String::new() } else { format!("\n\n{}", signature_block(&sig)) });
             c.signature = if sig.trim().is_empty() { String::new() } else { signature_block(&sig) };
             c.attachments = vec![OutAttachment { name, mime: "message/rfc822".into(), data: raw }];

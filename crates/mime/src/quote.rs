@@ -29,9 +29,12 @@ pub struct Quoted {
     pub html: String,
     /// Who sent it to whom and when (From, Sent, To, Cc, Subject), as HTML.
     pub header_html: String,
-    /// The quoted part of the text as it was put into the message (the header lines and the
-    /// original), to tell whether it was changed.
+    /// The original as editable text (the rule, the header lines and the original's text with
+    /// its pictures in place), and its styles: what the editor gets if the user wants to change
+    /// something inside the original.
     pub text: String,
+    #[serde(default)]
+    pub styles: crate::rich::Styles,
 }
 
 /// An original's HTML, ready to quote: the HTML, the pictures it now refers to, which of the

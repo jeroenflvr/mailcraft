@@ -324,8 +324,12 @@ fn a_forward_carries_the_original_html_and_its_pictures() {
     let names: Vec<&str> = c.attachments.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(names, ["report.pdf"]);
     let cid = c.inline[0].cid.clone();
-    let at = c.body.chars().position(|ch| ch == mailcraft_mime::rich::PICTURE).expect("the logo in the text");
-    assert_eq!(c.styles.style(at).picture.as_deref(), Some(cid.as_str()));
+    // The original isn't in the editable text (it's drawn as received); its editable form has
+    // the logo in place.
+    let q = c.quoted.as_ref().unwrap();
+    assert!(!c.body.contains("Revenue"), "{:?}", c.body);
+    let at = q.text.chars().position(|ch| ch == mailcraft_mime::rich::PICTURE).expect("the logo in the text");
+    assert_eq!(q.styles.style(at).picture.as_deref(), Some(cid.as_str()));
     let (text, html, pictures) = c.bodies();
     let html = html.unwrap();
     assert!(html.contains("<table") && html.contains(&format!("cid:{cid}")) && html.contains("<hr"), "{html}");
@@ -346,12 +350,21 @@ fn a_forward_carries_the_original_html_and_its_pictures() {
     done(s);
 }
 
-/// Changed inside the original, what the editor shows is sent (no table), its picture kept.
+/// Changed inside the original (made editable first), what the editor shows is sent (no
+/// table), its picture kept.
 #[test]
 fn editing_inside_the_quote_sends_what_is_seen() {
     let mut s = sample_session("forward-edited");
     open_newsletter(&mut s);
+    assert!(matches!(s.run("compose.editQuote", &json!({})), Err(CmdError::Disabled(_))), "nothing being written");
     s.run("mail.forward", &json!({})).unwrap();
+    let r = s.run("compose.editQuote", &json!({})).unwrap();
+    let c = s.compose.as_mut().unwrap();
+    assert!(c.quoted.is_none() && c.body.contains("Revenue") && c.body.contains("Subject: Quarterly report"), "{:?}", c.body);
+    let at = usize::try_from(r["at"].as_u64().unwrap()).unwrap();
+    assert!(c.styles.para(mailcraft_mime::rich::lines_of(&c.body, at..at).0).rule, "starts at the rule");
+    assert!(c.body.chars().any(|ch| ch == mailcraft_mime::rich::PICTURE));
+    assert!(matches!(s.run("compose.editQuote", &json!({})), Err(CmdError::Disabled(_))), "once");
     let c = s.compose.as_mut().unwrap();
     let old = c.body.clone();
     c.body = old.replacen("Regards", "Cheers", 1);
@@ -448,7 +461,7 @@ fn web_pictures_not_shown_are_asked_about() {
     let c = s.compose.clone().unwrap();
     assert_eq!((c.include_web, c.web_pictures.len()), (None, 1));
     let cid = c.web_pictures[0].cid.clone();
-    assert_eq!(c.body.chars().filter(|ch| *ch == mailcraft_mime::rich::PICTURE).count(), 1);
+    assert_eq!(c.quoted.as_ref().unwrap().text.chars().filter(|ch| *ch == mailcraft_mime::rich::PICTURE).count(), 1);
     assert!(c.inline.is_empty());
     assert!(s.take_jobs().is_empty(), "nothing downloaded before the answer");
     // Undecided or declined: the address, in the quoted HTML and in the editor's own.
@@ -459,6 +472,7 @@ fn web_pictures_not_shown_are_asked_about() {
     s.run("compose.includePictures", &json!({"include": false})).unwrap();
     assert_eq!(s.compose.as_ref().unwrap().include_web, Some(false));
     assert!(s.take_jobs().is_empty());
+    s.run("compose.editQuote", &json!({})).unwrap();
     let c = s.compose.as_mut().unwrap();
     let old = c.body.clone();
     c.body = old.replacen("See", "Look", 1);

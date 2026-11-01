@@ -665,7 +665,9 @@ pub(crate) fn body(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &mut Compose, st
     let plain = c.plain;
     let tokens = *t;
     let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| layout(ui, buf.as_str(), &styles, plain, &tokens, wrap);
-    let height = ui.available_height().max(220.0);
+    // With the original drawn under it, the text takes the room it needs (a few lines at
+    // least), so the original is right there; alone, it fills the pane.
+    let height = if c.quoted.is_some() { 120.0 } else { ui.available_height().max(220.0) };
     // A right-click inside the selection keeps it (egui's text box moves the cursor on any
     // press); one outside it moves the cursor there, as Outlook does.
     let kept = ed.sel.clone();

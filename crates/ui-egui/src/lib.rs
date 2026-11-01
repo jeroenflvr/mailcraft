@@ -477,8 +477,11 @@ pub struct UiState {
     ribbon_rect: Option<egui::Rect>,
     pub dialog: Option<Dialog>,
     previews: HashMap<(MessageKey, usize), Option<egui::TextureHandle>>,
+    /// The original under the message being written, laid out once: (the message's id, its
+    /// layout, or its lines when it has no columns).
+    pub(crate) quote_view: Option<(u64, Vec<mailcraft_engine::mime::layout::Block>, mailcraft_engine::mime::RichText)>,
     /// Decoded web pictures, by address.
-    web_pictures: HashMap<String, Option<egui::TextureHandle>>,
+    pub(crate) web_pictures: HashMap<String, Option<egui::TextureHandle>>,
     pub toast: Option<(String, bool, f64)>,
     seen_notices: usize,
     scroll_to_focus: bool,
@@ -602,6 +605,7 @@ impl MailApp {
                 ribbon_rect: None,
                 dialog: None,
                 previews: HashMap::new(),
+                quote_view: None,
                 web_pictures: HashMap::new(),
                 toast: None,
                 seen_notices: seen,

@@ -1133,7 +1133,8 @@ fn header_html(p: &Parsed, clock: &Clock) -> String {
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let lines: Vec<String> = header_lines(p, clock).into_iter().map(|(label, value)| format!("<b>{label}</b> {}", esc(&value))).collect();
     format!(
-        "<div style=\"font-family: Aptos, Calibri, 'Segoe UI', Arial, sans-serif; font-size: {}pt\">{}</div>\n<div><br></div>\n",
+        "<hr style=\"border:none; border-top:1px solid #e1e1e1; margin:0.5em 0\">\n\
+         <div style=\"font-family: Aptos, Calibri, 'Segoe UI', Arial, sans-serif; font-size: {}pt\">{}</div>\n<div><br></div>\n",
         rich::DEFAULT_SIZE,
         lines.join("<br>\n")
     )
@@ -1223,13 +1224,17 @@ pub fn reply_doc_with(
     let web_pictures: Vec<(String, String)> =
         map.iter().filter(|(s, _)| !s.starts_with("cid:") && picture_attachment(p, s).is_none()).cloned().collect();
     let picture = |src: &str| map.iter().find(|(s, _)| s == src).map(|(_, cid)| cid.clone());
-    // The cursor's line, the signature, a blank line, then the original under its rule.
+    // The cursor's line, the signature, a blank line, then the original under its rule. With
+    // its HTML to send as received, the original isn't in the editable text: it's drawn as it
+    // was received, and `Quoted::text` is what editing it starts from.
     let mut body = sig;
     let mut styles = rich::Styles::plain(&body);
-    rich::append(&mut body, &mut styles, "\n\n", &rich::Styles::plain("\n\n"));
     let (orig, ost) = quoted_original(p, clock, &picture);
-    rich::append(&mut body, &mut styles, &orig, &ost);
-    let quoted = html.as_ref().map(|h| Quoted { html: h.html.clone(), header_html: header_html(p, clock), text: orig.clone() });
+    let quoted = html.as_ref().map(|h| Quoted { html: h.html.clone(), header_html: header_html(p, clock), text: orig.clone(), styles: ost.clone() });
+    if quoted.is_none() {
+        rich::append(&mut body, &mut styles, "\n\n", &rich::Styles::plain("\n\n"));
+        rich::append(&mut body, &mut styles, &orig, &ost);
+    }
     let (pictures, carried) = html.map(|h| (h.pictures, h.carried)).unwrap_or_default();
     let web = web_pictures;
     let mut d = Draft::default();
@@ -1591,17 +1596,19 @@ iVBORw0KGgo=\r\n\
         assert!(q.html.contains("<table") && q.html.contains("src=\"cid:c1@mailcraft\"") && q.html.contains("color:"), "{}", q.html);
         assert!(!q.html.contains("<script") && !q.html.contains("onclick") && !q.html.contains("cid:logo@x"), "{}", q.html);
         assert!(q.header_html.contains("<b>From:</b> Zoe Park &lt;zoe@studio.example&gt;"), "{}", q.header_html);
-        assert!(r.draft.body.ends_with(&q.text) && q.text.contains("Subject: Quarterly report"));
+        // The editable text is the user's part; the original is `q.text` (with its styles).
+        assert_eq!(r.draft.body, "\n\n-- \nZoe");
+        assert!(q.text.contains("Subject: Quarterly report") && q.text.contains("Revenue"), "{:?}", q.text);
         assert_eq!(r.pictures.len(), 1);
         assert_eq!((r.pictures[0].cid.as_str(), r.pictures[0].data.as_slice()), ("c1@mailcraft", &[1u8, 2, 3][..]));
         let logo = p.attachments.iter().find(|a| a.content_id.as_deref() == Some("logo@x")).unwrap();
         assert_eq!(r.carried, vec![logo.index]);
-        // The picture stands in the text, styled with its cid.
-        let at = r.draft.body.chars().position(|c| c == rich::PICTURE).unwrap();
-        assert_eq!(r.styles.style(at).picture.as_deref(), Some("c1@mailcraft"));
-        // Without the source: as before, no HTML to carry.
+        // The picture stands in the original's text, styled with its cid.
+        let at = q.text.chars().position(|c| c == rich::PICTURE).unwrap();
+        assert_eq!(q.styles.style(at).picture.as_deref(), Some("c1@mailcraft"));
+        // Without the source: no HTML to carry, the original in the text as before.
         let (d, _) = reply_doc(&p, ReplyMode::Forward, &[], &clock, "Zoe");
-        assert!(!d.body.contains(rich::PICTURE));
+        assert!(!d.body.contains(rich::PICTURE) && d.body.contains("Revenue") && d.body.ends_with("Regards"), "{:?}", d.body);
         // A plain-text original has no HTML to carry.
         let plain = build(
             &Draft { to: vec![EmailAddress::new("", "r@x.example")], subject: "Hi".into(), body: "Hello".into(), ..Default::default() },
@@ -1652,13 +1659,14 @@ iVBORw0KGgo=\r\n\
         let p = parse(&raw).unwrap();
         assert!(!p.layout.is_empty(), "laid out with a table");
         let r = reply_doc_with(&p, Some(&raw), ReplyMode::Forward, &[], &Clock::new(0, 0), "", &mut || "c1@x".to_string(), &mut |_| None);
-        let body = &r.draft.body;
+        let q = r.quoted.unwrap();
+        let body = &q.text;
         assert!(!body.contains(['│', '─', '┼', '|']), "no box lines: {body:?}");
         assert!(body.contains("Revenue up") && body.contains("Regards"), "{body:?}");
         let bold = body.find("Revenue").map(|b| body[..b].chars().count()).unwrap();
-        let st = r.styles.style(bold);
+        let st = q.styles.style(bold);
         assert!(st.bold && !st.mono, "{st:?}");
-        assert_eq!(r.styles.style(body.chars().position(|c| c == rich::PICTURE).unwrap()).picture.as_deref(), Some("c1@x"));
+        assert_eq!(q.styles.style(body.chars().position(|c| c == rich::PICTURE).unwrap()).picture.as_deref(), Some("c1@x"));
         // Flattening itself: rows become paragraphs, empty cells and runs of blank lines go.
         let cell = |t: &str| layout::Cell {
             blocks: vec![layout::Block::Text(vec![vec![Span { text: t.into(), ..Default::default() }]])],
@@ -1693,12 +1701,13 @@ iVBORw0KGgo=\r\n\
         });
         assert_eq!(r.web, vec![("https://web.example/a.png".to_string(), "web1@x".to_string())], "once per address");
         assert!(r.quoted.as_ref().unwrap().html.contains("src=\"cid:web1@x\"") && !r.quoted.as_ref().unwrap().html.contains("https://"));
-        assert_eq!(r.draft.body.chars().filter(|c| *c == rich::PICTURE).count(), 2);
+        assert_eq!(r.quoted.as_ref().unwrap().text.chars().filter(|c| *c == rich::PICTURE).count(), 2);
         assert!(r.pictures.is_empty(), "nothing downloaded here");
         // Not asked for: they stay web addresses, shown as [picture].
         let r = reply_doc_with(&p, Some(&raw), ReplyMode::Forward, &[], &Clock::new(0, 0), "", &mut String::new, &mut |_| None);
-        assert!(r.web.is_empty() && r.quoted.unwrap().html.contains("https://web.example/a.png"));
-        assert!(r.draft.body.contains("[picture]"));
+        let q = r.quoted.unwrap();
+        assert!(r.web.is_empty() && q.html.contains("https://web.example/a.png"));
+        assert!(q.text.contains("[picture]"));
         // What a download turned out to be.
         assert_eq!(picture_mime(b"\x89PNG\r\n\x1a\n....", "x").as_deref(), Some("image/png"));
         assert_eq!(picture_mime(&[0xFF, 0xD8, 0xFF, 0xE0], "x").as_deref(), Some("image/jpeg"));

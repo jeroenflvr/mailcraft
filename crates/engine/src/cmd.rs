@@ -467,6 +467,9 @@ pub fn registry() -> Registry {
         .params(r#"{"by": "modified"|"title"|"color"}"#),
         CommandSpec::new("compose.insertSignature", "Insert signature", "Message › Signature", insert_signature)
             .params(r#"{"at"?: number (the character it goes at; default the end)}"#),
+        CommandSpec::new("compose.editQuote", "Edit the original", "Message", |s, _| s.edit_quote())
+            .when(|s| if s.compose.as_ref().is_some_and(|c| c.quoted.is_some()) { None } else { Some("there is no original under the message") })
+            .params("{} (the forwarded or replied-to message becomes part of the editable text; what the editor shows is then sent)"),
         CommandSpec::new("compose.includePictures", "Include pictures from the web", "Message", |s, v| {
             s.include_web_pictures(Some(p::bool(v, "include").unwrap_or(true)))
         })

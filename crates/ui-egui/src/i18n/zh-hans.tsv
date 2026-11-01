@@ -932,3 +932,6 @@ month	May	5月
 	Include pictures	包含图片
 	Don't include	不包含
 	The message you're forwarding shows a picture from the web, which you hadn't chosen to show.	您转发的邮件显示一张来自网络的图片，您此前未选择显示它。
+	The original, sent as you received it.	原始邮件，按您收到的样子发送。
+	Edit the original	编辑原始邮件
+	Make it part of your text, to change it; it's then sent as the editor shows it.	将其变为您正文的一部分以便修改；之后将按编辑器中显示的样子发送。

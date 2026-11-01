@@ -935,3 +935,6 @@ month	May	5월
 	Include pictures	그림 포함
 	Don't include	포함 안 함
 	The message you're forwarding shows a picture from the web, which you hadn't chosen to show.	전달하는 메시지에는 표시하지 않기로 한 웹 그림이 1개 있습니다.
+	The original, sent as you received it.	원본 메시지(받은 그대로 보냅니다).
+	Edit the original	원본 편집
+	Make it part of your text, to change it; it's then sent as the editor shows it.	본문의 일부로 만들어 고칠 수 있습니다. 그러면 편집기에 보이는 대로 보냅니다.

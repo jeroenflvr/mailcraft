@@ -932,3 +932,6 @@ month	May	5月
 	Include pictures	画像を含める
 	Don't include	含めない
 	The message you're forwarding shows a picture from the web, which you hadn't chosen to show.	転送するメッセージには、表示を選択していないウェブの画像が 1 枚あります。
+	The original, sent as you received it.	元のメッセージ（受信したままの形で送信されます）。
+	Edit the original	元のメッセージを編集
+	Make it part of your text, to change it; it's then sent as the editor shows it.	本文の一部にして変更できます。その場合はエディターに表示されたとおりに送信されます。

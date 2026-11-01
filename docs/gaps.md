@@ -632,9 +632,11 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   (cleaned of scripts, event handlers, `javascript:` links, forms, frames and comments with the
   html5ever tokenizer) under the user's text, its pictures carried as `cid:` parts (50 and 15 MB
   at most) and shown in the editor, and a forward attaches only what isn't one of those pictures.
-  Edited inside the original, what the editor shows is sent; plain text sends text only. In the
-  editor, mail laid out with tables is quoted as its cells' text in reading order
-  (`layout::flatten`), not as the text converter's table (box lines in monospace).
+  Plain text sends text only. In the compose, the original is drawn under your text with the
+  reading pane's renderer, exactly as you read it (tables, columns, colours, pictures), and
+  isn't editable; *Edit the original* makes it part of your text, as the editor approximates it
+  (mail laid out with tables as its cells' text in reading order, `layout::flatten`), and from
+  then on what the editor shows is sent.
   The original's pictures from the web: shown for the message (or its sender) already, they're
   downloaded and sent with the forward; otherwise the forward asks once (*Include pictures from
   the web?*), and declined (or dismissed) they go as their web addresses, as the original had

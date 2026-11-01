@@ -681,7 +681,8 @@ fn rich_body(s: &Session, st: &mut UiState, ui: &mut Ui, key: &MessageKey, p: &m
     let allowed = s.pictures_allowed();
     let mut shown: Vec<String> = Vec::new();
     let width = ui.available_width();
-    let mut body = Body { s, key, p, allowed, shown: &mut shown, acts };
+    let src = Source::Message { s, key, p };
+    let mut body = Body { src: &src, allowed, shown: &mut shown, acts };
     if p.layout.is_empty() {
         body.lines(st, ui, &p.rich, width, theme::surface_rgb(&t), Align::Min);
     } else {
@@ -694,18 +695,64 @@ fn rich_body(s: &Session, st: &mut UiState, ui: &mut Ui, key: &MessageKey, p: &m
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 for src in rest {
-                    picture(s, st, ui, key, p, src, allowed, width);
+                    picture(st, ui, &Source::Message { s, key, p }, src, allowed, width);
                 }
             });
         }
     }
 }
 
+/// The original under a reply or forward, drawn as it was received (the reading pane's
+/// rendering of its HTML), with its pictures from the message being written; above it, the
+/// way to edit inside it instead.
+pub(crate) fn quoted_original(st: &mut UiState, ui: &mut Ui, c: &mailcraft_engine::Compose, acts: &mut Vec<Action>) {
+    let Some(q) = &c.quoted else { return };
+    let t = st.tokens;
+    ui.add_space(8.0);
+    let sep = ui.available_rect_before_wrap();
+    ui.painter().line_segment([sep.left_top(), sep.right_top()], egui::Stroke::new(1.0, t.border));
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(tl!("The original, sent as you received it.")).color(t.faint).small());
+        if ui
+            .link(RichText::new(tl!("Edit the original")).small())
+            .on_hover_text(tl!("Make it part of your text, to change it; it's then sent as the editor shows it."))
+            .clicked()
+        {
+            acts.push(Action::Run("compose.editQuote", json!({})));
+        }
+    });
+    ui.add_space(8.0);
+    // Laid out once per message (the HTML doesn't change while it's written).
+    if st.quote_view.as_ref().is_none_or(|(id, _, _)| *id != c.id) {
+        let html = format!("{}{}", q.header_html, q.html);
+        let layout = mime::layout::html_layout(&html);
+        let rich = if layout.is_empty() { mime::html_to_rich(&html) } else { Vec::new() };
+        st.quote_view = Some((c.id, layout, rich));
+    }
+    let Some((_, layout, rich)) = st.quote_view.take() else { return };
+    let width = ui.available_width();
+    let mut shown: Vec<String> = Vec::new();
+    let src = Source::Compose { inline: &c.inline, id: c.id };
+    let mut body = Body { src: &src, allowed: true, shown: &mut shown, acts };
+    if layout.is_empty() {
+        body.lines(st, ui, &rich, width, theme::surface_rgb(&t), Align::Min);
+    } else {
+        body.blocks(st, ui, &layout, width, theme::surface_rgb(&t), mime::layout::Align::Left, 0);
+    }
+    st.quote_view = Some((c.id, layout, rich));
+}
+
+/// Where a body's pictures come from: the message read, or the message being written (its
+/// pictures by `cid:`).
+enum Source<'a> {
+    Message { s: &'a Session, key: &'a MessageKey, p: &'a mime::Parsed },
+    Compose { inline: &'a [mime::InlinePicture], id: u64 },
+}
+
 /// What drawing a message body needs.
 struct Body<'a> {
-    s: &'a Session,
-    key: &'a MessageKey,
-    p: &'a mime::Parsed,
+    src: &'a Source<'a>,
     allowed: bool,
     /// Pictures drawn in place.
     shown: &'a mut Vec<String>,
@@ -768,7 +815,11 @@ impl Body<'_> {
                 let job = ui.fonts_mut(|f| crate::bidi::job(f, job));
                 let r = ui.add(egui::Label::new(job).selectable(false));
                 let written: String = line.iter().map(|sp| sp.text.as_str()).collect();
-                rtl_copy_menu(&r, Some(&written), &self.p.text);
+                let whole = match self.src {
+                    Source::Message { p, .. } => p.text.as_str(),
+                    Source::Compose { .. } => "",
+                };
+                rtl_copy_menu(&r, Some(&written), whole);
                 continue;
             }
             // Centred or right-aligned: pictures in the middle (or at the end), and a line that
@@ -812,7 +863,7 @@ impl Body<'_> {
         let t = st.tokens;
         if let Some(src) = &sp.image {
             self.shown.push(src.clone());
-            if !picture(self.s, st, ui, self.key, self.p, src, self.allowed, width) {
+            if !picture(st, ui, self.src, src, self.allowed, width) {
                 let alt = if sp.text.trim().is_empty() { "picture" } else { sp.text.trim() };
                 ui.label(RichText::new(format!("[{alt}]")).color(t.faint));
             }
@@ -916,7 +967,7 @@ impl Body<'_> {
         if !self.shown.iter().any(|x| x == src) {
             self.shown.push(src.to_string());
         }
-        match picture_texture(self.s, st, ctx, self.key, self.p, src, self.allowed) {
+        match picture_texture(st, ctx, self.src, src, self.allowed) {
             Pic::Ready(tex) => Some(tex),
             Pic::Loading | Pic::Missing => None,
         }
@@ -1088,9 +1139,8 @@ impl Body<'_> {
 }
 
 /// Draw one picture of an HTML message; `false` when it can't be shown (yet).
-#[allow(clippy::too_many_arguments)]
-fn picture(s: &Session, st: &mut UiState, ui: &mut Ui, key: &MessageKey, p: &mime::Parsed, src: &str, allowed: bool, width: f32) -> bool {
-    let tex = match picture_texture(s, st, ui.ctx(), key, p, src, allowed) {
+fn picture(st: &mut UiState, ui: &mut Ui, from: &Source<'_>, src: &str, allowed: bool, width: f32) -> bool {
+    let tex = match picture_texture(st, ui.ctx(), from, src, allowed) {
         Pic::Ready(tex) => tex,
         Pic::Loading => {
             ui.spinner();
@@ -1149,7 +1199,7 @@ impl Body<'_> {
     /// not shown is its description in brackets, as [`Body::span`] draws it).
     fn span_natural(&mut self, st: &mut UiState, ui: &mut Ui, sp: &mime::Span) -> f32 {
         let Some(src) = &sp.image else { return text_w(ui, &sp.text, span_font(sp)) };
-        match picture_texture(self.s, st, ui.ctx(), self.key, self.p, src, self.allowed) {
+        match picture_texture(st, ui.ctx(), self.src, src, self.allowed) {
             Pic::Ready(tex) => {
                 let sz = tex.size_vec2();
                 if sz.x <= 3.0 && sz.y <= 3.0 { 0.0 } else { sz.x.min(900.0) }
@@ -1264,15 +1314,35 @@ fn column_widths(rows: &[Vec<mime::layout::Cell>]) -> Vec<Option<mime::layout::W
 }
 
 /// A picture of an HTML message: one inside it (`cid:`) always, one on the web once allowed.
-fn picture_texture(s: &Session, st: &mut UiState, ctx: &egui::Context, key: &MessageKey, p: &mime::Parsed, src: &str, allowed: bool) -> Pic {
+fn picture_texture(st: &mut UiState, ctx: &egui::Context, from: &Source<'_>, src: &str, allowed: bool) -> Pic {
     // One sent with the message: by `cid:`, or by the name or address it was sent under.
     let lower = src.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
-        return match mime::picture_attachment(p, src) {
-            Some(index) => preview(s, st, ctx, key, index).map_or(Pic::Missing, Pic::Ready),
-            None => Pic::Missing,
+        return match from {
+            Source::Message { s, key, p } => match mime::picture_attachment(p, src) {
+                Some(index) => preview(s, st, ctx, key, index).map_or(Pic::Missing, Pic::Ready),
+                None => Pic::Missing,
+            },
+            // The message being written: its own pictures, by `cid:`; a web picture still to
+            // come (or not included) has none yet.
+            Source::Compose { inline, id } => {
+                let cid = src.trim().strip_prefix("cid:").unwrap_or(src.trim()).trim_matches(['<', '>']);
+                let Some(p) = inline.iter().find(|p| p.cid == cid) else { return Pic::Missing };
+                let name = format!("quote-{id}-{cid}");
+                if let Some(t) = st.web_pictures.get(&name) {
+                    return t.clone().map_or(Pic::Missing, Pic::Ready);
+                }
+                if st.web_pictures.len() > 200 {
+                    st.web_pictures.clear();
+                }
+                let t = decode(ctx, &name, &p.data, 1200);
+                st.web_pictures.insert(name, t.clone());
+                return t.map_or(Pic::Missing, Pic::Ready);
+            }
         };
     }
+    // The message being written has no web pictures by address (they're `cid:`s, above).
+    let Source::Message { s, .. } = from else { return Pic::Missing };
     if !allowed {
         return Pic::Missing;
     }
@@ -2458,6 +2528,7 @@ fn compose(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
             egui::ScrollArea::vertical().auto_shrink(false).id_salt("compose-body").show(ui, |ui| {
                 // Replies start above the quoted text.
                 rich_edit::body(ui, &t, &mut ed, c, focus_body.then_some(0), acts);
+                quoted_original(st, ui, c, acts);
             });
         });
     });

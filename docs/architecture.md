@@ -93,9 +93,12 @@ written (`Compose`), preferences and status-bar notices.
 - Local-only accounts (the sample mailbox) apply changes to the cache directly, including moves
   (new UIDs in the destination) and sending (filed in Sent).
 - A reply or forward keeps the original as it was received in `Compose.quoted` (`mime::Quoted`:
-  its cleaned HTML, the header block as HTML, and the quoted text as it was put in), its pictures
-  in `Compose.inline`: while the quoted text is unchanged, `Compose::bodies` sends the user's part
-  as `to_html` followed by that HTML, as Outlook does; once it's edited, what the editor shows.
+  its cleaned HTML, the header block as HTML, and its editable form as text and styles), its
+  pictures in `Compose.inline`. `Compose.body` is the user's part only: the UI draws the original
+  under the editor with the reading pane's renderer (exactly as read), and `Compose::bodies` sends
+  `to_html(body)` followed by the header block and that HTML, as Outlook does. *Edit the original*
+  (`compose.editQuote`, `Compose::edit_quote`) appends the editable form to the body and drops
+  `quoted`: from then on what the editor shows is sent.
   Its web pictures (`Compose.web_pictures`, each with a `cid:`) are carried once downloaded when
   `include_web` is `Some(true)` (set when they were shown, or by `compose.includePictures` after
   the UI asked), else `bodies()` points their `cid:`s back at the web addresses.

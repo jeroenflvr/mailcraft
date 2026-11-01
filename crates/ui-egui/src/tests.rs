@@ -69,12 +69,28 @@ fn a_forward_shows_the_originals_pictures() {
     a.run("mail.forward", json!({}));
     let c = a.session.compose.clone().unwrap();
     assert!(c.quoted.is_some() && !c.inline.is_empty());
+    let q = c.quoted.as_ref().unwrap();
+    let at = q.text.chars().position(|ch| ch == mailcraft_engine::mime::rich::PICTURE).expect("the poster in the text");
+    let cid = q.styles.style(at).picture.unwrap();
+    // Drawn as received (the reading pane's rendering), in both themes: the poster among it.
+    for dark in [Some(false), Some(true)] {
+        a.ui.dark = dark;
+        for _ in 0..3 {
+            frame(&ctx, &mut a, vec![]);
+        }
+    }
+    assert!(a.ui.quote_view.as_ref().is_some_and(|(id, layout, _)| *id == c.id && !layout.is_empty()), "laid out with its columns");
+    assert!(a.ui.web_pictures.get(&format!("quote-{}-{cid}", c.id)).is_some_and(Option::is_some), "the poster drew");
+    // Edit the original: it becomes editable text, with the poster in it, drawn by the editor.
+    a.run("compose.editQuote", json!({}));
+    let c = a.session.compose.clone().unwrap();
+    assert!(c.quoted.is_none());
     let at = c.body.chars().position(|ch| ch == mailcraft_engine::mime::rich::PICTURE).expect("the poster in the text");
-    let cid = c.styles.style(at).picture.unwrap();
+    assert_eq!(c.styles.style(at).picture.as_deref(), Some(cid.as_str()));
     for _ in 0..3 {
         frame(&ctx, &mut a, vec![]);
     }
-    assert!(a.ui.editor.as_ref().is_some_and(|e| e.has_picture(&cid)), "the poster drew");
+    assert!(a.ui.editor.as_ref().is_some_and(|e| e.has_picture(&cid)), "the poster drew in the editor");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -152,9 +168,11 @@ fn a_forward_asks_about_web_pictures_once() {
     assert!(a.ui.dialog.is_none());
     // Included: the picture draws once it has come, in a box that was empty before.
     a.run("compose.includePictures", json!({"include": true}));
+    let id = a.session.compose.as_ref().unwrap().id;
     let cid = a.session.compose.as_ref().unwrap().web_pictures[0].cid.clone();
+    let name = format!("quote-{id}-{cid}");
     frame(&ctx, &mut a, vec![]);
-    assert!(!a.ui.editor.as_ref().is_some_and(|e| e.has_picture(&cid)), "not downloaded yet");
+    assert!(!a.ui.web_pictures.get(&name).is_some_and(Option::is_some), "not downloaded yet");
     a.session.apply(MailEvent::Fetched {
         url: "https://web.example/tick.png".into(),
         data: Some(mailcraft_engine::sample::sample_png()),
@@ -163,7 +181,13 @@ fn a_forward_asks_about_web_pictures_once() {
     for _ in 0..2 {
         frame(&ctx, &mut a, vec![]);
     }
-    assert!(a.ui.editor.as_ref().is_some_and(|e| e.has_picture(&cid)), "drawn once it came");
+    assert!(a.ui.web_pictures.get(&name).is_some_and(Option::is_some), "drawn once it came");
+    // Made editable, the editor draws it too (its cache no longer keeps a miss for good).
+    a.run("compose.editQuote", json!({}));
+    for _ in 0..3 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    assert!(a.ui.editor.as_ref().is_some_and(|e| e.has_picture(&cid)), "drawn in the editor");
     // Shown first: no question.
     a.run("compose.discard", json!({}));
     a.run("list.open", json!({"key": key.to_id()}));
