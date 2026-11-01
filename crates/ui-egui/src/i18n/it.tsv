@@ -938,3 +938,6 @@ month	May	maggio
 	The original, sent as you received it.	L'originale, inviato come l'hai ricevuto.
 	Edit the original	Modifica l'originale
 	Make it part of your text, to change it; it's then sent as the editor shows it.	Lo rende parte del tuo testo per cambiarlo; viene poi inviato come lo mostra l'editor.
+	Copy picture	Copia immagine
+	Save picture as…	Salva immagine con nome…
+	{name} could not be saved: {error}	Impossibile salvare {name}: {error}

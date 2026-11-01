@@ -934,3 +934,6 @@ month	May	مايو
 	The original, sent as you received it.	الرسالة الأصلية، تُرسل كما استلمتها.
 	Edit the original	تحرير الأصل
 	Make it part of your text, to change it; it's then sent as the editor shows it.	اجعلها جزءًا من نصك لتغييرها؛ عندها تُرسل كما يعرضها المحرر.
+	Copy picture	نسخ الصورة
+	Save picture as…	حفظ الصورة باسم…
+	{name} could not be saved: {error}	تعذّر حفظ {name}: {error}

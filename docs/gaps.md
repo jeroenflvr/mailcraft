@@ -651,3 +651,6 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   edited (`signature_styles`, `signature_pictures`: 8 pictures at most, 512 KB each, 2 MB
   together); the pictures go into every new message, reply and Insert signature as `cid:` parts.
   A signature saved as HTML by an earlier version still reads.
+- **Pictures in a message:** a right-click on a picture in a message (in its text, or an
+  attached picture shown below it) offers *Copy picture* (as pixels, for any program) and *Save
+  picture as…*; in the message being written, the pictures of the original under it too.

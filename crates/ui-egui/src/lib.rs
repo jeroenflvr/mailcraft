@@ -306,6 +306,11 @@ pub enum Action {
     Dialog(Dialog),
     OpenAttachment(usize),
     SaveAttachment(usize),
+    /// Save a picture shown in a message (its bytes, under a suggested name) where the user says.
+    SavePicture {
+        name: String,
+        data: Vec<u8>,
+    },
     AttachFiles,
     FocusSearch,
     /// Make a note and write on it.
@@ -1656,6 +1661,15 @@ impl MailApp {
                 let name = self.attachment_name(i);
                 if let Some(path) = self.services.save_path(&name) {
                     self.run("attachment.save", json!({"index": i, "path": path.to_string_lossy()}));
+                }
+            }
+            Action::SavePicture { name, data } if self.services.downloads() => self.services.download(&name, &data),
+            Action::SavePicture { name, data } => {
+                if let Some(path) = self.services.save_path(&name) {
+                    match std::fs::write(&path, &data) {
+                        Ok(()) => self.session.notice(tf!("Saved {path}", path = path.display()), false),
+                        Err(e) => self.session.notice(tf!("{name} could not be saved: {error}", name = name, error = e), true),
+                    }
                 }
             }
             Action::OpenAttachment(i) => {

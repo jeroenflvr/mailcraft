@@ -938,3 +938,6 @@ month	May	5月
 	The original, sent as you received it.	原始郵件，按您收到的樣子傳送。
 	Edit the original	編輯原始郵件
 	Make it part of your text, to change it; it's then sent as the editor shows it.	將其變為您內文的一部分以便修改；之後將按編輯器中顯示的樣子傳送。
+	Copy picture	複製圖片
+	Save picture as…	另存圖片…
+	{name} could not be saved: {error}	無法儲存 {name}：{error}

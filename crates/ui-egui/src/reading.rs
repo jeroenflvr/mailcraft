@@ -695,7 +695,7 @@ fn rich_body(s: &Session, st: &mut UiState, ui: &mut Ui, key: &MessageKey, p: &m
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 for src in rest {
-                    picture(st, ui, &Source::Message { s, key, p }, src, allowed, width);
+                    picture(st, ui, &Source::Message { s, key, p }, src, allowed, width, acts);
                 }
             });
         }
@@ -745,7 +745,7 @@ pub(crate) fn quoted_original(st: &mut UiState, ui: &mut Ui, c: &mailcraft_engin
 
 /// Where a body's pictures come from: the message read, or the message being written (its
 /// pictures by `cid:`).
-enum Source<'a> {
+pub(crate) enum Source<'a> {
     Message { s: &'a Session, key: &'a MessageKey, p: &'a mime::Parsed },
     Compose { inline: &'a [mime::InlinePicture], id: u64 },
 }
@@ -863,7 +863,7 @@ impl Body<'_> {
         let t = st.tokens;
         if let Some(src) = &sp.image {
             self.shown.push(src.clone());
-            if !picture(st, ui, self.src, src, self.allowed, width) {
+            if !picture(st, ui, self.src, src, self.allowed, width, self.acts) {
                 let alt = if sp.text.trim().is_empty() { "picture" } else { sp.text.trim() };
                 ui.label(RichText::new(format!("[{alt}]")).color(t.faint));
             }
@@ -1139,7 +1139,7 @@ impl Body<'_> {
 }
 
 /// Draw one picture of an HTML message; `false` when it can't be shown (yet).
-fn picture(st: &mut UiState, ui: &mut Ui, from: &Source<'_>, src: &str, allowed: bool, width: f32) -> bool {
+fn picture(st: &mut UiState, ui: &mut Ui, from: &Source<'_>, src: &str, allowed: bool, width: f32, acts: &mut Vec<Action>) -> bool {
     let tex = match picture_texture(st, ui.ctx(), from, src, allowed) {
         Pic::Ready(tex) => tex,
         Pic::Loading => {
@@ -1154,8 +1154,83 @@ fn picture(st: &mut UiState, ui: &mut Ui, from: &Source<'_>, src: &str, allowed:
         return true;
     }
     let scale = (width.min(900.0) / sz.x).min(1.0);
-    ui.add(egui::Image::new(&tex).fit_to_exact_size(sz * scale));
+    let r = ui.add(egui::Image::new(&tex).fit_to_exact_size(sz * scale));
+    picture_menu(&r, acts, || picture_bytes(from, src));
     true
+}
+
+/// The bytes of a picture drawn in a body, with a file name for it: an attachment (by `cid:`,
+/// name or address), a web picture once downloaded, or a picture of the message being written.
+pub(crate) fn picture_bytes(from: &Source<'_>, src: &str) -> Option<(String, Vec<u8>)> {
+    let lower = src.trim().to_ascii_lowercase();
+    match from {
+        Source::Message { s, .. } if lower.starts_with("http://") || lower.starts_with("https://") => {
+            let Some(mailcraft_engine::Picture::Ready(bytes)) = s.pictures.get(src.trim()) else { return None };
+            let path = src.split(['?', '#']).next().unwrap_or(src);
+            let leaf = path.rsplit('/').next().filter(|n| !n.is_empty() && n.contains('.')).unwrap_or("picture");
+            let mut name = mime::sanitize_filename(leaf);
+            // Named for what it is, when its name doesn't say.
+            if let Some(m) = mime::picture_mime(bytes, src)
+                && mime::mime_from_name(&name) != m
+                && let Some(ext) = m.strip_prefix("image/").map(|e| e.split('+').next().unwrap_or(e))
+            {
+                name = format!("{}.{ext}", name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem));
+            }
+            Some((name, bytes.to_vec()))
+        }
+        Source::Message { s, key, p } => {
+            let index = mime::picture_attachment(p, src)?;
+            let info = p.attachments.iter().find(|a| a.index == index)?;
+            let raw = s.store.as_ref()?.read_body(key)?;
+            Some((info.name.clone(), mime::attachment_data(&raw, index)?))
+        }
+        Source::Compose { inline, .. } => {
+            let cid = src.trim().strip_prefix("cid:").unwrap_or(src.trim()).trim_matches(['<', '>']);
+            inline.iter().find(|p| p.cid == cid).map(|p| (p.name.clone(), p.data.clone()))
+        }
+    }
+}
+
+/// The right-click menu of a picture: copy it, or save it as a file. `bytes` gives the picture
+/// (and its file name) only when chosen.
+fn picture_menu(r: &egui::Response, acts: &mut Vec<Action>, bytes: impl FnOnce() -> Option<(String, Vec<u8>)>) {
+    let mut chosen: Option<bool> = None;
+    r.interact(Sense::click()).context_menu(|ui| {
+        if ui.button(tl!("Copy picture")).clicked() {
+            chosen = Some(true);
+            ui.close();
+        }
+        if ui.button(tl!("Save picture as…")).clicked() {
+            chosen = Some(false);
+            ui.close();
+        }
+    });
+    let Some(copy) = chosen else { return };
+    let Some((name, data)) = bytes() else { return };
+    if copy {
+        // As pixels: what other programs take from the clipboard.
+        if let Some(img) = color_image(&data) {
+            r.ctx.copy_image(img);
+        }
+    } else {
+        acts.push(Action::SavePicture { name, data });
+    }
+}
+
+/// A picture's pixels, decoded (the same limits as [`decode`]).
+fn color_image(data: &[u8]) -> Option<egui::ColorImage> {
+    if data.len() > 30 << 20 {
+        return None;
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(12_000);
+    limits.max_image_height = Some(12_000);
+    limits.max_alloc = Some(256 << 20);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format().ok()?;
+    reader.limits(limits);
+    let img = reader.decode().ok()?.to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    Some(egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
 }
 
 impl Body<'_> {
@@ -1690,7 +1765,11 @@ fn attachment_preview(s: &Session, st: &mut UiState, ui: &mut Ui, key: &MessageK
             Some(tex) => {
                 let sz = tex.size_vec2();
                 let scale = (width / sz.x).min(1.0);
-                ui.add(egui::Image::new(&tex).fit_to_exact_size(sz * scale));
+                let r = ui.add(egui::Image::new(&tex).fit_to_exact_size(sz * scale));
+                picture_menu(&r, acts, || {
+                    let raw = s.store.as_ref()?.read_body(key)?;
+                    Some((a.name.clone(), mime::attachment_data(&raw, a.index)?))
+                });
             }
             None => no_preview(&t, ui, a, acts),
         },

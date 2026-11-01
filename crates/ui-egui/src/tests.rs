@@ -199,6 +199,56 @@ fn a_forward_asks_about_web_pictures_once() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A picture in a message can be copied or saved from its right-click menu: the bytes are the
+/// attachment's (by `cid:`), a downloaded web picture's, or the message being written's.
+#[test]
+fn a_picture_can_be_copied_or_saved() {
+    let (mut a, dir) = app("picture-menu");
+    let k = a.session.list.iter().find(|m| m.subject.contains("winter group show")).map(|m| m.key.clone()).unwrap();
+    a.run("list.open", json!({"key": k.to_id()}));
+    let p = a.session.reading.as_ref().and_then(|r| r.parsed.clone()).unwrap();
+    let from = crate::reading::Source::Message { s: &a.session, key: &k, p: &p };
+    let (name, data) = crate::reading::picture_bytes(&from, "cid:poster@gallery.example").expect("the poster");
+    assert!(name.ends_with(".png") && data.starts_with(b"\x89PNG"), "{name}");
+    assert!(crate::reading::picture_bytes(&from, "cid:nothing@x").is_none());
+    // A web picture, once downloaded; named for what it is.
+    a.session.pictures.insert("https://web.example/p?id=1".into(), mailcraft_engine::Picture::Ready(std::sync::Arc::new(sample::sample_png())));
+    let from = crate::reading::Source::Message { s: &a.session, key: &k, p: &p };
+    let (name, _) = crate::reading::picture_bytes(&from, "https://web.example/p?id=1").unwrap();
+    assert_eq!(name, "picture.png");
+    assert!(crate::reading::picture_bytes(&from, "https://web.example/not-loaded.png").is_none());
+    // The message being written: its own.
+    a.run("mail.forward", json!({}));
+    let c = a.session.compose.clone().unwrap();
+    let from = crate::reading::Source::Compose { inline: &c.inline, id: c.id };
+    let cid = c.inline[0].cid.clone();
+    assert_eq!(crate::reading::picture_bytes(&from, &format!("cid:{cid}")).map(|(_, d)| d), Some(c.inline[0].data.clone()));
+    // Saving writes the file where the user says.
+    let out = dir.join("saved-poster.png");
+    a.services = Box::new(SavingTo(out.clone()));
+    a.act(crate::Action::SavePicture { name: "poster.png".into(), data: data.clone() });
+    assert_eq!(std::fs::read(&out).unwrap(), data);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Services whose save dialog answers with one path.
+struct SavingTo(std::path::PathBuf);
+
+impl crate::Services for SavingTo {
+    fn pick_files(&mut self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    fn save_path(&mut self, _suggested: &str) -> Option<std::path::PathBuf> {
+        Some(self.0.clone())
+    }
+    fn open_path(&mut self, _path: &std::path::Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn clock(&self) -> (i64, i32) {
+        (NOW, 0)
+    }
+}
+
 /// People's list and A–Z index were a few pixels wider than the pane, so the pane (shared by
 /// every module) grew each frame to its widest and Mail, Calendar and Notes stayed that wide.
 #[test]

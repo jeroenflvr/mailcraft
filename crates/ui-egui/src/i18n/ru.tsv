@@ -938,3 +938,6 @@ month	May	Май
 	The original, sent as you received it.	Оригинал, отправляется таким, каким вы его получили.
 	Edit the original	Изменить оригинал
 	Make it part of your text, to change it; it's then sent as the editor shows it.	Делает его частью вашего текста, чтобы его можно было изменить; тогда он отправляется так, как показывает редактор.
+	Copy picture	Копировать рисунок
+	Save picture as…	Сохранить рисунок как…
+	{name} could not be saved: {error}	Не удалось сохранить {name}: {error}

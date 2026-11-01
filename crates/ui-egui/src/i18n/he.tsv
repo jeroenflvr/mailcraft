@@ -934,3 +934,6 @@ month	May	מאי
 	The original, sent as you received it.	ההודעה המקורית, נשלחת כפי שקיבלתם אותה.
 	Edit the original	עריכת המקור
 	Make it part of your text, to change it; it's then sent as the editor shows it.	הופך אותה לחלק מהטקסט שלכם כדי לשנותה; אז היא נשלחת כפי שהעורך מציג אותה.
+	Copy picture	העתק תמונה
+	Save picture as…	שמור תמונה בשם…
+	{name} could not be saved: {error}	לא ניתן לשמור את {name}: {error}
