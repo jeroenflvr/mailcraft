@@ -619,3 +619,7 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   token and goes again once; only the token service's own refusals (`invalid_grant`…) ask to sign
   in, and a 5xx while refreshing backs off keeping the refresh token. The keychain entry no longer
   names the IMAP server (the old one is moved once).
+- **A message took minutes to open (Microsoft 365):** opening a message waited in line behind
+  the account's folder sync, whose reading ahead downloads up to 40 sources one after another.
+  It now goes on the account's second connection, a sync on the main connection stops reading
+  ahead when a message is being opened, and the log says how long each download took and waited.

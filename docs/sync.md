@@ -62,12 +62,21 @@ Message sources live next to it as `<validity>/<uid>.eml`. A message is identifi
   `account.connections`). The account is up to date once its mail folders (and the Outbox and
   quota) are; the calendars and contacts follow (a big Microsoft 365 calendar takes minutes to
   read, and the account said "Updating…" all that time).
-- **Connections per account:** the main one (syncing, changes, opened messages) and, unless turned
-  off, a second one for sending and automatic replies that connects when there's something to
-  send and lets go after 5 idle minutes. Graph keeps no connection open: each request is its own
+- **Connections per account:** the main one (syncing, changes) and, unless turned off, a second
+  one for opening messages, sending and automatic replies that connects when there's something to
+  do and lets go after 5 idle minutes. Graph keeps no connection open: each request is its own
   HTTPS connection. A connection that replaces another (signing in again, a changed setting)
   waits up to 30 s for the old one to stop, which it does at its next chance (a Graph wait ends
   at once), so two never save the same cache.
+- **Opening a message** never waits behind a sync: it goes on the second connection (POP: the
+  main one), which looks a message up in the numbers the main connection saved when it doesn't
+  know it yet, and leaves one still unknown to the main connection. The two connections share the
+  list of changes waiting for the server, and a downloaded source updates the folder's list under
+  the cache's lock. On the main connection (no second one, or a message it was left), a folder
+  sync stops reading ahead (`prefetch`) before its next download when an opened message or a
+  change is waiting, and those are handled when it returns; the rest is read ahead at the next
+  sync. Each download says in the log how long it took and how long it waited (see
+  [troubleshooting.md](troubleshooting.md#a-message-is-slow-to-open)).
 - **Failures:** a broken connection is retried with exponential back-off (5 s → 5 min). A refused
   password stops retrying and asks the user (`NeedsPassword`). A refused command is reported and
   the cache is resynced. A folder the server refuses is said, and the account is up to date again

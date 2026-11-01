@@ -20,7 +20,7 @@ use mailcraft_store::{OutboxItem, Store};
 use crate::imap::{Client, uid_set};
 use crate::jmap;
 use crate::stream::Stream;
-use crate::sync::{SyncOptions, fetch_body, sync_folder};
+use crate::sync::{SyncOptions, fetch_body};
 use crate::{NetError, Result, smtp};
 
 /// Where passwords live. The desktop app backs this with the system keychain.
@@ -81,7 +81,13 @@ struct Handle {
     stop: Arc<AtomicBool>,
     /// Which start of the account this is, for the log.
     generation: u64,
+    /// Set when an opened message or a change goes to the main connection: a folder sync stops
+    /// reading ahead so it's handled now, not after the sync.
+    urgent: Arc<AtomicBool>,
 }
+
+/// When each message being opened was asked for, to log how long it waited.
+type Asked = Arc<Mutex<HashMap<MessageKey, Instant>>>;
 
 /// Changes still to make on the server, oldest first (RFC 4549's pending actions), kept in
 /// `ops.json`. The pool adds to them as a change is made, and saves them then, so a change
@@ -116,14 +122,23 @@ fn push_job(queue: &mut VecDeque<Job>, j: Job) {
 }
 
 /// Whether a job goes on the account's second connection: sending (not over JMAP, whose filing
-/// needs the main connection's mailbox ids) and automatic replies.
+/// needs the main connection's mailbox ids), automatic replies, and opening a message, which
+/// shouldn't wait for a folder sync to finish.
 fn quick_job(j: &Job, acc: &AccountConfig) -> bool {
     match j {
         Job::Send { .. } => acc.pop.is_none() && acc.jmap.is_none(),
-        Job::GetVacation { .. } | Job::SetVacation { .. } => acc.pop.is_none(),
+        Job::GetVacation { .. } | Job::SetVacation { .. } | Job::FetchBody { .. } => acc.pop.is_none(),
         _ => false,
     }
 }
+
+/// Jobs a folder sync makes way for: what the user waits for or sees undone meanwhile.
+fn urgent_job(j: &Job) -> bool {
+    matches!(j, Job::FetchBody { .. } | Job::Apply { .. })
+}
+
+/// Most messages remembered as being opened (a stuck one mustn't grow the list for good).
+const MAX_ASKED: usize = 1000;
 
 /// Runs jobs for every account.
 pub struct Pool {
@@ -144,6 +159,7 @@ pub struct Pool {
     pub connections: Connections,
     /// The local time zone: calendar times without a zone are read in it.
     pub zone: Arc<mailcraft_model::dates::Zone>,
+    asked: Asked,
 }
 
 /// Workers started so far, numbering them in the log.
@@ -207,6 +223,7 @@ impl Pool {
             offline: false,
             connections: Connections::default(),
             zone: Arc::default(),
+            asked: Arc::default(),
         }
     }
 
@@ -468,6 +485,14 @@ impl Pool {
             }
             other => {
                 let id = other.account().to_string();
+                if let Job::FetchBody { key } = &other
+                    && let Ok(mut asked) = self.asked.lock()
+                {
+                    if asked.len() >= MAX_ASKED {
+                        asked.clear();
+                    }
+                    asked.entry(key.clone()).or_insert_with(Instant::now);
+                }
                 let quick = self.configs.get(&id).is_some_and(|c| quick_job(&other, c));
                 let pop = self.configs.get(&id).is_some_and(|c| c.pop.is_some());
                 match self.workers.get(&id) {
@@ -502,11 +527,15 @@ impl Pool {
                             },
                             None => other,
                         };
+                        let urgent = urgent_job(&other);
                         if h.tx.send(other).is_err() {
                             self.sink.emit(Event::Notice {
                                 account: id,
                                 message: "the account's connection stopped; restart it from the account menu".into(),
                             });
+                        } else if urgent {
+                            // After sending: the connection clears it as it takes its jobs.
+                            h.urgent.store(true, Ordering::Relaxed);
                         }
                     }
                     None => self.sink.emit(Event::Notice { account: id, message: "the account is not connected".into() }),
@@ -540,6 +569,7 @@ impl Pool {
         };
         let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
         let stop = Arc::new(AtomicBool::new(false));
+        let urgent = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         let auth = Auth::shared(pw);
         let mut w = Worker::new(account.clone(), auth.clone(), self.store.clone(), self.sink.clone(), self.opts);
@@ -549,6 +579,8 @@ impl Pool {
         w.zone = self.zone.clone();
         w.stop = stop.clone();
         w.generation = generation;
+        w.urgent = urgent.clone();
+        w.asked = self.asked.clone();
         // The second connection: quiet (the account's status is the main one's), connecting
         // only when there's something to do. Turned off, the main one sends too.
         let (quick, quick_thread) = if self.connections.second {
@@ -560,6 +592,11 @@ impl Pool {
             q.connections = self.connections;
             q.stop = stop.clone();
             q.generation = generation;
+            q.urgent = urgent.clone();
+            q.asked = self.asked.clone();
+            // One list of waiting changes: the main connection makes them, and a message opened
+            // here keeps them over what the server said.
+            q.ops = w.ops.clone();
             let t = std::thread::Builder::new().name(format!("mail-{}-quick", account.id)).spawn(move || q.run_quick(qrx)).ok();
             (t.is_some().then_some(qtx), t)
         } else {
@@ -572,7 +609,7 @@ impl Pool {
         let ops = w.ops.clone();
         match std::thread::Builder::new().name(name).spawn(move || w.run(rx)) {
             Ok(thread) => {
-                self.workers.insert(account.id.clone(), Handle { tx, thread: Some(thread), quick, quick_thread, ops, stop, generation });
+                self.workers.insert(account.id.clone(), Handle { tx, thread: Some(thread), quick, quick_thread, ops, stop, generation, urgent });
             }
             Err(e) => self.sink.emit(Event::Status { account: account.id.clone(), status: SyncStatus::Error { error: e.to_string() } }),
         }
@@ -701,6 +738,10 @@ struct Worker {
     /// Tests: the token endpoint to refresh at.
     #[cfg(test)]
     provider: Option<crate::oauth::Provider>,
+    /// Shared with the pool: an opened message or a change waits for this connection.
+    urgent: Arc<AtomicBool>,
+    /// Shared with the pool: when messages being opened were asked for.
+    asked: Asked,
 }
 
 impl Worker {
@@ -740,6 +781,8 @@ impl Worker {
             retried_token_at: None,
             #[cfg(test)]
             provider: None,
+            urgent: Arc::default(),
+            asked: Arc::default(),
         }
     }
 
@@ -904,6 +947,7 @@ impl Worker {
     }
 
     fn drain(&mut self, rx: &Receiver<Job>) {
+        self.urgent.store(false, Ordering::Relaxed);
         loop {
             match rx.try_recv() {
                 Ok(j) => push_job(&mut self.queue, j),
@@ -1027,15 +1071,48 @@ impl Worker {
                     self.send_quick(Job::Send { account, id, raw, from, recipients, sent_folder });
                 }
                 j @ (Job::GetVacation { .. } | Job::SetVacation { .. }) => self.handle(j),
+                Job::FetchBody { key } => self.fetch_quick(key),
                 // Anything else belongs to the main connection.
-                other => {
-                    if let Some(m) = &self.main {
-                        let _ = m.send(other);
-                    }
-                }
+                other => self.to_main(other),
             }
         }
         self.let_go();
+    }
+
+    /// Hand a job to the account's main connection (from the second one).
+    fn to_main(&self, job: Job) {
+        let Some(m) = &self.main else { return };
+        let urgent = urgent_job(&job);
+        match m.send(job) {
+            Ok(()) if urgent => self.urgent.store(true, Ordering::Relaxed),
+            Ok(()) => {}
+            Err(mpsc::SendError(Job::FetchBody { key })) => {
+                self.sink.emit(Event::BodyFailed { key, error: "the account's connection stopped".into() })
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Open a message on the second connection. A message that came after this connection read
+    /// the message numbers (the main one keeps them) is looked up again, and left to the main
+    /// connection when it's still unknown.
+    fn fetch_quick(&mut self, key: MessageKey) {
+        if self.acc.is_api() && self.jstate.id(key.uid).is_none() && !self.store.has_body(&key) {
+            self.jstate = jmap::State::load(&self.store, &self.acc.id);
+            if self.jstate.id(key.uid).is_none() {
+                log::debug!("{}: {}/{}: not known here yet; left to the main connection", self.acc.id, key.folder, key.uid);
+                self.to_main(Job::FetchBody { key });
+                return;
+            }
+        }
+        self.fetch(key);
+        // Put back after a refused token: once more, with a new one.
+        while let Some(j) = self.queue.pop_front() {
+            match j {
+                Job::FetchBody { key } => self.fetch(key),
+                other => self.to_main(other),
+            }
+        }
     }
 
     /// Close an idle connection (servers drop them anyway).
@@ -1555,20 +1632,25 @@ impl Worker {
         let began = Instant::now();
         self.status(SyncStatus::Syncing { folder: path.to_string() });
         let (store, opts, id) = (self.store.clone(), self.opts, self.id());
+        // Reading ahead stops for a message being opened or a change made meanwhile: they're
+        // handled when the sync returns (before the next folder).
+        let urgent = self.urgent.clone();
+        let waiting = self.queue.iter().any(urgent_job);
+        let mut pause = move || waiting || urgent.load(Ordering::Relaxed);
         let result = match self.conn.as_mut() {
-            Some(Conn::Imap(c)) => sync_folder(c, &store, &id, path, &opts),
+            Some(Conn::Imap(c)) => crate::sync::sync_folder_pausing(c, &store, &id, path, &opts, &mut pause),
             Some(Conn::Jmap(c)) => {
-                let r = jmap::sync_folder(c, &mut self.jstate, &store, &id, path, &opts);
+                let r = jmap::sync_folder_pausing(c, &mut self.jstate, &store, &id, path, &opts, &mut pause);
                 self.save_jstate();
                 r
             }
             Some(Conn::Graph(c)) => {
-                let r = crate::graph::sync_folder(c, &mut self.jstate, &store, &id, path, &opts);
+                let r = crate::graph::sync_folder_pausing(c, &mut self.jstate, &store, &id, path, &opts, &mut pause);
                 self.save_jstate();
                 r
             }
             Some(Conn::Ews(c)) => {
-                let r = crate::ews::sync_folder(c, &mut self.jstate, &store, &id, path, &opts);
+                let r = crate::ews::sync_folder_pausing(c, &mut self.jstate, &store, &id, path, &opts, &mut pause);
                 self.save_jstate();
                 r
             }
@@ -1909,10 +1991,13 @@ impl Worker {
     }
 
     fn fetch(&mut self, key: MessageKey) {
+        let asked = self.asked.lock().ok().and_then(|mut a| a.remove(&key));
         if let Some(raw) = self.store.read_body(&key) {
             self.sink.emit(Event::Body { key, raw });
             return;
         }
+        let in_line = asked.map_or(Duration::ZERO, |t| t.elapsed());
+        let began = Instant::now();
         let store = self.store.clone();
         let r = (|| -> Result<Vec<u8>> {
             if self.conn.is_none() {
@@ -1929,14 +2014,38 @@ impl Worker {
         })();
         match r {
             Ok(raw) => {
+                // The line to ask for when opening a message is slow: where the time went.
+                log::info!(
+                    "{}: {}/{}: downloaded {} KB in {} ms after {} ms in line{}",
+                    self.acc.id,
+                    key.folder,
+                    key.uid,
+                    raw.len().div_ceil(1024),
+                    began.elapsed().as_millis(),
+                    in_line.as_millis(),
+                    if self.main.is_some() { " (second connection)" } else { "" }
+                );
                 // The download saved the folder's list again: changes waiting stay in it.
                 self.keep_pending(Some(&key.folder));
                 self.sink.emit(Event::Body { key: key.clone(), raw });
                 self.sink.emit(Event::FolderChanged { account: key.account.clone(), folder: key.folder.clone() });
             }
             // The token ran out early: fetched again with a new one, not reported.
-            Err(NetError::Auth(_)) if self.token_refused() => self.queue.push_front(Job::FetchBody { key }),
+            Err(NetError::Auth(_)) if self.token_refused() => {
+                if let (Ok(mut a), Some(t)) = (self.asked.lock(), asked) {
+                    a.insert(key.clone(), t);
+                }
+                self.queue.push_front(Job::FetchBody { key })
+            }
             Err(e) => {
+                log::info!(
+                    "{}: {}/{}: not downloaded after {} ms ({} ms in line): {e}",
+                    self.acc.id,
+                    key.folder,
+                    key.uid,
+                    began.elapsed().as_millis(),
+                    in_line.as_millis()
+                );
                 self.sink.emit(Event::BodyFailed { key, error: e.to_string() });
                 if e.is_fatal() || matches!(e, NetError::Auth(_)) {
                     self.failed(e);
@@ -2120,6 +2229,12 @@ impl Worker {
         let trash = self.folders.iter().find(|f| f.role == FolderRole::Trash).map(|f| f.path.clone());
         loop {
             let Some(op) = pending(&self.ops).first().cloned() else { break };
+            // A folder made or renamed just now has its id once the list is read again, and a
+            // change made meanwhile (renaming the new folder) may need it.
+            if relist && self.acc.is_api() {
+                relist = false;
+                self.relist();
+            }
             let began = Instant::now();
             let r = match self.conn.as_mut() {
                 Some(Conn::Imap(c)) => apply_remote_with(c, &op, trash.as_deref()),
@@ -2570,6 +2685,104 @@ mod tests {
         assert_eq!(server.data.lock().unwrap().refreshes, 1);
         assert_eq!(auth.lock().unwrap().secret, "r1");
         drop(running);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    fn graph_mail(n: usize) -> Vec<u8> {
+        format!("From: zoe@contoso.example\r\nTo: me@contoso.example\r\nSubject: Note {n}\r\nMessage-ID: <n{n}@x>\r\n\r\nHello {n}.\r\n").into_bytes()
+    }
+
+    /// A Graph account with 41 messages synced (40 read ahead, the oldest not), then 40 new ones
+    /// whose sources take 50 ms each, a sync reading them ahead, and the oldest opened meanwhile:
+    /// how long it took to come, and how many sources the sync had read by then.
+    fn open_during_a_sync(name: &str, second: bool) -> (Duration, usize) {
+        let mut d = crate::fake_graph::Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        for i in 0..41 {
+            d.deliver(&inbox, &graph_mail(i), true, &format!("2026-10-01T09:{i:02}:00Z"));
+        }
+        let server = crate::fake_graph::serve(d);
+        let store = crate::fake::tests_store(name);
+        let mut pool = Pool::new(store.clone(), Arc::new(MemoryCredentials::default()));
+        pool.connections.second = second;
+        let account = AccountConfig { id: "a1".into(), email: "me@contoso.example".into(), graph: Some(server.base.clone()), ..Default::default() };
+        pool.submit(Job::Start { account, password: Some(Secret(crate::fake_graph::TOKEN.into())) });
+        until(&pool, "synced", |e| matches!(e, Event::DavSynced { .. }));
+        let oldest = store.load_folder("a1", "INBOX").unwrap().messages.last().unwrap().key.clone();
+        assert!(!store.has_body(&oldest), "not read ahead");
+        {
+            let mut d = server.data.lock().unwrap();
+            d.value_delay = Duration::from_millis(50);
+            for i in 0..40 {
+                d.deliver(&inbox, &graph_mail(100 + i), true, &format!("2026-10-02T09:{i:02}:00Z"));
+            }
+            d.calls.clear();
+        }
+        pool.submit(Job::SyncFolder { account: "a1".into(), folder: "INBOX".into() });
+        let reading = Instant::now() + Duration::from_secs(20);
+        while !server.data.lock().unwrap().calls.iter().any(|c| c.ends_with("/$value")) {
+            assert!(Instant::now() < reading, "the sync never read ahead");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let asked = Instant::now();
+        pool.submit(Job::FetchBody { key: oldest.clone() });
+        until(&pool, "the body", |e| matches!(e, Event::Body { key, .. } | Event::BodyFailed { key, .. } if *key == oldest));
+        let took = asked.elapsed();
+        let read = server.data.lock().unwrap().calls.iter().filter(|c| c.ends_with("/$value")).count();
+        assert!(store.has_body(&oldest));
+        drop(pool);
+        let _ = std::fs::remove_dir_all(store.root());
+        (took, read)
+    }
+
+    /// Opening a message goes on the second connection: it doesn't wait for a folder sync's
+    /// reading ahead (40 sources, two seconds here; minutes on Graph) to finish.
+    #[test]
+    fn fetch_body_does_not_wait_for_a_folder_sync() {
+        let (took, read) = open_during_a_sync("open-during-sync", true);
+        assert!(took < Duration::from_millis(500), "took {took:?}");
+        assert!(read < 41, "the sync's reading ahead was still going: {read}");
+    }
+
+    /// With one connection, the sync stops reading ahead for the message being opened.
+    #[test]
+    fn a_prefetch_pauses_for_an_opened_message() {
+        let (took, read) = open_during_a_sync("prefetch-pauses", false);
+        assert!(took < Duration::from_millis(500), "took {took:?}");
+        assert!(read < 10, "reading ahead stopped: {read} sources read");
+    }
+
+    /// The second connection read the message numbers when it started; a message that came
+    /// later is looked up in what the main connection saved since, and one still unknown is left
+    /// to the main connection.
+    #[test]
+    fn the_quick_connection_reloads_ids_it_does_not_know() {
+        let mut d = crate::fake_graph::Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        d.deliver(&inbox, &graph_mail(1), true, "2026-10-01T09:00:00Z");
+        let server = crate::fake_graph::serve(d);
+        let store = crate::fake::tests_store("quick-reloads-ids");
+        let pool = Pool::new(store.clone(), Arc::new(MemoryCredentials::default()));
+        let acc = AccountConfig { id: "a1".into(), email: "me@contoso.example".into(), graph: Some(server.base.clone()), ..Default::default() };
+        let opts = SyncOptions { prefetch: 0, ..SyncOptions::default() };
+        let auth = Auth::shared(crate::fake_graph::TOKEN);
+        let mut q = Worker::new(acc.clone(), auth.clone(), store.clone(), pool.sink.clone(), opts);
+        let (tx, rx) = mpsc::channel();
+        q.main = Some(tx);
+        let mut w = Worker::new(acc, auth, store.clone(), pool.sink.clone(), opts);
+        w.connect().unwrap();
+        assert!(w.relist());
+        w.sync_one("INBOX");
+        let key = store.load_folder("a1", "INBOX").unwrap().messages[0].key.clone();
+        assert!(q.jstate.id(key.uid).is_none());
+        let _ = pool.poll();
+        q.fetch_quick(key.clone());
+        assert!(pool.poll().iter().any(|e| matches!(e, Event::Body { key: k, .. } if *k == key)));
+        assert!(rx.try_recv().is_err(), "fetched here");
+        let unknown = MessageKey { uid: 999, ..key };
+        q.fetch_quick(unknown.clone());
+        assert_eq!(rx.try_recv().ok(), Some(Job::FetchBody { key: unknown }));
+        assert!(q.urgent.load(Ordering::Relaxed), "the main connection's sync makes way for it");
         let _ = std::fs::remove_dir_all(store.root());
     }
 

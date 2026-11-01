@@ -94,6 +94,23 @@ the path the message takes:
    in the provider's webmail. Some providers keep a message you send to yourself only under Sent,
    and spam filters can move it to Junk.
 
+## A message is slow to open
+
+Each message downloaded when it's opened leaves a line in the log (no detailed log needed):
+
+```
+a1: INBOX/1234: downloaded 312 KB in 840 ms after 12 ms in line (second connection)
+```
+
+- **in line** is the time between clicking the message and its download starting. More than a
+  second means it waited behind other work: since 0.19.4 a message being opened goes on the
+  account's second connection (File › Options › Connections), so this should stay small unless
+  that's turned off.
+- **downloaded … in** is the server's time (connecting included when the connection was idle).
+  Seconds for a few hundred KB point at the server: Microsoft Graph makes a message's MIME
+  source on demand, and the detailed log shows each request it answered slowly or retried
+  (`Graph GET /me/messages/…/$value: HTTP 504 …`).
+
 ## Asked to sign in again
 
 - **Every hour, or after the computer slept** (Microsoft 365 through Graph): fixed in 0.19.4.

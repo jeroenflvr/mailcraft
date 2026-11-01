@@ -76,6 +76,13 @@ pub struct Data {
     pub token_error: Option<(u16, String)>,
     /// Refresh requests the token endpoint had.
     pub refreshes: u32,
+    /// Connections accepted, and requests answered.
+    pub accepts: u32,
+    pub requests: u32,
+    /// Close every connection after its answer (`Connection: close`).
+    pub close: bool,
+    /// How long each message source (`$value`) takes to come.
+    pub value_delay: std::time::Duration,
     late: Vec<(std::time::Instant, Vec<u8>)>,
     next: u32,
 }
@@ -474,14 +481,16 @@ pub struct Server {
     pub data: Arc<Mutex<Data>>,
 }
 
-fn respond(s: &mut impl Write, status: u16, body: &[u8], kind: &str) {
+fn respond(s: &mut impl Write, status: u16, body: &[u8], kind: &str, close: bool) {
     let wait = if status == 429 || (502..=504).contains(&status) { "Retry-After: 0\r\n" } else { "" };
-    let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{wait}Connection: close\r\n\r\n", body.len());
+    let close = if close { "Connection: close\r\n" } else { "" };
+    let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{wait}{close}\r\n", body.len());
     let _ = s.write_all(head.as_bytes());
     let _ = s.write_all(body);
 }
 
-/// Start the server; it runs until the test process ends.
+/// Start the server; it runs until the test process ends. Each connection has a thread of its
+/// own and is kept open between requests (HTTP/1.1), unless the client or [`Data::close`] says.
 pub fn serve(data: Data) -> Server {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://127.0.0.1:{}/v1.0", l.local_addr().unwrap().port());
@@ -489,70 +498,91 @@ pub fn serve(data: Data) -> Server {
     let (shared, b) = (data.clone(), base.clone());
     std::thread::spawn(move || {
         for conn in l.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut reader = BufReader::new(s.try_clone().unwrap());
-            let mut first = String::new();
-            if reader.read_line(&mut first).unwrap_or(0) == 0 {
-                continue;
-            }
-            let (mut len, mut token, mut immutable) = (0usize, String::new(), false);
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                    break;
-                }
-                let lower = line.to_ascii_lowercase();
-                if let Some(v) = lower.strip_prefix("content-length:") {
-                    len = v.trim().parse().unwrap_or(0);
-                }
-                if let Some((k, v)) = line.split_once(':')
-                    && k.eq_ignore_ascii_case("authorization")
-                {
-                    token = v.trim().strip_prefix("Bearer ").unwrap_or_default().to_string();
-                }
-                immutable |= line.starts_with("Prefer: IdType=\"ImmutableId\"");
-            }
-            let mut body = vec![0u8; len];
-            let _ = reader.read_exact(&mut body);
-            if first.starts_with("POST /token ") {
-                let mut d = shared.lock().unwrap();
-                d.refreshes += 1;
-                let (status, out) = match (d.token_error.clone(), d.issue.pop_front()) {
-                    (Some(e), _) => e,
-                    (None, Some(t)) => (200, json!({"access_token": t, "expires_in": 3600}).to_string()),
-                    (None, None) => (400, json!({"error": "invalid_grant"}).to_string()),
-                };
-                drop(d);
-                respond(&mut s, status, out.as_bytes(), "application/json");
-                continue;
-            }
-            let authorized = {
-                let mut d = shared.lock().unwrap();
-                d.seen_tokens.push(token.clone());
-                if d.tokens.is_empty() { token == TOKEN } else { d.tokens.contains(&token) }
-            };
-            if !authorized {
-                respond(&mut s, 401, br#"{"error": {"code": "InvalidAuthenticationToken"}}"#, "application/json");
-                continue;
-            }
-            assert!(immutable, "ids are asked for in their immutable form");
-            let mut words = first.split(' ');
-            let (method, target) = (words.next().unwrap_or("GET").to_string(), words.next().unwrap_or("/").to_string());
-            let target = target.strip_prefix("/v1.0").unwrap_or(&target).to_string();
-            let mut d = shared.lock().unwrap();
-            if d.throttle > 0 {
-                d.throttle -= 1;
-                d.throttled += 1;
-                drop(d);
-                respond(&mut s, 429, br#"{"error": {"code": "TooManyRequests"}}"#, "application/json");
-                continue;
-            }
-            let (status, out, kind) = d.route(&method, &target, &body, &b);
-            drop(d);
-            respond(&mut s, status, &out, kind);
+            let Ok(s) = conn else { continue };
+            shared.lock().unwrap().accepts += 1;
+            let (shared, b) = (shared.clone(), b.clone());
+            std::thread::spawn(move || connection(s, &shared, &b));
         }
     });
     Server { base, data }
+}
+
+/// Answer the requests on one connection until it closes.
+fn connection(mut s: std::net::TcpStream, shared: &Arc<Mutex<Data>>, b: &str) {
+    let mut reader = BufReader::new(s.try_clone().unwrap());
+    loop {
+        let mut first = String::new();
+        if reader.read_line(&mut first).unwrap_or(0) == 0 {
+            return;
+        }
+        let (mut len, mut token, mut immutable, mut client_closes) = (0usize, String::new(), false, false);
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+            let lower = line.to_ascii_lowercase();
+            if let Some(v) = lower.strip_prefix("content-length:") {
+                len = v.trim().parse().unwrap_or(0);
+            }
+            client_closes |= lower.trim_end() == "connection: close";
+            if let Some((k, v)) = line.split_once(':')
+                && k.eq_ignore_ascii_case("authorization")
+            {
+                token = v.trim().strip_prefix("Bearer ").unwrap_or_default().to_string();
+            }
+            immutable |= line.starts_with("Prefer: IdType=\"ImmutableId\"");
+        }
+        let mut body = vec![0u8; len];
+        let _ = reader.read_exact(&mut body);
+        let close = client_closes || {
+            let mut d = shared.lock().unwrap();
+            d.requests += 1;
+            d.close
+        };
+        if first.starts_with("POST /token ") {
+            let mut d = shared.lock().unwrap();
+            d.refreshes += 1;
+            let (status, out) = match (d.token_error.clone(), d.issue.pop_front()) {
+                (Some(e), _) => e,
+                (None, Some(t)) => (200, json!({"access_token": t, "expires_in": 3600}).to_string()),
+                (None, None) => (400, json!({"error": "invalid_grant"}).to_string()),
+            };
+            drop(d);
+            respond(&mut s, status, out.as_bytes(), "application/json", close);
+        } else {
+            let (status, out, kind) = answer(shared, &first, &token, immutable, &body, b);
+            respond(&mut s, status, &out, kind, close);
+        }
+        if close {
+            return;
+        }
+    }
+}
+
+/// One Graph request: (status, body, content type).
+fn answer(shared: &Arc<Mutex<Data>>, first: &str, token: &str, immutable: bool, body: &[u8], b: &str) -> (u16, Vec<u8>, &'static str) {
+    let mut d = shared.lock().unwrap();
+    d.seen_tokens.push(token.to_string());
+    let authorized = if d.tokens.is_empty() { token == TOKEN } else { d.tokens.iter().any(|t| t == token) };
+    if !authorized {
+        return (401, br#"{"error": {"code": "InvalidAuthenticationToken"}}"#.to_vec(), "application/json");
+    }
+    assert!(immutable, "ids are asked for in their immutable form");
+    let mut words = first.split(' ');
+    let (method, target) = (words.next().unwrap_or("GET").to_string(), words.next().unwrap_or("/").to_string());
+    let target = target.strip_prefix("/v1.0").unwrap_or(&target).to_string();
+    if d.throttle > 0 {
+        d.throttle -= 1;
+        d.throttled += 1;
+        return (429, br#"{"error": {"code": "TooManyRequests"}}"#.to_vec(), "application/json");
+    }
+    let r = d.route(&method, &target, body, b);
+    let delay = if target.ends_with("/$value") { d.value_delay } else { std::time::Duration::ZERO };
+    drop(d);
+    // As Graph takes a while to make a message's MIME: other connections go on meanwhile.
+    std::thread::sleep(delay);
+    r
 }
 
 /// What a message's regular id (as opposed to its immutable one) starts with here.

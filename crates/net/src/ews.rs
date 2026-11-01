@@ -1384,6 +1384,19 @@ pub fn list_folders(c: &Client, st: &mut State, account: &str) -> Result<Vec<Fol
 
 /// Bring one folder's cache up to date.
 pub fn sync_folder(c: &Client, st: &mut State, store: &Store, account: &str, folder: &str, opts: &SyncOptions) -> Result<SyncReport> {
+    sync_folder_pausing(c, st, store, account, folder, opts, &mut || false)
+}
+
+/// [`sync_folder`], reading ahead only while `pause` says nothing more pressing waits.
+pub fn sync_folder_pausing(
+    c: &Client,
+    st: &mut State,
+    store: &Store,
+    account: &str,
+    folder: &str,
+    opts: &SyncOptions,
+    pause: &mut dyn FnMut() -> bool,
+) -> Result<SyncReport> {
     let id = st.mailbox(folder)?.to_string();
     let newest = c.newest(&id, opts.window)?;
     let (total, unread) = c.counts(&id)?;
@@ -1432,13 +1445,23 @@ pub fn sync_folder(c: &Client, st: &mut State, store: &Store, account: &str, fol
     sort_newest_first(&mut fs.messages);
     fs.uid_next = fs.messages.iter().map(|m| m.key.uid).max().unwrap_or(0).saturating_add(1);
     store.save_folder(account, folder, &fs)?;
-    prefetch(c, st, store, account, folder, &mut fs, opts)?;
+    prefetch(c, st, store, account, folder, &mut fs, opts, pause)?;
     report.total = total;
     report.unread = unread;
     Ok(report)
 }
 
-fn prefetch(c: &Client, st: &State, store: &Store, account: &str, folder: &str, fs: &mut FolderState, opts: &SyncOptions) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn prefetch(
+    c: &Client,
+    st: &State,
+    store: &Store,
+    account: &str,
+    folder: &str,
+    fs: &mut FolderState,
+    opts: &SyncOptions,
+    pause: &mut dyn FnMut() -> bool,
+) -> Result<()> {
     let wanted: Vec<(u32, String)> = fs
         .messages
         .iter()
@@ -1451,6 +1474,10 @@ fn prefetch(c: &Client, st: &State, store: &Store, account: &str, folder: &str, 
     }
     let mut failures = crate::sync::AheadFailures::new();
     for (n, id) in &wanted {
+        if pause() {
+            log::debug!("{account}/{folder}: reading ahead paused for a message being opened");
+            break;
+        }
         let raw = match c.download(id) {
             Ok(raw) => {
                 failures.ok();
@@ -1477,11 +1504,11 @@ pub fn fetch_body(c: &Client, st: &State, store: &Store, key: &MessageKey) -> Re
     let id = st.id(key.uid).filter(|_| key.validity == VALIDITY).ok_or_else(|| NetError::No("the message is no longer on the server".into()))?;
     let raw = c.download(id)?;
     store.write_body(key, &raw)?;
-    let mut fs = store.load_folder(&key.account, &key.folder)?;
-    if let Some(m) = fs.find_mut(key.uid) {
+    store.update_folder(&key.account, &key.folder, |fs| {
+        let Some(m) = fs.find_mut(key.uid) else { return false };
         fill_from_source(m, &raw);
-        store.save_folder(&key.account, &key.folder, &fs)?;
-    }
+        true
+    })?;
     Ok(raw)
 }
 

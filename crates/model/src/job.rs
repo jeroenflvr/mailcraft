@@ -26,8 +26,8 @@ pub struct Connections {
     /// Requests sent at once (Microsoft 365 batches; Exchange Online runs 4 at a time for an app
     /// on a mailbox, more come back throttled).
     pub requests: u32,
-    /// Sending and automatic replies get a connection of their own, so they never wait behind a
-    /// sync. Off: one connection per account.
+    /// Opening messages, sending and automatic replies get a connection of their own, so they
+    /// never wait behind a sync. Off: one connection per account.
     pub second: bool,
     /// Minutes between checks for new mail when the server can't say at once (no IDLE or push).
     pub check_minutes: u32,

@@ -101,6 +101,19 @@ pub fn sync_folder(c: &Client, st: &mut State, store: &Store, account: &str, fol
     Ok(block_on(mailcraft_jmap::sync_folder(&c.0, st, store, account, folder, opts))?)
 }
 
+/// [`sync_folder`], reading ahead only while `pause` says nothing more pressing waits.
+pub fn sync_folder_pausing(
+    c: &Client,
+    st: &mut State,
+    store: &Store,
+    account: &str,
+    folder: &str,
+    opts: &SyncOptions,
+    pause: &mut dyn FnMut() -> bool,
+) -> Result<SyncReport> {
+    Ok(block_on(mailcraft_jmap::sync_folder_pausing(&c.0, st, store, account, folder, opts, pause))?)
+}
+
 /// Download one message's source (and cache it).
 pub fn fetch_body(c: &Client, st: &State, store: &Store, key: &MessageKey) -> Result<Vec<u8>> {
     Ok(block_on(mailcraft_jmap::fetch_body(&c.0, st, store, key))?)
