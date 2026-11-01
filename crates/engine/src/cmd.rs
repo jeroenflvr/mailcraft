@@ -785,7 +785,7 @@ pub fn registry() -> Registry {
         .params(r#"{"account": string} (a Microsoft account over IMAP starts again through Microsoft Graph, for a mailbox Microsoft won't open over IMAP)"#),
         CommandSpec::new("account.setPassword", "Sign in again", "File › Accounts", set_password).params(r#"{"account": string, "password": string}"#),
         CommandSpec::new("account.setSignature", "Signature", "File › Options › Mail", set_signature)
-            .params(r#"{"account": string, "signature": string, "html"?: string (its look: bold, colours, links; the text then comes from it)}"#),
+            .params(r#"{"account": string, "signature": string (the text; a picture is U+FFFC), "styles"?: object (its look: the editor's styles, a style per character and paragraph), "pictures"?: [{"cid": string, "name": string, "mime": "image/…", "data": base64}] (8 at most, 512 KB each, 2 MB together), "html"?: string (pasted HTML instead: its look, links and data: pictures; the text then comes from it)}"#),
         CommandSpec::new("account.list", "Accounts", "File › Accounts", list_accounts),
         CommandSpec::new("account.addSharedMailbox", "Add a shared mailbox", "File › Info › Account settings", |s, v| {
             shared_mailbox(s, v, true)
@@ -1192,21 +1192,29 @@ fn attach(s: &mut Session, v: &Value) -> CmdResult {
     Ok(json!({"attached": name, "count": c.attachments.len()}))
 }
 
-/// Place a picture in the text. With `"insert": false` the mark isn't added to the text (the
-/// editor puts it at the cursor itself).
-fn insert_picture(s: &mut Session, v: &Value) -> CmdResult {
-    let (name, data) = file_param(v)?;
-    let name = sanitize_filename(&name);
+/// A file as a picture to place in a message (or a signature): its name made safe and its type
+/// from it; an error when it isn't a picture. Its `cid` is the caller's to give.
+pub fn picture_from_file(name: &str, data: Vec<u8>) -> Result<mailcraft_mime::InlinePicture, CmdError> {
+    let name = sanitize_filename(name);
     let mime = mime_from_name(&name).to_string();
     if !mime.starts_with("image/") {
         return Err(CmdError::Params(format!("{name} isn't a picture")));
     }
+    Ok(mailcraft_mime::InlinePicture { cid: String::new(), name, mime, data })
+}
+
+/// Place a picture in the text. With `"insert": false` the mark isn't added to the text (the
+/// editor puts it at the cursor itself).
+fn insert_picture(s: &mut Session, v: &Value) -> CmdResult {
+    let (name, data) = file_param(v)?;
+    let mut picture = picture_from_file(&name, data)?;
     let cid = s.new_cid();
+    picture.cid = cid.clone();
     let c = s.compose.as_mut().ok_or_else(|| CmdError::Disabled("no message is being written".into()))?;
-    if compose_size(c) + data.len() > ATTACH_MAX {
+    if compose_size(c) + picture.data.len() > ATTACH_MAX {
         return Err(CmdError::Failed("pictures and attachments are limited to 25 MB in total".into()));
     }
-    c.inline.push(mailcraft_mime::InlinePicture { cid: cid.clone(), name, mime, data });
+    c.inline.push(picture);
     c.plain = false;
     if p::bool(v, "insert").unwrap_or(true) {
         let n = c.body.chars().count();
@@ -1222,6 +1230,7 @@ fn insert_signature(s: &mut Session, v: &Value) -> CmdResult {
     use mailcraft_mime::rich::Style;
     let account = s.compose.as_ref().map(|c| c.account.clone()).ok_or_else(|| CmdError::Disabled("no message is being written".into()))?;
     let rich = s.signature_rich(&account);
+    let pictures = s.signature_pictures(&account);
     let sig = rich.0.trim_end().to_string();
     if sig.trim().is_empty() {
         return Err(CmdError::Params("this account has no signature yet: make one with Signatures…".into()));
@@ -1250,6 +1259,7 @@ fn insert_signature(s: &mut Session, v: &Value) -> CmdResult {
     styles.edit_at(&old, &c.body, &Style::default(), Some(end));
     c.styles = styles;
     crate::session::style_signature(c, &rich);
+    crate::session::add_pictures(c, pictures);
     Ok(json!({"inserted": at, "end": end}))
 }
 
@@ -1602,6 +1612,8 @@ fn add_account(s: &mut Session, v: &Value) -> CmdResult {
         smtp: if plain { ServerConfig::default() } else { server(v, "smtp", &guess.smtp)? },
         signature: p::str(v, "signature").unwrap_or_default().to_string(),
         signature_html: String::new(),
+        signature_styles: String::new(),
+        signature_pictures: Vec::new(),
         color: 0,
         oauth,
         jmap,
@@ -1700,20 +1712,96 @@ fn update_account(s: &mut Session, v: &Value) -> CmdResult {
     s.update_account(c, None)
 }
 
+/// Save an account's signature exactly as edited: its text, its look (`styles`) and its
+/// pictures (those the text shows, renamed `sig-<n>@<account>.mailcraft` so putting it in twice
+/// doesn't carry them twice). `html` (agents, the command line) is read as pasted HTML instead.
 fn set_signature(s: &mut Session, v: &Value) -> CmdResult {
+    use crate::session::{SIGNATURE_PICTURE_MAX, SIGNATURE_PICTURES, SIGNATURE_PICTURES_MAX};
+    use mailcraft_mime::rich::{self, Styles};
     let id = p::req_str(v, "account")?;
     let mut config = s.account(id).map(|a| a.config.clone()).ok_or_else(|| CmdError::Params(format!("no account `{id}`")))?;
-    config.signature = p::req_str(v, "signature")?.chars().take(10_000).collect();
-    // Its look, as HTML (from the signature editor, or pasted): kept as the editor would send
-    // it, its text the signature's.
-    config.signature_html = String::new();
+    let mut text: String = p::req_str(v, "signature")?.chars().take(10_000).collect();
+    let mut styles = Styles::plain(&text);
+    let mut pictures: Vec<mailcraft_mime::InlinePicture> = Vec::new();
     if let Some(html) = p::str(v, "html").filter(|h| !h.trim().is_empty()) {
-        let (text, styles) = mailcraft_mime::pasted_html(&html.chars().take(200_000).collect::<String>());
-        if !text.trim().is_empty() && !styles.is_plain() {
-            config.signature_html = mailcraft_mime::rich::to_html(&text, &styles);
-            config.signature = text.chars().take(10_000).collect();
+        let mut n = 0;
+        let (t, st, pics) = mailcraft_mime::pasted_html_with_pictures(&html.chars().take(200_000).collect::<String>(), &mut || {
+            n += 1;
+            Some(format!("pasted-{n}"))
+        });
+        if !t.trim().is_empty() && (!st.is_plain() || !pics.is_empty()) {
+            text = t.chars().take(10_000).collect();
+            styles = st;
+            pictures = pics;
+        }
+    } else {
+        if let Some(st) = v.get("styles").filter(|x| !x.is_null()) {
+            styles = serde_json::from_value(st.clone()).map_err(|e| CmdError::Params(format!("styles: {e}")))?;
+            if styles.palette.len() > 4096 || styles.paras.len() > 20_000 {
+                return Err(CmdError::Params("styles: too many".into()));
+            }
+        }
+        if let Some(list) = v.get("pictures").filter(|x| !x.is_null()) {
+            let list = list.as_array().ok_or_else(|| CmdError::Params("pictures: a list of {cid, name, mime, data}".into()))?;
+            if list.len() > 64 {
+                return Err(CmdError::Params("pictures: too many".into()));
+            }
+            for item in list {
+                let field = |k: &str| item.get(k).and_then(Value::as_str).ok_or_else(|| CmdError::Params(format!("pictures: `{k}` is required")));
+                let (cid, name, mime, data) = (field("cid")?, field("name")?, field("mime")?, field("data")?);
+                if !mime.trim().to_ascii_lowercase().starts_with("image/") || mime.len() > 64 {
+                    return Err(CmdError::Params(format!("{name} isn't a picture")));
+                }
+                let bytes = mailcraft_mime::b64::decode(data, SIGNATURE_PICTURE_MAX).ok_or_else(|| {
+                    CmdError::Params(format!("{name}: a picture in a signature is {} KB at most (or it isn't base64)", SIGNATURE_PICTURE_MAX >> 10))
+                })?;
+                let cid: String = cid.chars().take(200).collect();
+                pictures.push(mailcraft_mime::InlinePicture {
+                    cid,
+                    name: sanitize_filename(name),
+                    mime: mime.trim().to_ascii_lowercase(),
+                    data: bytes,
+                });
+            }
         }
     }
+    styles.fit(&text);
+    // Only the pictures the text shows, once each.
+    let used = rich::pictures(&text, &styles);
+    pictures.retain(|p| used.contains(&p.cid));
+    let mut seen = std::collections::HashSet::new();
+    pictures.retain(|p| seen.insert(p.cid.clone()));
+    if pictures.len() > SIGNATURE_PICTURES {
+        return Err(CmdError::Params(format!("a signature holds {SIGNATURE_PICTURES} pictures at most")));
+    }
+    if pictures.iter().map(|p| p.data.len()).sum::<usize>() > SIGNATURE_PICTURES_MAX {
+        return Err(CmdError::Params(format!("a signature's pictures are {} MB at most together", SIGNATURE_PICTURES_MAX >> 20)));
+    }
+    if pictures.iter().any(|p| p.data.len() > SIGNATURE_PICTURE_MAX) {
+        return Err(CmdError::Params(format!("a picture in a signature is {} KB at most", SIGNATURE_PICTURE_MAX >> 10)));
+    }
+    // Stable names: the account's, numbered (all renamed in one pass, whatever they were).
+    let tag: String = config.id.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.')).take(64).collect();
+    let renamed: std::collections::HashMap<String, String> =
+        pictures.iter().enumerate().map(|(n, p)| (p.cid.clone(), format!("sig-{}@{tag}.mailcraft", n + 1))).collect();
+    for st in &mut styles.palette {
+        if let Some(new) = st.picture.as_ref().and_then(|old| renamed.get(old)) {
+            st.picture = Some(new.clone());
+        }
+    }
+    for p in &mut pictures {
+        if let Some(new) = renamed.get(&p.cid) {
+            p.cid = new.clone();
+        }
+    }
+    config.signature_styles =
+        if styles.is_plain() { String::new() } else { serde_json::to_string(&styles).map_err(|e| CmdError::Failed(e.to_string()))? };
+    config.signature_pictures = pictures
+        .into_iter()
+        .map(|p| mailcraft_model::SignaturePicture { cid: p.cid, name: p.name, mime: p.mime, data: mailcraft_mime::b64::encode(&p.data) })
+        .collect();
+    config.signature = text;
+    config.signature_html = String::new();
     s.update_account(config, None)
 }
 

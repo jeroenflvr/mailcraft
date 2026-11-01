@@ -2517,6 +2517,13 @@ impl Session {
     /// An account's signature with its look: its text and styles (plain when it has none).
     pub fn signature_rich(&self, account: &str) -> (String, mime::rich::Styles) {
         let Some(a) = self.account(account) else { return (String::new(), mime::rich::Styles::default()) };
+        if !a.config.signature_styles.trim().is_empty()
+            && let Ok(mut styles) = serde_json::from_str::<mime::rich::Styles>(&a.config.signature_styles)
+        {
+            styles.fit(&a.config.signature);
+            return (a.config.signature.clone(), styles);
+        }
+        // As earlier versions kept it.
         if !a.config.signature_html.trim().is_empty() {
             let (text, styles) = mime::pasted_html(&a.config.signature_html);
             if !text.trim().is_empty() {
@@ -2526,12 +2533,29 @@ impl Session {
         (a.config.signature.clone(), mime::rich::Styles::plain(&a.config.signature))
     }
 
-    /// The signature in the message being made, given its look (the text went in plain).
+    /// The pictures in an account's signature (one that can't be read is left out).
+    pub fn signature_pictures(&self, account: &str) -> Vec<mime::InlinePicture> {
+        let Some(a) = self.account(account) else { return Vec::new() };
+        a.config
+            .signature_pictures
+            .iter()
+            .take(SIGNATURE_PICTURES)
+            .filter_map(|p| {
+                let data = mime::b64::decode(&p.data, SIGNATURE_PICTURE_MAX)?;
+                Some(mime::InlinePicture { cid: p.cid.clone(), name: p.name.clone(), mime: p.mime.clone(), data })
+            })
+            .collect()
+    }
+
+    /// The signature in the message being made, given its look (the text went in plain) and
+    /// its pictures.
     fn style_signature(&mut self) {
         let Some(account) = self.compose.as_ref().map(|c| c.account.clone()) else { return };
         let sig = self.signature_rich(&account);
+        let pictures = self.signature_pictures(&account);
         if let Some(c) = self.compose.as_mut() {
             style_signature(c, &sig);
+            add_pictures(c, pictures);
         }
     }
 
@@ -3580,6 +3604,21 @@ fn follow_up_ops(keys: &[MessageKey], from: FollowUp, to: FollowUp) -> Vec<Op> {
         (FollowUp::Flagged, FollowUp::None) => vec![flag(false)],
         (FollowUp::Complete, FollowUp::None) => vec![done(false)],
         (FollowUp::None, FollowUp::None) => Vec::new(),
+    }
+}
+
+/// Most pictures in a signature, each one's size and theirs together: a signature goes on every
+/// message.
+pub const SIGNATURE_PICTURES: usize = 8;
+pub const SIGNATURE_PICTURE_MAX: usize = 512 << 10;
+pub const SIGNATURE_PICTURES_MAX: usize = 2 << 20;
+
+/// Add pictures to a message being written, unless it has them already (by `cid`).
+pub fn add_pictures(c: &mut Compose, pictures: Vec<mime::InlinePicture>) {
+    for p in pictures {
+        if !c.inline.iter().any(|i| i.cid == p.cid) {
+            c.inline.push(p);
+        }
     }
 }
 

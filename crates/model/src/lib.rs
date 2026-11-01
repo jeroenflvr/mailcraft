@@ -127,10 +127,17 @@ pub struct AccountConfig {
     pub smtp: ServerConfig,
     #[serde(default)]
     pub signature: String,
-    /// The signature's look, as HTML (empty when it's plain text): bold, colours, sizes and
-    /// links, as pasted from Outlook or set in the signature editor.
+    /// The signature's look as HTML, as earlier versions kept it: read when `signature_styles`
+    /// is empty, and cleared when the signature is saved again.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub signature_html: String,
+    /// The signature's look: `mime::rich::Styles` as JSON (the model doesn't know the type);
+    /// empty for a plain signature.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature_styles: String,
+    /// The pictures in the signature (its `cid:`s), small: a logo or two.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signature_pictures: Vec<SignaturePicture>,
     /// The colour index the UI uses for this account's marker.
     #[serde(default)]
     pub color: u8,
@@ -173,6 +180,16 @@ pub struct AccountConfig {
     /// additional mailboxes"); those the server maps to it open by themselves.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shared_mailboxes: Vec<String>,
+}
+
+/// A picture in an account's signature.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignaturePicture {
+    pub cid: String,
+    pub name: String,
+    pub mime: String,
+    /// The bytes, base64 (JSON keeps bytes as a list of numbers, four times the size).
+    pub data: String,
 }
 
 /// The EWS address of an account whose Exchange server Autodiscover finds when it connects.
@@ -247,6 +264,8 @@ impl AccountConfig {
             smtp,
             signature: String::new(),
             signature_html: String::new(),
+            signature_styles: String::new(),
+            signature_pictures: Vec::new(),
             color: 0,
             oauth: None,
             jmap: None,

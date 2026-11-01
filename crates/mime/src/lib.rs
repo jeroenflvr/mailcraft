@@ -12,6 +12,7 @@
 //! additionally fenced with `catch_unwind` and size caps, since mail is hostile input.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod b64;
 mod css;
 mod fonts;
 pub mod layout;
@@ -370,19 +371,58 @@ fn word_paragraphs(html: &str) -> String {
 /// page) as text and styles to put into a message: its formatting and links, without pictures
 /// (they'd point at the other program's files or the web) or the empty lines around it.
 pub fn pasted_html(html: &str) -> (String, rich::Styles) {
+    let (text, styles, _) = pasted_html_with_pictures(html, &mut || None);
+    (text, styles)
+}
+
+/// Largest picture taken from a `data:` address in pasted HTML.
+pub const PASTED_PICTURE_MAX: usize = 2 << 20;
+
+/// A picture in a `data:` address (`data:image/png;base64,…`): its type and bytes.
+pub fn data_picture(src: &str, max: usize) -> Option<(String, Vec<u8>)> {
+    let rest = src.trim().get(5..).filter(|_| src.trim().get(..5).is_some_and(|d| d.eq_ignore_ascii_case("data:")))?;
+    let (head, data) = rest.split_once(',')?;
+    let mut params = head.split(';');
+    let mime = params.next()?.trim().to_ascii_lowercase();
+    if !mime.starts_with("image/") || !params.any(|p| p.trim().eq_ignore_ascii_case("base64")) || mime.len() > 64 {
+        return None;
+    }
+    Some((mime, b64::decode(data, max)?))
+}
+
+/// [`pasted_html`], keeping the pictures carried in the HTML itself (`data:` addresses, as a
+/// browser or the editor copies them) under `cid:`s from `cid_for` (`None`: left out). Pictures
+/// pointing at files or the web are left out: Outlook's clipboard names its own as `file:///`
+/// paths that can't be read.
+pub fn pasted_html_with_pictures(html: &str, cid_for: &mut dyn FnMut() -> Option<String>) -> (String, rich::Styles, Vec<InlinePicture>) {
     let (marked, fonts) = fonts::mark(&word_paragraphs(html));
     let mut lines = html_to_rich(&marked);
-    for line in &mut lines {
-        line.retain(|sp| sp.image.is_none());
+    let mut pictures: Vec<InlinePicture> = Vec::new();
+    let mut map: Vec<(String, String)> = Vec::new();
+    for sp in lines.iter().flatten() {
+        let Some(src) = sp.image.as_deref() else { continue };
+        if map.iter().any(|(s, _)| s == src) {
+            continue;
+        }
+        let Some((mime, data)) = data_picture(src, PASTED_PICTURE_MAX) else { continue };
+        let Some(cid) = cid_for() else { break };
+        let ext = mime.trim_start_matches("image/").split('+').next().unwrap_or("png").to_string();
+        pictures.push(InlinePicture { cid: cid.clone(), name: format!("picture-{}.{ext}", pictures.len() + 1), mime, data });
+        map.push((src.to_string(), cid));
     }
-    let blank = |l: &Vec<Span>| l.iter().all(|sp| sp.text.trim().is_empty());
+    for line in &mut lines {
+        line.retain(|sp| sp.image.as_ref().is_none_or(|src| map.iter().any(|(s, _)| s == src)));
+    }
+    let blank = |l: &Vec<Span>| l.iter().all(|sp| sp.text.trim().is_empty() && sp.image.is_none());
     while lines.last().is_some_and(blank) {
         lines.pop();
     }
     let first = lines.iter().position(|l| !blank(l)).unwrap_or(lines.len());
     lines.drain(..first);
-    let (text, styles) = rich::from_rich(&lines);
-    fonts::apply(&text, &styles, &fonts)
+    let (text, styles) = rich::from_rich_with(&lines, &|src| map.iter().find(|(s, _)| s == src).map(|(_, c)| c.clone()));
+    let (text, styles) = fonts::apply(&text, &styles, &fonts);
+    pictures.retain(|p| rich::pictures(&text, &styles).contains(&p.cid));
+    (text, styles, pictures)
 }
 
 /// HTML → lines of formatted spans: paragraphs, emphasis, links, list bullets, quotes, tables
@@ -1517,6 +1557,36 @@ iVBORw0KGgo=\r\n\
         .unwrap();
         let r = reply_doc_with(&parse(&plain).unwrap(), Some(&plain), ReplyMode::Reply, &[], &clock, "", &mut String::new);
         assert!(r.quoted.is_none() && r.pictures.is_empty());
+    }
+
+    /// A signature copied with its logo carried in the HTML (as a browser copies a picture)
+    /// keeps the logo; pictures that point at files or the web can't come along.
+    #[test]
+    fn pasted_html_with_pictures_keeps_data_uris() {
+        let png = b64::encode(&[137, 80, 78, 71, 1, 2, 3]);
+        let html = format!(
+            "<p><img src=\"data:image/png;base64,{png}\" width=80></p><p><b>Zoe Park</b></p>\
+             <p><img src=\"file:///C:/Users/zoe/AppData/sig_files/image001.png\"><img src=\"https://web.example/x.png\">\
+             <img src=\"data:text/html;base64,PGI+\"><img src=\"data:image/png;base64,!!!\"></p>"
+        );
+        let mut n = 0;
+        let (text, styles, pictures) = pasted_html_with_pictures(&html, &mut || {
+            n += 1;
+            Some(format!("p{n}@x"))
+        });
+        assert_eq!(pictures.len(), 1, "{pictures:?}");
+        assert_eq!(
+            (pictures[0].cid.as_str(), pictures[0].mime.as_str(), pictures[0].data.as_slice()),
+            ("p1@x", "image/png", &[137u8, 80, 78, 71, 1, 2, 3][..])
+        );
+        assert!(text.starts_with(rich::PICTURE), "the logo stays first: {text:?}");
+        assert_eq!(styles.style(0).picture.as_deref(), Some("p1@x"));
+        assert!(text.contains("Zoe Park") && !text.contains("[picture]"), "{text:?}");
+        // Without cids: as `pasted_html`, no pictures.
+        let (plain, _) = pasted_html(&html);
+        assert!(!plain.contains(rich::PICTURE));
+        assert_eq!(data_picture("data:image/gif;base64,R0lG", 10).map(|(m, d)| (m, d.len())), Some(("image/gif".into(), 3)));
+        assert_eq!(data_picture("data:image/png,raw", 10), None);
     }
 
     #[test]
