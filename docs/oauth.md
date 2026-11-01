@@ -48,6 +48,25 @@ both; then the account is added once, with that address.
 Sign in once with a test account: if Microsoft says the redirect URI doesn't match
 (`AADSTS50011`), check the two loopback addresses in step 2.
 
+## Staying signed in
+
+The keychain keeps the refresh token; access tokens (an hour or so for Microsoft's) are fetched
+from it as needed and never stored. A Graph or JMAP connection outlives its token, so before each
+piece of work it asks for a token that lasts five minutes more at least, and a token about to run
+out is renewed then. Both clocks count: the monotonic one stands still while the computer sleeps,
+so the wall clock decides after a night's sleep. A request refused with 401 gets a new token and
+goes again, once; a second refusal within ten minutes means signing in again.
+
+Only the token service's own refusals ask to sign in again: `invalid_grant` (the sign-in was
+revoked, the password changed, it lapsed), `interaction_required`, `consent_required`,
+`invalid_client` and `unauthorized_client`. Anything else while refreshing (a 5xx, 429, a captive
+portal) is a network error: the account says *Error*, tries again after 5 s, 10 s… up to 5
+minutes, and the refresh token is kept.
+
+The keychain entry is named after the account and its user name (`<id>|<user>`); older versions
+also named the IMAP server, and that entry is read once and moved, so editing the server settings
+doesn't lose the sign-in.
+
 ## When an Outlook.com or Hotmail account doesn't connect
 
 - **"Microsoft doesn't accept passwords from mail apps":** the account was added with a password

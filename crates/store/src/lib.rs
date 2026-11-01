@@ -723,6 +723,17 @@ impl Store {
         self.save_folder_counted(account, folder, state, None).map(drop)
     }
 
+    /// Read a folder's state, change it (`f` says whether it did) and save it, with no other
+    /// locked save in between: the account's two connections may both be saving it.
+    pub fn update_folder(&self, account: &str, folder: &str, f: impl FnOnce(&mut FolderState) -> bool) -> Result<()> {
+        let _held = self.hold();
+        let mut st = self.load_folder(account, folder)?;
+        if f(&mut st) {
+            self.save_folder_counted(account, folder, &st, None)?;
+        }
+        Ok(())
+    }
+
     /// The lock folder saves take (a poisoned one is still a lock: saving never panics).
     fn hold(&self) -> std::sync::MutexGuard<'_, ()> {
         self.writing.lock().unwrap_or_else(std::sync::PoisonError::into_inner)

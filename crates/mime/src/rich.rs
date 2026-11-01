@@ -462,6 +462,12 @@ pub fn to_text(text: &str, styles: &Styles) -> String {
 /// A received message's formatted body as editable text and styles (to reply or carry on a
 /// draft with its formatting).
 pub fn from_rich(lines: &RichText) -> (String, Styles) {
+    from_rich_with(lines, &|_| None)
+}
+
+/// [`from_rich`], with the pictures `picture` gives a `cid:` for placed in the text (the others
+/// are `[picture]`).
+pub fn from_rich_with(lines: &RichText, picture: &dyn Fn(&str) -> Option<String>) -> (String, Styles) {
     let mut text = String::new();
     let mut styles = Styles::plain("");
     styles.chars.clear();
@@ -473,9 +479,17 @@ pub fn from_rich(lines: &RichText) -> (String, Styles) {
         }
         styles.paras.push(Para::default());
         for sp in line {
-            let st = span_style(sp);
+            let mut st = span_style(sp);
+            let cid = sp.image.as_deref().and_then(|src| picture(src.trim()));
+            let t = if let Some(cid) = cid {
+                st.picture = Some(cid);
+                PICTURE.to_string()
+            } else if sp.image.is_some() && sp.text.trim().is_empty() {
+                "[picture]".to_string()
+            } else {
+                sp.text.replace(['\n', PICTURE], " ")
+            };
             let id = styles.intern(st);
-            let t = if sp.image.is_some() && sp.text.trim().is_empty() { "[picture]".to_string() } else { sp.text.replace(['\n', PICTURE], " ") };
             for _ in t.chars() {
                 styles.chars.push(id);
             }

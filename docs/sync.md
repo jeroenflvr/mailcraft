@@ -58,16 +58,25 @@ Message sources live next to it as `<validity>/<uid>.eml`. A message is identifi
   sync and a change isn't undone on screen by folders read before it's made.
 - Then **wait for mail**: `IDLE` on the Inbox (RFC 2177) in half-second slices, so new jobs interrupt
   it at once; re-issued every 10 minutes (servers drop IDLE after 30). Without IDLE, poll every 2
-  minutes. A full sync runs every 15 minutes. Both are settings (File › Options › Connections,
+  minutes (Graph and Exchange: every 30 s, see below). A full sync runs every 15 minutes. Both are settings (File › Options › Connections,
   `account.connections`). The account is up to date once its mail folders (and the Outbox and
   quota) are; the calendars and contacts follow (a big Microsoft 365 calendar takes minutes to
   read, and the account said "Updating…" all that time).
-- **Connections per account:** the main one (syncing, changes, opened messages) and, unless turned
-  off, a second one for sending and automatic replies that connects when there's something to
-  send and lets go after 5 idle minutes. Graph keeps no connection open: each request is its own
-  HTTPS connection. A connection that replaces another (signing in again, a changed setting)
+- **Connections per account:** the main one (syncing, changes) and, unless turned off, a second
+  one for opening messages, sending and automatic replies that connects when there's something to
+  do and lets go after 5 idle minutes. A Graph session keeps one HTTPS connection open for all its
+  requests (see below). A connection that replaces another (signing in again, a changed setting)
   waits up to 30 s for the old one to stop, which it does at its next chance (a Graph wait ends
   at once), so two never save the same cache.
+- **Opening a message** never waits behind a sync: it goes on the second connection (POP: the
+  main one), which looks a message up in the numbers the main connection saved when it doesn't
+  know it yet, and leaves one still unknown to the main connection. The two connections share the
+  list of changes waiting for the server, and a downloaded source updates the folder's list under
+  the cache's lock. On the main connection (no second one, or a message it was left), a folder
+  sync stops reading ahead (`prefetch`) before its next download when an opened message or a
+  change is waiting, and those are handled when it returns; the rest is read ahead at the next
+  sync. Each download says in the log how long it took and how long it waited (see
+  [troubleshooting.md](troubleshooting.md#a-message-is-slow-to-open)).
 - **Failures:** a broken connection is retried with exponential back-off (5 s → 5 min). A refused
   password stops retrying and asks the user (`NeedsPassword`). A refused command is reported and
   the cache is resynced. A folder the server refuses is said, and the account is up to date again
@@ -172,7 +181,17 @@ switched IMAP off.
   Graph runs a batch's requests side by side, so batches hold 4 (a setting: requests at once, 1
   to 20). A request turned away as too
   busy (429, or for a read 502–504, a gateway that gave up) goes again after the server's `Retry-After` (at most 30 s, five
-  times), on its own or as the throttled part of a batch; only then does the account back off.
+  times), on its own or as the throttled part of a batch, for 45 s at most: then its last answer
+  is the error ("HTTP 504"), and the account backs off. Each retry is logged (`warn`) with the
+  request's path and the attempt.
+- **Polling:** Graph has no push, so the Inbox is looked at every 30 s (the *check for new mail*
+  setting when it's shorter): one request for the newest ids, and a message the phone shows at
+  once shows here within half a minute rather than two. Exchange (EWS) is polled the same way.
+- **One connection per session:** the requests of a Graph session go one after another on one
+  kept-open HTTPS connection (one TLS handshake, not one per request; the detailed log says
+  `connected in 0 ms` for a reused one). When the server said it closes, the next request opens
+  another; a kept connection the server let go of while idle fails before answering, and the
+  request goes once more on a new one.
 - **Sending** posts the MIME source to `sendMail`, which files the copy in Sent Items; recipients
   only on the envelope go in a `Bcc:` header, which Exchange strips. Drafts are made from MIME and
   moved where they belong.

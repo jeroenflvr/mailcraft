@@ -9,7 +9,8 @@
 //! commands at start-up (`--cmd 'list.open={"key":"sample:1:1:INBOX"}'`); `ui.file` (or
 //! `ui.settings`), `ui.openExport`, `ui.options` and `ui.about` open the File page at that page;
 //! `ui.addAccount` (optionally `={"email":…,"advanced":true,"graph":true}` or `"pop":true`), `ui.newEvent` and
-//! `ui.newContact` open those dialogs.
+//! `ui.newContact` open those dialogs, and `ui.signature` (optionally `={"account":…}`) the
+//! signature editor.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -36,21 +37,62 @@ mod xdnd;
 
 const SERVICE: &str = "MailCraft";
 
-fn entry(a: &AccountConfig) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, &format!("{}|{}|{}", a.id, a.username, a.imap.host)).map_err(|e| e.to_string())
+/// The keychain entry's name: the account and who signs in. The server isn't part of it: a
+/// Graph account's server settings can change without its sign-in going away.
+fn key(a: &AccountConfig) -> String {
+    format!("{}|{}", a.id, a.username)
+}
+
+/// The name older versions used, read once and moved to [`key`].
+fn old_key(a: &AccountConfig) -> String {
+    format!("{}|{}|{}", a.id, a.username, a.imap.host)
+}
+
+/// The keychain, as far as [`stored`] needs it (so the fallback can be tested without one).
+trait KeyStore {
+    fn get(&self, key: &str) -> Option<String>;
+    fn set(&self, key: &str, secret: &str) -> Result<(), String>;
+    fn delete(&self, key: &str);
+}
+
+/// The secret under the account's key; else under the old key, moved to the new one.
+fn stored(s: &dyn KeyStore, a: &AccountConfig) -> Option<String> {
+    if let Some(v) = s.get(&key(a)) {
+        return Some(v);
+    }
+    let v = s.get(&old_key(a))?;
+    if s.set(&key(a), &v).is_ok() {
+        s.delete(&old_key(a));
+    }
+    Some(v)
+}
+
+struct System;
+
+impl KeyStore for System {
+    fn get(&self, key: &str) -> Option<String> {
+        keyring::Entry::new(SERVICE, key).ok()?.get_password().ok()
+    }
+    fn set(&self, key: &str, secret: &str) -> Result<(), String> {
+        keyring::Entry::new(SERVICE, key).and_then(|e| e.set_password(secret)).map_err(|e| e.to_string())
+    }
+    fn delete(&self, key: &str) {
+        if let Ok(e) = keyring::Entry::new(SERVICE, key) {
+            let _ = e.delete_credential();
+        }
+    }
 }
 
 impl Credentials for Keychain {
     fn get(&self, account: &AccountConfig) -> Option<String> {
-        entry(account).ok()?.get_password().ok()
+        stored(&System, account)
     }
     fn set(&self, account: &AccountConfig, password: &str) -> Result<(), String> {
-        entry(account)?.set_password(password).map_err(|e| e.to_string())
+        System.set(&key(account), password)
     }
     fn delete(&self, account: &AccountConfig) {
-        if let Ok(e) = entry(account) {
-            let _ = e.delete_credential();
-        }
+        System.delete(&key(account));
+        System.delete(&old_key(account));
     }
 }
 
@@ -687,6 +729,12 @@ fn main() -> eframe::Result {
                     "ui.print" => app.open_print_dialog(),
                     "ui.newEvent" => app.ui.dialog = Some(mailcraft_ui_egui::Dialog::new_event(&app.session, None)),
                     "ui.newContact" => app.ui.dialog = Some(mailcraft_ui_egui::Dialog::new_contact()),
+                    "ui.signature" => {
+                        let p: serde_json::Value = serde_json::from_str(params).unwrap_or_default();
+                        let first = app.session.accounts.first().map(|a| a.config.id.clone()).unwrap_or_default();
+                        let account = p.get("account").and_then(|v| v.as_str()).map_or(first, str::to_string);
+                        app.ui.dialog = Some(mailcraft_ui_egui::Dialog::signature(&app.session, &account));
+                    }
                     _ => match serde_json::from_str(params) {
                         Ok(p) => app.run(id, p),
                         Err(e) => eprintln!("--cmd {id}: bad JSON: {e}"),
@@ -701,6 +749,38 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct Memory(std::sync::Mutex<std::collections::HashMap<String, String>>);
+
+    impl KeyStore for Memory {
+        fn get(&self, key: &str) -> Option<String> {
+            self.0.lock().unwrap().get(key).cloned()
+        }
+        fn set(&self, key: &str, secret: &str) -> Result<(), String> {
+            self.0.lock().unwrap().insert(key.into(), secret.into());
+            Ok(())
+        }
+        fn delete(&self, key: &str) {
+            self.0.lock().unwrap().remove(key);
+        }
+    }
+
+    /// A sign-in saved by an older version (its key named the IMAP server) is still found, and
+    /// moved under the new key, so editing a Graph account's server settings keeps it.
+    #[test]
+    fn the_keychain_key_falls_back_to_the_old_one() {
+        let mut a = AccountConfig { id: "a1".into(), username: "me@contoso.example".into(), ..Default::default() };
+        a.imap.host = "outlook.office365.com".into();
+        let m = Memory::default();
+        assert_eq!(stored(&m, &a), None);
+        m.set(&old_key(&a), "r1").unwrap();
+        assert_eq!(stored(&m, &a).as_deref(), Some("r1"));
+        assert_eq!(m.get(&key(&a)).as_deref(), Some("r1"), "moved");
+        assert_eq!(m.get(&old_key(&a)), None, "the old one is gone");
+        a.imap.host = "elsewhere.example".into();
+        assert_eq!(stored(&m, &a).as_deref(), Some("r1"), "the server isn't part of the key");
+    }
 
     /// eframe is used without its default features, and copy and paste are one of them since
     /// 0.37: the app had no clipboard (nothing pasted anywhere) until it was named.

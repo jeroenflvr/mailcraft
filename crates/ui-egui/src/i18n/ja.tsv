@@ -805,7 +805,7 @@ month	May	5月
 	Mobile phone	携帯電話
 	Home phone	自宅電話
 	Address book	アドレス帳
-	Paste one from Outlook or Word and it keeps its look; Ctrl+B, Ctrl+I and Ctrl+U format it.	Outlook や Word から貼り付けると書式が保たれます。Ctrl+B、Ctrl+I、Ctrl+U で書式を設定できます。
+	Paste one from Outlook or Word and it keeps its look; use Pictures for a logo (Outlook's clipboard doesn't carry its images).	Outlook や Word から貼り付けると書式が保たれます。ロゴは［画像］で挿入してください（Outlook のクリップボードには画像が含まれません）。
 	All contacts	すべての連絡先
 	Always open with this address book	常にこのアドレス帳で開く
 	Day and week show each calendar in a pane of its own	日と週の表示で、各予定表をそれぞれのウィンドウに表示します

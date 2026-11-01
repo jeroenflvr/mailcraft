@@ -66,6 +66,30 @@ pub struct Data {
     /// The next this many requests for a later page of a folder's listing fail as a gateway
     /// that gave up (504).
     pub gateway_errors: u32,
+    /// The access tokens taken (none: [`TOKEN`] only).
+    pub tokens: Vec<String>,
+    /// The token each request was signed with.
+    pub seen_tokens: Vec<String>,
+    /// The token endpoint (`/token`, beside `/v1.0`): the access tokens it hands out, in turn.
+    pub issue: std::collections::VecDeque<String>,
+    /// … or else this answer (status, JSON body).
+    pub token_error: Option<(u16, String)>,
+    /// Refresh requests the token endpoint had.
+    pub refreshes: u32,
+    /// Connections accepted, and requests answered.
+    pub accepts: u32,
+    pub requests: u32,
+    /// Close every connection after its answer (`Connection: close`).
+    pub close: bool,
+    /// How long each message source (`$value`) takes to come.
+    pub value_delay: std::time::Duration,
+    /// The `Retry-After` (seconds) sent with a busy answer.
+    pub retry_after: u64,
+    /// Every request is answered with this status (a gateway giving up: 504).
+    pub fail_all: u16,
+    /// Close this many connections after their next answer without saying so, as a server lets
+    /// go of an idle one.
+    pub drop_next: u32,
     late: Vec<(std::time::Instant, Vec<u8>)>,
     next: u32,
 }
@@ -464,14 +488,16 @@ pub struct Server {
     pub data: Arc<Mutex<Data>>,
 }
 
-fn respond(s: &mut impl Write, status: u16, body: &[u8], kind: &str) {
-    let wait = if status == 429 || (502..=504).contains(&status) { "Retry-After: 0\r\n" } else { "" };
-    let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{wait}Connection: close\r\n\r\n", body.len());
+fn respond(s: &mut impl Write, status: u16, body: &[u8], kind: &str, close: bool, retry_after: u64) {
+    let wait = if status == 429 || (502..=504).contains(&status) { format!("Retry-After: {retry_after}\r\n") } else { String::new() };
+    let close = if close { "Connection: close\r\n" } else { "" };
+    let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{wait}{close}\r\n", body.len());
     let _ = s.write_all(head.as_bytes());
     let _ = s.write_all(body);
 }
 
-/// Start the server; it runs until the test process ends.
+/// Start the server; it runs until the test process ends. Each connection has a thread of its
+/// own and is kept open between requests (HTTP/1.1), unless the client or [`Data::close`] says.
 pub fn serve(data: Data) -> Server {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://127.0.0.1:{}/v1.0", l.local_addr().unwrap().port());
@@ -479,50 +505,100 @@ pub fn serve(data: Data) -> Server {
     let (shared, b) = (data.clone(), base.clone());
     std::thread::spawn(move || {
         for conn in l.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut reader = BufReader::new(s.try_clone().unwrap());
-            let mut first = String::new();
-            if reader.read_line(&mut first).unwrap_or(0) == 0 {
-                continue;
-            }
-            let (mut len, mut authorized, mut immutable) = (0usize, false, false);
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                    break;
-                }
-                let lower = line.to_ascii_lowercase();
-                if let Some(v) = lower.strip_prefix("content-length:") {
-                    len = v.trim().parse().unwrap_or(0);
-                }
-                authorized |=
-                    line.split_once(':').is_some_and(|(k, v)| k.eq_ignore_ascii_case("authorization") && v.trim() == format!("Bearer {TOKEN}"));
-                immutable |= line.starts_with("Prefer: IdType=\"ImmutableId\"");
-            }
-            let mut body = vec![0u8; len];
-            let _ = reader.read_exact(&mut body);
-            if !authorized {
-                respond(&mut s, 401, br#"{"error": {"code": "InvalidAuthenticationToken"}}"#, "application/json");
-                continue;
-            }
-            assert!(immutable, "ids are asked for in their immutable form");
-            let mut words = first.split(' ');
-            let (method, target) = (words.next().unwrap_or("GET").to_string(), words.next().unwrap_or("/").to_string());
-            let target = target.strip_prefix("/v1.0").unwrap_or(&target).to_string();
-            let mut d = shared.lock().unwrap();
-            if d.throttle > 0 {
-                d.throttle -= 1;
-                d.throttled += 1;
-                drop(d);
-                respond(&mut s, 429, br#"{"error": {"code": "TooManyRequests"}}"#, "application/json");
-                continue;
-            }
-            let (status, out, kind) = d.route(&method, &target, &body, &b);
-            drop(d);
-            respond(&mut s, status, &out, kind);
+            let Ok(s) = conn else { continue };
+            shared.lock().unwrap().accepts += 1;
+            let (shared, b) = (shared.clone(), b.clone());
+            std::thread::spawn(move || connection(s, &shared, &b));
         }
     });
     Server { base, data }
+}
+
+/// Answer the requests on one connection until it closes.
+fn connection(mut s: std::net::TcpStream, shared: &Arc<Mutex<Data>>, b: &str) {
+    let mut reader = BufReader::new(s.try_clone().unwrap());
+    loop {
+        let mut first = String::new();
+        if reader.read_line(&mut first).unwrap_or(0) == 0 {
+            return;
+        }
+        let (mut len, mut token, mut immutable, mut client_closes) = (0usize, String::new(), false, false);
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+            let lower = line.to_ascii_lowercase();
+            if let Some(v) = lower.strip_prefix("content-length:") {
+                len = v.trim().parse().unwrap_or(0);
+            }
+            client_closes |= lower.trim_end() == "connection: close";
+            if let Some((k, v)) = line.split_once(':')
+                && k.eq_ignore_ascii_case("authorization")
+            {
+                token = v.trim().strip_prefix("Bearer ").unwrap_or_default().to_string();
+            }
+            immutable |= line.starts_with("Prefer: IdType=\"ImmutableId\"");
+        }
+        let mut body = vec![0u8; len];
+        let _ = reader.read_exact(&mut body);
+        let (close, let_go, retry_after) = {
+            let mut d = shared.lock().unwrap();
+            d.requests += 1;
+            let let_go = d.drop_next > 0;
+            if let_go {
+                d.drop_next -= 1;
+            }
+            (client_closes || d.close, let_go, d.retry_after)
+        };
+        if first.starts_with("POST /token ") {
+            let mut d = shared.lock().unwrap();
+            d.refreshes += 1;
+            let (status, out) = match (d.token_error.clone(), d.issue.pop_front()) {
+                (Some(e), _) => e,
+                (None, Some(t)) => (200, json!({"access_token": t, "expires_in": 3600}).to_string()),
+                (None, None) => (400, json!({"error": "invalid_grant"}).to_string()),
+            };
+            drop(d);
+            respond(&mut s, status, out.as_bytes(), "application/json", close, retry_after);
+        } else {
+            let (status, out, kind) = answer(shared, &first, &token, immutable, &body, b);
+            respond(&mut s, status, &out, kind, close, retry_after);
+        }
+        if close || let_go {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+            return;
+        }
+    }
+}
+
+/// One Graph request: (status, body, content type).
+fn answer(shared: &Arc<Mutex<Data>>, first: &str, token: &str, immutable: bool, body: &[u8], b: &str) -> (u16, Vec<u8>, &'static str) {
+    let mut d = shared.lock().unwrap();
+    d.seen_tokens.push(token.to_string());
+    let authorized = if d.tokens.is_empty() { token == TOKEN } else { d.tokens.iter().any(|t| t == token) };
+    if !authorized {
+        return (401, br#"{"error": {"code": "InvalidAuthenticationToken"}}"#.to_vec(), "application/json");
+    }
+    assert!(immutable, "ids are asked for in their immutable form");
+    let mut words = first.split(' ');
+    let (method, target) = (words.next().unwrap_or("GET").to_string(), words.next().unwrap_or("/").to_string());
+    let target = target.strip_prefix("/v1.0").unwrap_or(&target).to_string();
+    if d.throttle > 0 {
+        d.throttle -= 1;
+        d.throttled += 1;
+        return (429, br#"{"error": {"code": "TooManyRequests"}}"#.to_vec(), "application/json");
+    }
+    if d.fail_all != 0 {
+        d.calls.push(format!("{method} {target}"));
+        return (d.fail_all, br#"{"error": {"code": "UnknownError"}}"#.to_vec(), "application/json");
+    }
+    let r = d.route(&method, &target, body, b);
+    let delay = if target.ends_with("/$value") { d.value_delay } else { std::time::Duration::ZERO };
+    drop(d);
+    // As Graph takes a while to make a message's MIME: other connections go on meanwhile.
+    std::thread::sleep(delay);
+    r
 }
 
 /// What a message's regular id (as opposed to its immutable one) starts with here.
@@ -1126,6 +1202,73 @@ mod tests {
         assert!(d.largest_batch <= 4, "no more at once than Exchange runs for an app ({})", d.largest_batch);
         drop(d);
         let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// A sync is one connection (one TLS handshake), not one per request.
+    #[test]
+    fn graph_requests_share_one_connection() {
+        let mut d = Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        d.folder("Sent Items", None, Some("sentitems"));
+        for i in 0..12 {
+            d.deliver(&inbox, &mail(&format!("Note {i:02}"), &format!("n{i}")), false, &format!("2026-10-01T{i:02}:00:00Z"));
+        }
+        let server = serve(d);
+        let c = crate::graph::Client::connect(&server.base, TOKEN).unwrap();
+        let store = crate::fake::tests_store("graph-one-connection");
+        let mut st = crate::jmap::State::default();
+        crate::graph::list_folders(&c, &mut st, "a1").unwrap();
+        crate::graph::sync_folder(&c, &mut st, &store, "a1", "INBOX", &crate::sync::SyncOptions::default()).unwrap();
+        assert!(store.has_body(&store.load_folder("a1", "INBOX").unwrap().messages[0].key));
+        let d = server.data.lock().unwrap();
+        assert!(d.requests > 10, "{} requests", d.requests);
+        assert!(d.accepts <= 2, "{} connections for {} requests", d.accepts, d.requests);
+        drop(d);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// A kept connection the server closed while it was idle fails before answering: the request
+    /// goes again, once, on a new connection, and nothing is said.
+    #[test]
+    fn a_closed_keep_alive_is_reopened_once() {
+        let mut d = Data::default();
+        d.folder("Inbox", None, Some("inbox"));
+        let server = serve(d);
+        let c = crate::graph::Client::connect(&server.base, TOKEN).unwrap();
+        server.data.lock().unwrap().drop_next = 1;
+        c.get("/me/mailFolders/inbox").unwrap();
+        // The server let go of it without saying.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        c.get("/me/mailFolders/inbox").unwrap();
+        assert_eq!(server.data.lock().unwrap().accepts, 2);
+        // Told it closes: a new connection without trying the old one.
+        server.data.lock().unwrap().close = true;
+        c.get("/me/mailFolders/inbox").unwrap();
+        c.get("/me/mailFolders/inbox").unwrap();
+        let d = server.data.lock().unwrap();
+        assert_eq!((d.accepts, d.requests), (3, 5), "one more connection for one more request, none tried in vain");
+    }
+
+    /// A gateway that keeps giving up (504) is asked again for a while, not for minutes: then
+    /// its answer is the error.
+    #[test]
+    fn retries_stop_after_45_seconds() {
+        let mut d = Data::default();
+        d.folder("Inbox", None, Some("inbox"));
+        d.retry_after = 1;
+        let server = serve(d);
+        let c = crate::graph::Client::connect(&server.base, TOKEN).unwrap().with_retry_cap(std::time::Duration::from_millis(2500));
+        {
+            let mut d = server.data.lock().unwrap();
+            d.fail_all = 504;
+            d.calls.clear();
+        }
+        let began = Instant::now();
+        let e = c.get("/me/messages/m1/$value").unwrap_err();
+        let took = began.elapsed();
+        assert!(e.to_string().contains("504"), "{e}");
+        assert!(took >= Duration::from_secs(2) && took < Duration::from_secs(4), "{took:?}");
+        assert_eq!(server.data.lock().unwrap().calls.len(), 3, "asked at 0, 1 and 2 s");
     }
 
     /// A first sync reads the messages' details from the folder's listing, a page at a time,

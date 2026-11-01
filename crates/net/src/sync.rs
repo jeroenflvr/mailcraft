@@ -75,6 +75,19 @@ fn summary(account: &str, folder: &str, validity: u32, f: &Fetched) -> Summary {
 
 /// Bring one folder's cache up to date.
 pub fn sync_folder<S: Read + Write>(c: &mut Client<S>, store: &Store, account: &str, folder: &str, opts: &SyncOptions) -> Result<SyncReport> {
+    sync_folder_pausing(c, store, account, folder, opts, &mut || false)
+}
+
+/// [`sync_folder`], reading ahead only while `pause` says nothing more pressing waits (a message
+/// being opened): the rest comes with the next sync.
+pub fn sync_folder_pausing<S: Read + Write>(
+    c: &mut Client<S>,
+    store: &Store,
+    account: &str,
+    folder: &str,
+    opts: &SyncOptions,
+    pause: &mut dyn FnMut() -> bool,
+) -> Result<SyncReport> {
     let mut st = store.load_folder(account, folder)?;
     let cached_max = st.messages.iter().map(|m| m.key.uid).max().unwrap_or(0);
     let cached_min = st.messages.iter().map(|m| m.key.uid).min().unwrap_or(0);
@@ -187,7 +200,7 @@ pub fn sync_folder<S: Read + Write>(c: &mut Client<S>, store: &Store, account: &
     store.save_folder(account, folder, &st)?;
 
     // 5: prefetch the newest sources (in small batches, saving as we go).
-    prefetch(c, store, account, folder, &mut st, opts)?;
+    prefetch(c, store, account, folder, &mut st, opts, pause)?;
 
     report.total = info.exists;
     report.unread = if info.exists == 0 { 0 } else { u32::try_from(c.uid_search("UNSEEN")?.len()).unwrap_or(u32::MAX) };
@@ -228,13 +241,25 @@ fn fetch_headers<S: Read + Write>(
     Ok(())
 }
 
-fn prefetch<S: Read + Write>(c: &mut Client<S>, store: &Store, account: &str, folder: &str, st: &mut FolderState, opts: &SyncOptions) -> Result<()> {
+fn prefetch<S: Read + Write>(
+    c: &mut Client<S>,
+    store: &Store,
+    account: &str,
+    folder: &str,
+    st: &mut FolderState,
+    opts: &SyncOptions,
+    pause: &mut dyn FnMut() -> bool,
+) -> Result<()> {
     let wanted: Vec<u32> =
         st.messages.iter().take(opts.prefetch).filter(|m| m.size <= opts.prefetch_max_bytes && !store.has_body(&m.key)).map(|m| m.key.uid).collect();
     if wanted.is_empty() {
         return Ok(());
     }
     for chunk in uid_chunks(&wanted, 10) {
+        if pause() {
+            log::debug!("{account}/{folder}: reading ahead paused for a message being opened");
+            break;
+        }
         for f in c.uid_fetch(&uid_set(&chunk), "UID BODY.PEEK[]", "")? {
             let Some(raw) = &f.body else { continue };
             let Some(m) = st.find_mut(f.uid) else { continue };
@@ -264,13 +289,14 @@ pub fn fetch_body<S: Read + Write>(c: &mut Client<S>, store: &Store, key: &Messa
         .and_then(|f| f.body)
         .ok_or_else(|| crate::NetError::No("the message is no longer on the server".into()))?;
     store.write_body(key, &raw)?;
-    let mut st = store.load_folder(&key.account, &key.folder)?;
-    if st.validity == key.validity
-        && let Some(m) = st.find_mut(key.uid)
-    {
+    store.update_folder(&key.account, &key.folder, |st| {
+        if st.validity != key.validity {
+            return false;
+        }
+        let Some(m) = st.find_mut(key.uid) else { return false };
         fill_from_source(m, &raw);
-        store.save_folder(&key.account, &key.folder, &st)?;
-    }
+        true
+    })?;
     Ok(raw)
 }
 

@@ -222,6 +222,11 @@ impl<H: Http> Client<H> {
         &self.auth
     }
 
+    /// Sign the next requests with a new OAuth access token (the old one ran out).
+    pub fn set_bearer(&mut self, token: &str) {
+        self.auth = format!("Bearer {token}");
+    }
+
     /// The push address (RFC 8620 §7.3) for every type of change, when the server pushes.
     pub fn events_url(&self) -> Option<String> {
         self.events.as_ref().map(|t| expand(t, &[("types", "*"), ("closeafter", "no"), ("ping", "30")]))
@@ -733,6 +738,20 @@ pub async fn sync_folder<H: Http>(
     folder: &str,
     opts: &SyncOptions,
 ) -> Result<SyncReport> {
+    sync_folder_pausing(c, st, store, account, folder, opts, &mut || false).await
+}
+
+/// [`sync_folder`], reading ahead only while `pause` says nothing more pressing waits (a message
+/// being opened): the rest comes with the next sync.
+pub async fn sync_folder_pausing<H: Http>(
+    c: &Client<H>,
+    st: &mut State,
+    store: &Store,
+    account: &str,
+    folder: &str,
+    opts: &SyncOptions,
+    pause: &mut dyn FnMut() -> bool,
+) -> Result<SyncReport> {
     let mailbox = st.mailbox(folder)?.to_string();
     let (newest, counts) = c.newest(&mailbox, opts.window).await?;
     let mut fs = store.load_folder(account, folder)?;
@@ -788,13 +807,14 @@ pub async fn sync_folder<H: Http>(
     sort_newest_first(&mut fs.messages);
     fs.uid_next = fs.messages.iter().map(|m| m.key.uid).max().unwrap_or(0).saturating_add(1);
     store.save_folder(account, folder, &fs)?;
-    prefetch(c, st, store, account, folder, &mut fs, opts).await?;
+    prefetch(c, st, store, account, folder, &mut fs, opts, pause).await?;
     let (total, unread) = counts.unwrap_or((u32::try_from(fs.messages.len()).unwrap_or(u32::MAX), fs.unread()));
     report.total = total;
     report.unread = unread;
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prefetch<H: Http>(
     c: &Client<H>,
     st: &State,
@@ -803,6 +823,7 @@ async fn prefetch<H: Http>(
     folder: &str,
     fs: &mut FolderState,
     opts: &SyncOptions,
+    pause: &mut dyn FnMut() -> bool,
 ) -> Result<()> {
     let wanted: Vec<(u32, String)> = fs
         .messages
@@ -816,6 +837,9 @@ async fn prefetch<H: Http>(
     }
     let blobs = c.blobs(&wanted.iter().map(|(_, id)| id.clone()).collect::<Vec<_>>()).await?;
     for (n, id) in &wanted {
+        if pause() {
+            break;
+        }
         let Some(blob) = blobs.get(id) else { continue };
         let raw = c.download(blob).await?;
         let Some(m) = fs.find_mut(*n) else { continue };
@@ -836,11 +860,11 @@ pub async fn fetch_body<H: Http>(c: &Client<H>, st: &State, store: &Store, key: 
     let blob = c.blobs(std::slice::from_ref(&id)).await?.remove(&id).ok_or_else(gone)?;
     let raw = c.download(&blob).await?;
     store.write_body(key, &raw)?;
-    let mut fs = store.load_folder(&key.account, &key.folder)?;
-    if let Some(m) = fs.find_mut(key.uid) {
+    store.update_folder(&key.account, &key.folder, |fs| {
+        let Some(m) = fs.find_mut(key.uid) else { return false };
         fill_from_source(m, &raw);
-        store.save_folder(&key.account, &key.folder, &fs)?;
-    }
+        true
+    })?;
     Ok(raw)
 }
 

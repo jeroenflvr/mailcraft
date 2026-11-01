@@ -94,6 +94,37 @@ the path the message takes:
    in the provider's webmail. Some providers keep a message you send to yourself only under Sent,
    and spam filters can move it to Junk.
 
+## A message is slow to open
+
+Each message downloaded when it's opened leaves a line in the log (no detailed log needed):
+
+```
+a1: INBOX/1234: downloaded 312 KB in 840 ms after 12 ms in line (second connection)
+```
+
+- **in line** is the time between clicking the message and its download starting. More than a
+  second means it waited behind other work: since 0.19.4 a message being opened goes on the
+  account's second connection (File › Options › Connections), so this should stay small unless
+  that's turned off.
+- **downloaded … in** is the server's time (connecting included when the connection was idle).
+  Seconds for a few hundred KB point at the server: Microsoft Graph makes a message's MIME
+  source on demand, and the detailed log shows each request it answered slowly or retried
+  (`Graph GET /me/messages/…/$value: HTTP 504 …`).
+
+## Asked to sign in again
+
+- **Every hour, or after the computer slept** (Microsoft 365 through Graph): fixed in 0.19.4.
+  Tokens are renewed before they run out and after a refusal (see
+  [Staying signed in](oauth.md#staying-signed-in)); the log says
+  `<account>: the token was refused; getting a new one` when that happens.
+- **At every start:** the sign-in isn't kept, almost always because no keychain is running. On
+  Linux that's the Secret Service (`org.freedesktop.secrets`: gnome-keyring, KWallet, KeePassXC);
+  on NixOS see [NIXOS.md § Keychain](../NIXOS.md#keychain-secret-service). Look in the log for
+  `needs signing in again: the sign-in couldn't be kept in the keychain: …`, and list what is
+  saved with `secret-tool search service MailCraft`.
+- **Now and then, with "invalid_grant" or "interaction_required":** Microsoft revoked the
+  sign-in (a changed password, an administrator's policy, 90 days unused): sign in again.
+
 ## Checking an account from the command line
 
 `mailcraft-cli` uses the same app folder and accounts as the app, and prints each step to the

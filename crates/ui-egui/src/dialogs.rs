@@ -440,12 +440,48 @@ pub struct SignatureForm {
 impl SignatureForm {
     pub fn new(s: &Session, account: &str, insert: bool) -> SignatureForm {
         let (body, styles) = s.signature_rich(account);
+        let inline = s.signature_pictures(account);
         SignatureForm {
             account: account.to_string(),
-            compose: Compose { id: crate::rich_edit::SIGNATURE_ID, account: account.to_string(), body, styles, ..Default::default() },
+            compose: Compose { id: crate::rich_edit::SIGNATURE_ID, account: account.to_string(), body, styles, inline, ..Default::default() },
             insert,
             editor: SignatureEditor(crate::rich_edit::Editor::new(crate::rich_edit::SIGNATURE_ID)),
         }
+    }
+
+    /// Put a picture (with its `cid`) into the signature at the cursor; the cursor goes after it.
+    pub fn add_picture(&mut self, picture: mailcraft_engine::mime::InlinePicture) {
+        let n = self.compose.body.chars().count();
+        let at = self.editor.0.sel.start.min(n);
+        let cid = picture.cid.clone();
+        self.compose.inline.push(picture);
+        mailcraft_engine::cmd::insert_picture_at(&mut self.compose, at, &cid);
+        self.editor.0.sel = at + 1..at + 1;
+        self.editor.0.refocus = Some(at + 1..at + 1);
+    }
+
+    /// Whether the editor drew picture `cid` (tests).
+    #[cfg(test)]
+    pub(crate) fn editor_has_picture(&self, cid: &str) -> bool {
+        self.editor.0.has_picture(cid)
+    }
+
+    /// What `account.setSignature` is given: the text, its styles and the pictures it shows.
+    pub fn save_params(&self) -> serde_json::Value {
+        use mailcraft_engine::mime::{b64, rich};
+        let text = self.compose.body.trim_end().to_string();
+        let mut styles = self.compose.styles.clone();
+        styles.fit(&text);
+        let used = rich::pictures(&text, &styles);
+        let pictures: Vec<serde_json::Value> = self
+            .compose
+            .inline
+            .iter()
+            .filter(|p| used.contains(&p.cid))
+            .map(|p| json!({"cid": p.cid, "name": p.name, "mime": p.mime, "data": b64::encode(&p.data)}))
+            .collect();
+        let styles = if styles.is_plain() { serde_json::Value::Null } else { serde_json::to_value(&styles).unwrap_or_default() };
+        json!({"account": self.account, "signature": text, "styles": styles, "pictures": pictures})
     }
 }
 
@@ -859,6 +895,11 @@ impl Dialog {
     /// An event, opened at one of its occurrences.
     pub fn open_event(s: &Session, uid: &str, occurrence: i64) -> Option<Dialog> {
         crate::pim_dialogs::EventForm::open(s, uid, occurrence).map(|f| Dialog::Event(Box::new(f)))
+    }
+
+    /// The signature editor for `account`.
+    pub fn signature(s: &Session, account: &str) -> Dialog {
+        Dialog::Signature(Box::new(SignatureForm::new(s, account, false)))
     }
 
     pub fn new_contact() -> Dialog {
@@ -1685,15 +1726,35 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
             !cancel
         }
         Dialog::Signature(f) => {
-            ui.set_width(480.0);
+            ui.set_width(660.0);
             title(ui, t, "Signature");
             ui.label(RichText::new(tl!("Added to new messages, replies and forwards.")).color(t.dim).small());
             ui.label(
-                RichText::new(tl!("Paste one from Outlook or Word and it keeps its look; Ctrl+B, Ctrl+I and Ctrl+U format it.")).color(t.dim).small(),
+                RichText::new(tl!(
+                    "Paste one from Outlook or Word and it keeps its look; use Pictures for a logo (Outlook's clipboard doesn't carry its images)."
+                ))
+                .color(t.dim)
+                .small(),
             );
             ui.add_space(4.0);
+            {
+                let SignatureForm { compose, editor, .. } = &mut **f;
+                crate::rich_edit::format_bar(ui, t, &mut editor.0, compose, acts);
+                // A picture on the clipboard is pasted as a picture (into the signature: the
+                // dialog is up).
+                if ui.memory(|m| m.has_focus(crate::rich_edit::body_id(compose)))
+                    && ui.input(|i| {
+                        i.events
+                            .iter()
+                            .any(|e| matches!(e, egui::Event::Key { key: egui::Key::V, pressed: true, modifiers, .. } if modifiers.command))
+                    })
+                {
+                    acts.push(Action::PastePicture);
+                }
+            }
+            ui.add_space(4.0);
             egui::Frame::new().stroke(egui::Stroke::new(1.0, t.border)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
-                egui::ScrollArea::vertical().id_salt("signature-text").max_height(220.0).auto_shrink([false, false]).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("signature-text").max_height(260.0).auto_shrink([false, false]).show(ui, |ui| {
                     ui.set_min_height(220.0);
                     let SignatureForm { compose, editor, .. } = &mut **f;
                     crate::rich_edit::body(ui, t, &mut editor.0, compose, None, acts);
@@ -1703,10 +1764,7 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
             let (ok, cancel) = buttons(ui, t, if f.insert { "Save and insert" } else { "Save" }, true);
             if ok {
                 let text = f.compose.body.trim_end().to_string();
-                let mut styles = f.compose.styles.clone();
-                styles.fit(&text);
-                let html = if styles.is_plain() { None } else { Some(mailcraft_engine::mime::rich::to_html(&text, &styles)) };
-                acts.push(Action::Run("account.setSignature", json!({"account": f.account, "signature": text, "html": html})));
+                acts.push(Action::Run("account.setSignature", f.save_params()));
                 if f.insert && !text.trim().is_empty() {
                     acts.push(Action::InsertSignature);
                 }

@@ -802,7 +802,7 @@
 	Mobile phone	行動電話
 	Home phone	住家電話
 	Address book	通訊錄
-	Paste one from Outlook or Word and it keeps its look; Ctrl+B, Ctrl+I and Ctrl+U format it.	從 Outlook 或 Word 貼上，格式會保留；Ctrl+B、Ctrl+I 和 Ctrl+U 可設定格式。
+	Paste one from Outlook or Word and it keeps its look; use Pictures for a logo (Outlook's clipboard doesn't carry its images).	從 Outlook 或 Word 貼上，格式會保留；標誌請用「圖片」插入（Outlook 的剪貼簿不包含其中的圖片）。
 	All contacts	所有連絡人
 	Always open with this address book	一律以此通訊錄開啟
 	Day and week show each calendar in a pane of its own	日檢視和週檢視中，每個行事曆顯示在各自的窗格中

@@ -6,7 +6,7 @@ the items it deferred (calendar, contacts, Exchange, PST import, a web build) ar
 limits below. What each version brought is under [Done](#done); the milestones are in
 [ROADMAP.md](../ROADMAP.md).
 
-_Status: v0.19.3, 2026-10-25._
+_Status: v0.19.4, 2026-11-01._
 
 ## Open
 
@@ -610,3 +610,35 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   `lp` (20 s) have timeouts: a command that doesn't answer is killed and is an ordinary error.
   The preview (one in flight at a time) and the printing itself are laid out and sent off the UI
   thread; the result is said when it arrives.
+
+### v0.19.4 — staying signed in, quick downloads, forwards and signatures
+- **Signing in again every hour (Microsoft 365):** a Graph or JMAP connection kept the access
+  token it was opened with, so the first request after it ran out (an hour, or less after sleep)
+  was refused and the account asked to sign in. Now each piece of work gets a token that lasts five
+  minutes more (renewed from the refresh token when not), by the wall clock too; a 401 gets a new
+  token and goes again once; only the token service's own refusals (`invalid_grant`…) ask to sign
+  in, and a 5xx while refreshing backs off keeping the refresh token. The keychain entry no longer
+  names the IMAP server (the old one is moved once).
+- **A message took minutes to open (Microsoft 365):** opening a message waited in line behind
+  the account's folder sync, whose reading ahead downloads up to 40 sources one after another.
+  It now goes on the account's second connection, a sync on the main connection stops reading
+  ahead when a message is being opened, and the log says how long each download took and waited. A Graph
+  session keeps one HTTPS connection open (it was a TLS handshake a request), and a request Graph keeps turning away is retried for 45 s at most, logged, instead of
+  minutes in silence. Graph and Exchange accounts look for new mail every 30 s (it was every
+  2 minutes).
+- **Forward lost the message's formatting:** the original under a reply or forward was the
+  editor's approximation (tables stacked, cell colours, underline and alignment gone, pictures
+  as `[picture]`). Reply, Reply All and Forward now send the original as received: its HTML
+  (cleaned of scripts, event handlers, `javascript:` links, forms, frames and comments with the
+  html5ever tokenizer) under the user's text, its pictures carried as `cid:` parts (50 and 15 MB
+  at most) and shown in the editor, and a forward attaches only what isn't one of those pictures.
+  Edited inside the original, what the editor shows is sent; plain text sends text only.
+- **The signature couldn't hold a logo or be formatted properly:** the signature editor had no
+  formatting bar (only Ctrl+B/I/U), took no pictures, and was saved as HTML and read back
+  through the text converter, losing underline, alignment, lists and indents. It now has the
+  message's formatting bar (size, colours, lists, alignment, links, Pictures), takes pictures
+  from a file, the clipboard, or pasted HTML that carries them (`data:`; Outlook's own clipboard
+  points at files it can't share, so its logo comes in with Pictures), and is saved exactly as
+  edited (`signature_styles`, `signature_pictures`: 8 pictures at most, 512 KB each, 2 MB
+  together); the pictures go into every new message, reply and Insert signature as `cid:` parts.
+  A signature saved as HTML by an earlier version still reads.

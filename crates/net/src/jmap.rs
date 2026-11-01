@@ -64,6 +64,11 @@ impl Client {
         Ok(Client(block_on(mailcraft_jmap::Client::connect(Blocking, url, user, secret, bearer))?))
     }
 
+    /// Sign the next requests with a new OAuth access token.
+    pub fn set_token(&mut self, token: &str) {
+        self.0.set_bearer(token);
+    }
+
     /// Listen for changes (`state` events, with `ping`s to keep the line open); `None` when the
     /// server doesn't push.
     pub fn events(&self) -> Result<Option<http::EventStream<crate::stream::Stream>>> {
@@ -94,6 +99,19 @@ pub fn list_folders(c: &Client, st: &mut State, account: &str) -> Result<Vec<Fol
 /// Bring one folder's cache up to date.
 pub fn sync_folder(c: &Client, st: &mut State, store: &Store, account: &str, folder: &str, opts: &SyncOptions) -> Result<SyncReport> {
     Ok(block_on(mailcraft_jmap::sync_folder(&c.0, st, store, account, folder, opts))?)
+}
+
+/// [`sync_folder`], reading ahead only while `pause` says nothing more pressing waits.
+pub fn sync_folder_pausing(
+    c: &Client,
+    st: &mut State,
+    store: &Store,
+    account: &str,
+    folder: &str,
+    opts: &SyncOptions,
+    pause: &mut dyn FnMut() -> bool,
+) -> Result<SyncReport> {
+    Ok(block_on(mailcraft_jmap::sync_folder_pausing(&c.0, st, store, account, folder, opts, pause))?)
 }
 
 /// Download one message's source (and cache it).

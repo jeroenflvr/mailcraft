@@ -523,28 +523,58 @@ pub struct Compose {
     /// The Replies to row is shown.
     #[serde(default)]
     pub show_reply_to: bool,
+    /// The original under a reply or forward, as it was received, to send as Outlook does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted: Option<mime::Quoted>,
 }
 
 impl Compose {
     /// The text, HTML and pictures to send: formatted when the text uses formatting or has
-    /// pictures (and the message isn't set to plain text), else plain text alone.
+    /// pictures (and the message isn't set to plain text), else plain text alone. Under a reply
+    /// or forward, the original goes as it was received (its HTML and pictures) while its text
+    /// is as it was put in; changed, what the editor shows is sent.
     pub fn bodies(&self) -> (String, Option<String>, Vec<mime::InlinePicture>) {
         let mut styles = self.styles.clone();
         styles.fit(&self.body);
+        let text = mime::rich::to_text(&self.body, &styles);
+        if self.plain {
+            return (text, None, Vec::new());
+        }
+        if let Some((mine, q)) = self.quoted.as_ref().and_then(|q| self.before_quote(q).map(|b| (b, q))) {
+            let (part, part_styles) = mime::rich::slice(&self.body, &styles, 0..mine);
+            let used = mime::rich::pictures(&part, &part_styles);
+            let pictures: Vec<mime::InlinePicture> =
+                self.inline.iter().filter(|p| used.contains(&p.cid) || q.html.contains(&format!("cid:{}", p.cid))).cloned().collect();
+            let html = format!("{}{}{}", mime::rich::to_html(&part, &part_styles), q.header_html, q.html);
+            return (text, Some(html), pictures);
+        }
         let used = mime::rich::pictures(&self.body, &styles);
         let pictures: Vec<mime::InlinePicture> = self.inline.iter().filter(|p| used.contains(&p.cid)).cloned().collect();
-        let text = mime::rich::to_text(&self.body, &styles);
-        if self.plain || (styles.is_plain() && pictures.is_empty()) {
+        if styles.is_plain() && pictures.is_empty() {
             (text, None, Vec::new())
         } else {
             (text, Some(mime::rich::to_html(&self.body, &styles)), pictures)
         }
     }
 
-    /// Set the text (and forget its formatting).
+    /// Where the quoted original starts in the text (characters), when it's there unchanged
+    /// (trailing whitespace aside).
+    fn before_quote(&self, q: &mime::Quoted) -> Option<usize> {
+        let body = self.body.trim_end();
+        let quote = q.text.trim_end();
+        if quote.is_empty() || !body.ends_with(quote) {
+            return None;
+        }
+        let at = body.len() - quote.len();
+        Some(body.get(..at)?.chars().count())
+    }
+
+    /// Set the text (and forget its formatting, its pictures and the original under it).
     pub fn set_text(&mut self, text: String) {
         self.styles = mime::rich::Styles::plain(&text);
         self.body = text;
+        self.quoted = None;
+        self.inline.clear();
     }
 }
 
@@ -2487,6 +2517,13 @@ impl Session {
     /// An account's signature with its look: its text and styles (plain when it has none).
     pub fn signature_rich(&self, account: &str) -> (String, mime::rich::Styles) {
         let Some(a) = self.account(account) else { return (String::new(), mime::rich::Styles::default()) };
+        if !a.config.signature_styles.trim().is_empty()
+            && let Ok(mut styles) = serde_json::from_str::<mime::rich::Styles>(&a.config.signature_styles)
+        {
+            styles.fit(&a.config.signature);
+            return (a.config.signature.clone(), styles);
+        }
+        // As earlier versions kept it.
         if !a.config.signature_html.trim().is_empty() {
             let (text, styles) = mime::pasted_html(&a.config.signature_html);
             if !text.trim().is_empty() {
@@ -2496,12 +2533,29 @@ impl Session {
         (a.config.signature.clone(), mime::rich::Styles::plain(&a.config.signature))
     }
 
-    /// The signature in the message being made, given its look (the text went in plain).
+    /// The pictures in an account's signature (one that can't be read is left out).
+    pub fn signature_pictures(&self, account: &str) -> Vec<mime::InlinePicture> {
+        let Some(a) = self.account(account) else { return Vec::new() };
+        a.config
+            .signature_pictures
+            .iter()
+            .take(SIGNATURE_PICTURES)
+            .filter_map(|p| {
+                let data = mime::b64::decode(&p.data, SIGNATURE_PICTURE_MAX)?;
+                Some(mime::InlinePicture { cid: p.cid.clone(), name: p.name.clone(), mime: p.mime.clone(), data })
+            })
+            .collect()
+    }
+
+    /// The signature in the message being made, given its look (the text went in plain) and
+    /// its pictures.
     fn style_signature(&mut self) {
         let Some(account) = self.compose.as_ref().map(|c| c.account.clone()) else { return };
         let sig = self.signature_rich(&account);
+        let pictures = self.signature_pictures(&account);
         if let Some(c) = self.compose.as_mut() {
             style_signature(c, &sig);
+            add_pictures(c, pictures);
         }
     }
 
@@ -2527,14 +2581,25 @@ impl Session {
         let parsed = r.parsed.ok_or_else(|| CmdError::Disabled("the message is still downloading".into()))?;
         let account = r.key.account.clone();
         let sig = self.signature(&account);
-        let (d, styles) = mime::reply_doc(&parsed, mode, &self.me(&account), &self.clock, &sig);
+        let raw = self.store.as_ref().and_then(|s| s.read_body(&r.key));
+        let me = self.me(&account);
+        // Fresh `cid:`s for the original's pictures: one random stem, numbered.
+        let stem = self.random();
+        let mut n = 0u32;
+        let mut cid_for = || {
+            n += 1;
+            format!("{stem:016x}.{n}@mailcraft")
+        };
+        let doc = mime::reply_doc_with(&parsed, raw.as_deref(), mode, &me, &self.clock, &sig, &mut cid_for);
+        let (d, styles) = (doc.draft, doc.styles);
         let id = self.fresh_id();
         let mut attachments = Vec::new();
         if mode == ReplyMode::Forward
-            && let Some(raw) = self.store.as_ref().and_then(|s| s.read_body(&r.key))
+            && let Some(raw) = &raw
         {
-            for a in parsed.attachments.iter().filter(|a| !a.inline) {
-                if let Some(data) = mime::attachment_data(&raw, a.index) {
+            // A picture carried in the original's HTML isn't attached as well.
+            for a in parsed.attachments.iter().filter(|a| !a.inline && !doc.carried.contains(&a.index)) {
+                if let Some(data) = mime::attachment_data(raw, a.index) {
                     attachments.push(OutAttachment { name: a.name.clone(), mime: a.mime.clone(), data });
                 }
             }
@@ -2553,6 +2618,8 @@ impl Session {
             attachments,
             mode: Some(mode),
             source: Some(r.key),
+            quoted: doc.quoted,
+            inline: doc.pictures,
             ..Default::default()
         });
         self.style_signature();
@@ -3537,6 +3604,21 @@ fn follow_up_ops(keys: &[MessageKey], from: FollowUp, to: FollowUp) -> Vec<Op> {
         (FollowUp::Flagged, FollowUp::None) => vec![flag(false)],
         (FollowUp::Complete, FollowUp::None) => vec![done(false)],
         (FollowUp::None, FollowUp::None) => Vec::new(),
+    }
+}
+
+/// Most pictures in a signature, each one's size and theirs together: a signature goes on every
+/// message.
+pub const SIGNATURE_PICTURES: usize = 8;
+pub const SIGNATURE_PICTURE_MAX: usize = 512 << 10;
+pub const SIGNATURE_PICTURES_MAX: usize = 2 << 20;
+
+/// Add pictures to a message being written, unless it has them already (by `cid`).
+pub fn add_pictures(c: &mut Compose, pictures: Vec<mime::InlinePicture>) {
+    for p in pictures {
+        if !c.inline.iter().any(|i| i.cid == p.cid) {
+            c.inline.push(p);
+        }
     }
 }
 

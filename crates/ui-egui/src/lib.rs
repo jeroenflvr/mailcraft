@@ -727,7 +727,9 @@ impl MailApp {
         }
         // Files chosen in the browser's picker.
         for (purpose, name, data) in self.services.take_picked() {
-            if purpose == "picture" {
+            if purpose == "picture" && self.signature_form().is_some() {
+                self.signature_picture(&name, data);
+            } else if purpose == "picture" {
                 let r = self.session.run("compose.insertPicture", &json!({"name": name, "data": data, "at": self.picture_at()}));
                 self.place_picture(r);
             } else {
@@ -1609,6 +1611,15 @@ impl MailApp {
                     Err(e) => self.session.notice(e.to_string(), true),
                 }
             }
+            Action::InsertPicture if self.signature_form().is_some() => {
+                for p in self.services.pick_pictures() {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    match std::fs::read(&p) {
+                        Ok(data) => self.signature_picture(&name, data),
+                        Err(e) => self.session.notice(tf!("{name} could not be opened: {error}", name = name, error = e), true),
+                    }
+                }
+            }
             Action::InsertPicture => {
                 for p in self.services.pick_pictures() {
                     let r = self.session.run("compose.insertPicture", &json!({"path": p.to_string_lossy(), "at": self.picture_at()}));
@@ -1620,8 +1631,12 @@ impl MailApp {
                 // as text.
                 let text = clipboard_html().is_some_and(|h| !mailcraft_engine::mime::pasted_html(&h).0.trim().is_empty());
                 if !text && let Some(png) = self.services.clipboard_picture() {
-                    let r = self.session.run("compose.insertPicture", &json!({"name": "pasted.png", "data": png, "at": self.picture_at()}));
-                    self.place_picture(r);
+                    if self.signature_form().is_some() {
+                        self.signature_picture("pasted.png", png);
+                    } else {
+                        let r = self.session.run("compose.insertPicture", &json!({"name": "pasted.png", "data": png, "at": self.picture_at()}));
+                        self.place_picture(r);
+                    }
                 }
             }
             Action::AttachFiles => {
@@ -1665,7 +1680,34 @@ impl MailApp {
         }
     }
 
-    /// Put a picture's mark at the body's cursor.
+    /// The signature being edited, while its dialog is up: pictures go into it, not the message.
+    fn signature_form(&mut self) -> Option<&mut dialogs::SignatureForm> {
+        match self.ui.dialog.as_mut() {
+            Some(Dialog::Signature(f)) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// A picture into the signature being edited, at its cursor, checked as the signature's are.
+    fn signature_picture(&mut self, name: &str, data: Vec<u8>) {
+        let others: Vec<mailcraft_engine::mime::InlinePicture> = self
+            .signature_form()
+            .map(|f| {
+                let used = mailcraft_engine::mime::rich::pictures(&f.compose.body, &f.compose.styles);
+                f.compose.inline.iter().filter(|p| used.contains(&p.cid)).cloned().collect()
+            })
+            .unwrap_or_default();
+        match mailcraft_engine::cmd::signature_picture(name, data, &others) {
+            Ok(mut p) => {
+                p.cid = self.session.new_cid();
+                if let Some(f) = self.signature_form() {
+                    f.add_picture(p);
+                }
+            }
+            Err(e) => self.session.notice(e.to_string(), true),
+        }
+    }
+
     /// Where a picture goes: at the cursor in the message.
     fn picture_at(&self) -> usize {
         let n = self.session.compose.as_ref().map_or(0, |c| c.body.chars().count());

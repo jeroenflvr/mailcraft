@@ -281,6 +281,126 @@ fn compose_reply_and_send_locally() {
     done(s);
 }
 
+/// A message laid out with a table, a logo shown by `cid:`, a script and a PDF attached, put in
+/// the sample Inbox and opened.
+fn open_newsletter(s: &mut Session) {
+    let d = mailcraft_mime::Draft {
+        to: vec![mailcraft_model::EmailAddress::new("Riley", "riley@studio.example")],
+        subject: "Quarterly report".into(),
+        body: "Revenue up. Regards".into(),
+        html: Some(
+            "<html><body><table><tr><td><img src=\"cid:logo@x\" alt=\"Logo\"></td><td><b>Revenue</b> up</td></tr></table>\
+             <script>alert(1)</script><p>Regards</p></body></html>"
+                .into(),
+        ),
+        inline: vec![mailcraft_mime::InlinePicture { cid: "logo@x".into(), name: "logo.png".into(), mime: "image/png".into(), data: vec![1, 2, 3] }],
+        attachments: vec![mailcraft_mime::OutAttachment { name: "report.pdf".into(), mime: "application/pdf".into(), data: b"%PDF-1.4".to_vec() }],
+        ..Default::default()
+    };
+    let raw = mailcraft_mime::build(&d, &mailcraft_model::EmailAddress::new("Zoe Park", "zoe@studio.example"), NOW, "<nl@x>").unwrap();
+    let store = s.store.clone().unwrap();
+    let mut inbox = store.load_folder("sample", "INBOX").unwrap();
+    let key = mailcraft_model::MessageKey { account: "sample".into(), folder: "INBOX".into(), validity: inbox.validity, uid: 998 };
+    inbox.messages.insert(0, mailcraft_mime::summary_from_full(&raw, key.clone(), mailcraft_model::Flags::default(), 0, NOW));
+    store.save_folder("sample", "INBOX", &inbox).unwrap();
+    store.write_body(&key, &raw).unwrap();
+    s.apply(Event::FolderChanged { account: "sample".into(), folder: "INBOX".into() });
+    s.run("folder.open", &json!({"account": "sample", "folder": "INBOX"})).unwrap();
+    s.run("list.open", &json!({"key": key.to_id()})).unwrap();
+}
+
+/// Outlook sends the original under a forward as it was received: its HTML (a table here) and
+/// its pictures, with the PDF attached and the logo inline only (not both).
+#[test]
+fn a_forward_carries_the_original_html_and_its_pictures() {
+    let mut s = sample_session("forward-html");
+    open_newsletter(&mut s);
+    s.run("mail.forward", &json!({})).unwrap();
+    // As before: an untouched forward has its subject written.
+    assert!(s.compose_written());
+    let c = s.compose.clone().unwrap();
+    assert!(c.quoted.is_some());
+    assert_eq!(c.inline.len(), 1);
+    let names: Vec<&str> = c.attachments.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["report.pdf"]);
+    let cid = c.inline[0].cid.clone();
+    let at = c.body.chars().position(|ch| ch == mailcraft_mime::rich::PICTURE).expect("the logo in the text");
+    assert_eq!(c.styles.style(at).picture.as_deref(), Some(cid.as_str()));
+    let (text, html, pictures) = c.bodies();
+    let html = html.unwrap();
+    assert!(html.contains("<table") && html.contains(&format!("cid:{cid}")) && html.contains("<hr"), "{html}");
+    assert!(!html.contains("<script") && !html.contains("alert"), "{html}");
+    assert!(html.contains("<b>Subject:</b> Quarterly report"), "{html}");
+    assert_eq!(pictures.len(), 1);
+    assert!(text.contains("Revenue up") && !text.contains("<table"));
+    // What goes out: the picture as a part of its own, the HTML pointing at it.
+    s.run("compose.update", &json!({"to": "ana@soundlab.example"})).unwrap();
+    s.run("compose.send", &json!({})).unwrap();
+    s.run("folder.open", &json!({"account": "sample", "folder": "Sent"})).unwrap();
+    let k = s.list.iter().find(|m| m.subject == "Fwd: Quarterly report").unwrap().key.clone();
+    let sent = s.store.as_ref().unwrap().read_body(&k).unwrap();
+    let p = mailcraft_mime::parse(&sent).unwrap();
+    assert!(p.attachments.iter().any(|a| a.content_id.as_deref() == Some(cid.as_str()) && a.inline));
+    assert!(p.attachments.iter().any(|a| a.name == "report.pdf" && !a.inline));
+    assert!(mailcraft_mime::html_body(&sent).unwrap().contains("<table"));
+    done(s);
+}
+
+/// Changed inside the original, what the editor shows is sent (no table), its picture kept.
+#[test]
+fn editing_inside_the_quote_sends_what_is_seen() {
+    let mut s = sample_session("forward-edited");
+    open_newsletter(&mut s);
+    s.run("mail.forward", &json!({})).unwrap();
+    let c = s.compose.as_mut().unwrap();
+    let old = c.body.clone();
+    c.body = old.replacen("Regards", "Cheers", 1);
+    c.styles.edit(&old, &c.body, &mailcraft_mime::rich::Style::default());
+    let cid = c.inline[0].cid.clone();
+    let (_, html, pictures) = c.bodies();
+    let html = html.unwrap();
+    assert!(!html.contains("<table") && html.contains("Cheers") && html.contains(&format!("cid:{cid}")), "{html}");
+    assert_eq!(pictures.len(), 1);
+    done(s);
+}
+
+#[test]
+fn a_reply_quotes_the_html_too() {
+    let mut s = sample_session("reply-html");
+    open_newsletter(&mut s);
+    s.run("mail.reply", &json!({})).unwrap();
+    let c = s.compose.clone().unwrap();
+    assert!(c.attachments.is_empty(), "a reply attaches nothing");
+    let (_, html, pictures) = c.bodies();
+    assert!(html.unwrap().contains("<table"));
+    assert_eq!(pictures.len(), 1);
+    done(s);
+}
+
+#[test]
+fn plain_text_drops_the_quote() {
+    let mut s = sample_session("forward-plain");
+    open_newsletter(&mut s);
+    s.run("mail.forward", &json!({})).unwrap();
+    let c = s.compose.as_mut().unwrap();
+    c.plain = true;
+    let (text, html, pictures) = c.bodies();
+    assert!(html.is_none() && pictures.is_empty());
+    assert!(text.contains("Revenue up"));
+    done(s);
+}
+
+#[test]
+fn forward_as_attachment_has_no_quote() {
+    let mut s = sample_session("forward-attached-no-quote");
+    open_newsletter(&mut s);
+    s.run("mail.forwardAsAttachment", &json!({})).unwrap();
+    let c = s.compose.clone().unwrap();
+    assert!(c.quoted.is_none() && c.inline.is_empty());
+    assert_eq!(c.attachments.len(), 1);
+    done(s);
+}
+
 #[test]
 fn folders_create_rename_move_delete_and_favorites() {
     let mut s = sample_session("folders");
@@ -2329,7 +2449,7 @@ fn a_formatted_signature_keeps_its_look() {
     s.run("account.setSignature", &json!({"account": "sample", "signature": "ignored", "html": html})).unwrap();
     let config = s.account("sample").unwrap().config.clone();
     assert_eq!(config.signature, "Company bv\nAn street 1\nwww.company.com\nConfidential.");
-    assert!(!config.signature_html.is_empty());
+    assert!(!config.signature_styles.is_empty() && config.signature_html.is_empty(), "kept as the editor's styles");
     let check = |s: &Session| {
         let c = s.compose.as_ref().unwrap();
         let at = c.body.find("Company bv").map(|b| c.body[..b].chars().count()).unwrap();
@@ -2357,8 +2477,164 @@ fn a_formatted_signature_keeps_its_look() {
     check(&s);
     // Saved plain again, the look goes.
     s.run("account.setSignature", &json!({"account": "sample", "signature": "R."})).unwrap();
-    assert!(s.account("sample").unwrap().config.signature_html.is_empty());
+    assert!(s.account("sample").unwrap().config.signature_styles.is_empty());
     assert!(s.run("account.setSignature", &json!({"account": "sample", "signature": "x", "html": "<p><b>\u{0}"})).is_ok(), "junk HTML");
+}
+
+/// A signature as the editor makes it: a logo (`cid`), then text.
+fn logo_signature(cid: &str) -> (String, mailcraft_mime::rich::Styles) {
+    use mailcraft_mime::rich::{PICTURE, Style, Styles};
+    let text = format!("{PICTURE}\nRiley Moreno");
+    let mut styles = Styles::plain(&text);
+    styles.restyle(&text, 0..1, |s| Style { picture: Some(cid.into()), ..s.clone() });
+    (text, styles)
+}
+
+fn picture_param(cid: &str, data: &[u8]) -> Value {
+    json!({"cid": cid, "name": "logo.png", "mime": "image/png", "data": mailcraft_mime::b64::encode(data)})
+}
+
+/// The signature is a small message: its logo goes into every new message, reply and Insert
+/// signature (once each), and out as a `cid:` part like any other picture.
+#[test]
+fn a_signature_with_a_logo_goes_into_every_message() {
+    use mailcraft_mime::rich::PICTURE;
+    let mut s = sample_session("signature-logo");
+    let (text, styles) = logo_signature("editor-cid");
+    let png = mailcraft_engine_png();
+    s.run(
+        "account.setSignature",
+        &json!({"account": "sample", "signature": text, "styles": styles, "pictures": [picture_param("editor-cid", &png)]}),
+    )
+    .unwrap();
+    let config = s.account("sample").unwrap().config.clone();
+    assert_eq!(config.signature_pictures.len(), 1);
+    let cid = config.signature_pictures[0].cid.clone();
+    let cid = cid.as_str();
+    assert!(cid.starts_with("sig-1-") && cid.ends_with("@sample.mailcraft"), "a stable name, the account's: {cid}");
+    // Saved again unchanged, the same name; another logo, another name.
+    let (text2, styles2) = logo_signature(cid);
+    s.run("account.setSignature", &json!({"account": "sample", "signature": text2, "styles": styles2, "pictures": [picture_param(cid, &png)]}))
+        .unwrap();
+    assert_eq!(s.account("sample").unwrap().config.signature_pictures[0].cid, cid);
+    let (text3, styles3) = logo_signature(cid);
+    s.run("account.setSignature", &json!({"account": "sample", "signature": text3, "styles": styles3, "pictures": [picture_param(cid, &[9, 9])]}))
+        .unwrap();
+    assert_ne!(s.account("sample").unwrap().config.signature_pictures[0].cid, cid);
+    s.run(
+        "account.setSignature",
+        &json!({"account": "sample", "signature": text2, "styles": logo_signature(cid).1, "pictures": [picture_param(cid, &png)]}),
+    )
+    .unwrap();
+    let has_logo = |s: &Session| {
+        let c = s.compose.as_ref().unwrap();
+        let at = c.body.chars().position(|ch| ch == PICTURE).expect("the logo in the text");
+        assert_eq!(c.styles.style(at).picture.as_deref(), Some(cid));
+        assert_eq!(c.inline.iter().filter(|p| p.cid == cid).count(), 1, "carried once");
+        assert_eq!(c.inline.iter().find(|p| p.cid == cid).unwrap().data, png);
+    };
+    s.run("mail.new", &json!({})).unwrap();
+    has_logo(&s);
+    s.run("compose.insertSignature", &json!({})).unwrap();
+    has_logo(&s);
+    // Out it goes as a picture of the message.
+    s.run("compose.update", &json!({"to": "ana@soundlab.example", "subject": "Logo"})).unwrap();
+    s.run("compose.send", &json!({})).unwrap();
+    s.run("folder.open", &json!({"account": "sample", "folder": "Sent"})).unwrap();
+    let k = s.list.iter().find(|m| m.subject == "Logo").unwrap().key.clone();
+    let raw = s.store.as_ref().unwrap().read_body(&k).unwrap();
+    let p = mailcraft_mime::parse(&raw).unwrap();
+    assert!(p.attachments.iter().any(|a| a.content_id.as_deref() == Some(cid) && a.inline), "{:?}", p.attachments);
+    assert!(mailcraft_mime::html_body(&raw).unwrap().contains(&format!("cid:{cid}")));
+    // A reply has it too.
+    s.run("folder.open", &json!({"account": "sample", "folder": "INBOX"})).unwrap();
+    let k = s.list.first().map(|m| m.key.clone()).unwrap();
+    s.run("list.open", &json!({"key": k.to_id()})).unwrap();
+    s.run("mail.reply", &json!({})).unwrap();
+    has_logo(&s);
+    done(s);
+}
+
+/// A tiny picture's bytes (the engine only checks its type by name).
+fn mailcraft_engine_png() -> Vec<u8> {
+    crate::sample::sample_png()
+}
+
+/// Saved exactly as edited: alignment, lists and underline come back as they were.
+#[test]
+fn a_signature_keeps_alignment_lists_and_underline() {
+    use mailcraft_mime::rich::{Align, List, Style, Styles};
+    let mut s = sample_session("signature-layout");
+    let text = "Riley Moreno\nStudio Lantern\nPrints\nFilms".to_string();
+    let mut styles = Styles::plain(&text);
+    styles.relayout(&text, 0..1, |p| p.align = Align::Center);
+    styles.restyle(&text, 0..5, |st| Style { underline: true, size: Some(14), ..st.clone() });
+    styles.relayout(&text, 28..text.chars().count(), |p| p.list = List::Bullet);
+    s.run("account.setSignature", &json!({"account": "sample", "signature": text, "styles": styles})).unwrap();
+    assert_eq!(s.signature_rich("sample"), (text.clone(), styles.clone()));
+    s.run("mail.new", &json!({})).unwrap();
+    let c = s.compose.as_ref().unwrap();
+    let at = c.body.find("Riley").map(|b| c.body[..b].chars().count()).unwrap();
+    assert!(c.styles.style(at).underline);
+    let html = mailcraft_mime::rich::to_html(&c.body, &c.styles);
+    assert!(html.contains("text-align:center") && html.contains("<ul") && html.contains("<u>"), "{html}");
+    done(s);
+}
+
+/// A signature saved by an earlier version (its look as HTML) still has its look.
+#[test]
+fn an_old_signature_html_still_reads() {
+    let mut s = sample_session("signature-old-html");
+    let mut config = s.account("sample").unwrap().config.clone();
+    config.signature = "Bold sig".into();
+    config.signature_html = "<div><b>Bold</b> sig</div>".into();
+    s.update_account(config, None).unwrap();
+    let (text, styles) = s.signature_rich("sample");
+    assert_eq!(text, "Bold sig");
+    assert!(styles.style(0).bold && !styles.style(5).bold);
+    done(s);
+}
+
+/// A signature goes on every message: its pictures are few and small. Junk is refused, never
+/// fatal.
+#[test]
+fn signature_pictures_are_capped() {
+    use mailcraft_mime::rich::{PICTURE, Style, Styles};
+    let mut s = sample_session("signature-caps");
+    let nine: String = std::iter::repeat_n(PICTURE, 9).collect();
+    let mut styles = Styles::plain(&nine);
+    for i in 0..9 {
+        styles.restyle(&nine, i..i + 1, |st| Style { picture: Some(format!("p{i}")), ..st.clone() });
+    }
+    let pics: Vec<Value> = (0..9).map(|i| picture_param(&format!("p{i}"), &[1, 2, 3])).collect();
+    let r = s.run("account.setSignature", &json!({"account": "sample", "signature": nine, "styles": styles, "pictures": pics}));
+    assert!(matches!(r, Err(CmdError::Params(m)) if m.contains("8 pictures")), "the ninth is one too many");
+    // Eight go, and one not in the text is dropped.
+    let eight: Vec<Value> = (0..8).map(|i| picture_param(&format!("p{i}"), &[1, 2, 3])).chain([picture_param("unused", &[4])]).collect();
+    let mut st8 = styles.clone();
+    st8.palette.iter_mut().filter(|p| p.picture.as_deref() == Some("p8")).for_each(|p| p.picture = None);
+    s.run("account.setSignature", &json!({"account": "sample", "signature": nine, "styles": st8, "pictures": eight})).unwrap();
+    assert_eq!(s.account("sample").unwrap().config.signature_pictures.len(), 8);
+    // Too big.
+    let (text, logo) = logo_signature("big");
+    let big = vec![0u8; 3 << 20];
+    let r = s.run("account.setSignature", &json!({"account": "sample", "signature": text, "styles": logo, "pictures": [picture_param("big", &big)]}));
+    assert!(matches!(r, Err(CmdError::Params(_))));
+    // Junk.
+    for junk in [
+        json!({"account": "sample", "signature": "x", "styles": 5}),
+        json!({"account": "sample", "signature": "x", "styles": {"chars": "x"}}),
+        json!({"account": "sample", "signature": "x", "pictures": 3}),
+        json!({"account": "sample", "signature": "x", "pictures": [{"cid": "a"}]}),
+        json!({"account": "sample", "signature": text, "styles": logo, "pictures": [{"cid": "big", "name": "x.png", "mime": "image/png", "data": "!!!"}]}),
+        json!({"account": "sample", "signature": text, "styles": logo, "pictures": [{"cid": "big", "name": "x.exe", "mime": "application/x-msdownload", "data": "AAAA"}]}),
+    ] {
+        assert!(matches!(s.run("account.setSignature", &junk), Err(CmdError::Params(_))), "{junk}");
+    }
+    // A palette pointing past its end, or pictures without a text to hold them, aren't fatal.
+    let r = s.run("account.setSignature", &json!({"account": "sample", "signature": "ab", "styles": {"chars": [7, 9], "palette": [], "paras": []}}));
+    assert!(r.is_ok(), "{r:?}");
+    done(s);
 }
 
 /// Issue #1: a contact's numbers keep what they are (business, home, mobile…), and its

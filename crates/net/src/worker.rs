@@ -20,7 +20,7 @@ use mailcraft_store::{OutboxItem, Store};
 use crate::imap::{Client, uid_set};
 use crate::jmap;
 use crate::stream::Stream;
-use crate::sync::{SyncOptions, fetch_body, sync_folder};
+use crate::sync::{SyncOptions, fetch_body};
 use crate::{NetError, Result, smtp};
 
 /// Where passwords live. The desktop app backs this with the system keychain.
@@ -81,7 +81,13 @@ struct Handle {
     stop: Arc<AtomicBool>,
     /// Which start of the account this is, for the log.
     generation: u64,
+    /// Set when an opened message or a change goes to the main connection: a folder sync stops
+    /// reading ahead so it's handled now, not after the sync.
+    urgent: Arc<AtomicBool>,
 }
+
+/// When each message being opened was asked for, to log how long it waited.
+type Asked = Arc<Mutex<HashMap<MessageKey, Instant>>>;
 
 /// Changes still to make on the server, oldest first (RFC 4549's pending actions), kept in
 /// `ops.json`. The pool adds to them as a change is made, and saves them then, so a change
@@ -116,14 +122,23 @@ fn push_job(queue: &mut VecDeque<Job>, j: Job) {
 }
 
 /// Whether a job goes on the account's second connection: sending (not over JMAP, whose filing
-/// needs the main connection's mailbox ids) and automatic replies.
+/// needs the main connection's mailbox ids), automatic replies, and opening a message, which
+/// shouldn't wait for a folder sync to finish.
 fn quick_job(j: &Job, acc: &AccountConfig) -> bool {
     match j {
         Job::Send { .. } => acc.pop.is_none() && acc.jmap.is_none(),
-        Job::GetVacation { .. } | Job::SetVacation { .. } => acc.pop.is_none(),
+        Job::GetVacation { .. } | Job::SetVacation { .. } | Job::FetchBody { .. } => acc.pop.is_none(),
         _ => false,
     }
 }
+
+/// Jobs a folder sync makes way for: what the user waits for or sees undone meanwhile.
+fn urgent_job(j: &Job) -> bool {
+    matches!(j, Job::FetchBody { .. } | Job::Apply { .. })
+}
+
+/// Most messages remembered as being opened (a stuck one mustn't grow the list for good).
+const MAX_ASKED: usize = 1000;
 
 /// Runs jobs for every account.
 pub struct Pool {
@@ -144,6 +159,7 @@ pub struct Pool {
     pub connections: Connections,
     /// The local time zone: calendar times without a zone are read in it.
     pub zone: Arc<mailcraft_model::dates::Zone>,
+    asked: Asked,
 }
 
 /// Workers started so far, numbering them in the log.
@@ -207,6 +223,7 @@ impl Pool {
             offline: false,
             connections: Connections::default(),
             zone: Arc::default(),
+            asked: Arc::default(),
         }
     }
 
@@ -229,7 +246,9 @@ impl Pool {
                         Ok(()) => sink.emit(Event::SignedIn { account: account.id, user: t.user }),
                         Err(e) => sink.emit(Event::Status {
                             account: account.id,
-                            status: SyncStatus::NeedsPassword { error: format!("the sign-in couldn't be kept in the keychain: {e}") },
+                            status: SyncStatus::NeedsPassword {
+                                error: format!("the sign-in couldn't be kept in the keychain: {e} (is a keychain running? see Troubleshooting)"),
+                            },
                         }),
                     },
                     None => sink.emit(Event::Status {
@@ -466,6 +485,14 @@ impl Pool {
             }
             other => {
                 let id = other.account().to_string();
+                if let Job::FetchBody { key } = &other
+                    && let Ok(mut asked) = self.asked.lock()
+                {
+                    if asked.len() >= MAX_ASKED {
+                        asked.clear();
+                    }
+                    asked.entry(key.clone()).or_insert_with(Instant::now);
+                }
                 let quick = self.configs.get(&id).is_some_and(|c| quick_job(&other, c));
                 let pop = self.configs.get(&id).is_some_and(|c| c.pop.is_some());
                 match self.workers.get(&id) {
@@ -500,11 +527,15 @@ impl Pool {
                             },
                             None => other,
                         };
+                        let urgent = urgent_job(&other);
                         if h.tx.send(other).is_err() {
                             self.sink.emit(Event::Notice {
                                 account: id,
                                 message: "the account's connection stopped; restart it from the account menu".into(),
                             });
+                        } else if urgent {
+                            // After sending: the connection clears it as it takes its jobs.
+                            h.urgent.store(true, Ordering::Relaxed);
                         }
                     }
                     None => self.sink.emit(Event::Notice { account: id, message: "the account is not connected".into() }),
@@ -538,6 +569,7 @@ impl Pool {
         };
         let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
         let stop = Arc::new(AtomicBool::new(false));
+        let urgent = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         let auth = Auth::shared(pw);
         let mut w = Worker::new(account.clone(), auth.clone(), self.store.clone(), self.sink.clone(), self.opts);
@@ -547,6 +579,8 @@ impl Pool {
         w.zone = self.zone.clone();
         w.stop = stop.clone();
         w.generation = generation;
+        w.urgent = urgent.clone();
+        w.asked = self.asked.clone();
         // The second connection: quiet (the account's status is the main one's), connecting
         // only when there's something to do. Turned off, the main one sends too.
         let (quick, quick_thread) = if self.connections.second {
@@ -558,6 +592,11 @@ impl Pool {
             q.connections = self.connections;
             q.stop = stop.clone();
             q.generation = generation;
+            q.urgent = urgent.clone();
+            q.asked = self.asked.clone();
+            // One list of waiting changes: the main connection makes them, and a message opened
+            // here keeps them over what the server said.
+            q.ops = w.ops.clone();
             let t = std::thread::Builder::new().name(format!("mail-{}-quick", account.id)).spawn(move || q.run_quick(qrx)).ok();
             (t.is_some().then_some(qtx), t)
         } else {
@@ -570,7 +609,7 @@ impl Pool {
         let ops = w.ops.clone();
         match std::thread::Builder::new().name(name).spawn(move || w.run(rx)) {
             Ok(thread) => {
-                self.workers.insert(account.id.clone(), Handle { tx, thread: Some(thread), quick, quick_thread, ops, stop, generation });
+                self.workers.insert(account.id.clone(), Handle { tx, thread: Some(thread), quick, quick_thread, ops, stop, generation, urgent });
             }
             Err(e) => self.sink.emit(Event::Status { account: account.id.clone(), status: SyncStatus::Error { error: e.to_string() } }),
         }
@@ -630,6 +669,12 @@ const SENT_SOON: Duration = Duration::from_secs(3);
 const SENT_LATER: Duration = Duration::from_secs(15);
 /// An account's second connection lets go after this long with nothing to do.
 const QUICK_IDLE: Duration = Duration::from_secs(5 * 60);
+/// How often Graph and Exchange accounts look for new mail (they have no push).
+const API_POLL: Duration = Duration::from_secs(30);
+/// An access token is renewed this long before it runs out.
+const TOKEN_MARGIN: Duration = Duration::from_secs(5 * 60);
+/// A token refused again within this long of getting a new one means signing in again.
+const TOKEN_RETRY_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 /// The connection to an account's server.
 enum Conn {
@@ -689,6 +734,16 @@ struct Worker {
     /// The wait before trying again after the folder list couldn't be read (not reset by
     /// connecting, only by a whole sync going through).
     relist_backoff: Duration,
+    /// When a refused access token was last swapped for a new one: a second refusal soon after
+    /// means signing in again.
+    retried_token_at: Option<Instant>,
+    /// Tests: the token endpoint to refresh at.
+    #[cfg(test)]
+    provider: Option<crate::oauth::Provider>,
+    /// Shared with the pool: an opened message or a change waits for this connection.
+    urgent: Arc<AtomicBool>,
+    /// Shared with the pool: when messages being opened were asked for.
+    asked: Asked,
 }
 
 impl Worker {
@@ -725,12 +780,19 @@ impl Worker {
             previous: Vec::new(),
             logged: std::cell::Cell::new(None),
             relist_backoff: Duration::from_secs(5),
+            retried_token_at: None,
+            #[cfg(test)]
+            provider: None,
+            urgent: Arc::default(),
+            asked: Arc::default(),
         }
     }
 
-    /// Minutes between checks for new mail where the server can't say at once.
+    /// Minutes between checks for new mail where the server can't say at once; 30 seconds at
+    /// most for Graph and Exchange, which can't (a check is one small request there).
     fn poll_every(&self) -> Duration {
-        Duration::from_secs(u64::from(self.connections.check_minutes.max(1)) * 60)
+        let every = Duration::from_secs(u64::from(self.connections.check_minutes.max(1)) * 60);
+        if matches!(self.conn, Some(Conn::Graph(_) | Conn::Ews(_))) { every.min(API_POLL) } else { every }
     }
 
     /// Minutes between reads of every folder.
@@ -746,18 +808,47 @@ impl Worker {
     /// What to sign in with: the password, or for OAuth accounts a current access token
     /// (refreshed from the stored refresh token when needed).
     fn secret(&mut self) -> Result<String> {
+        self.token_lasting(Duration::ZERO)
+    }
+
+    /// [`Worker::secret`], with an access token that lasts five minutes more at least: what an
+    /// API connection signs its next requests with.
+    fn fresh_token(&mut self) -> Result<String> {
+        self.token_lasting(TOKEN_MARGIN)
+    }
+
+    fn provider(&self) -> Option<crate::oauth::Provider> {
+        #[cfg(test)]
+        if let Some(p) = &self.provider {
+            return Some(p.clone());
+        }
+        crate::oauth::provider_for_account(&self.acc)
+    }
+
+    fn token_lasting(&mut self, margin: Duration) -> Result<String> {
+        let p = self.provider();
         // Held while refreshing: the account's other connection waits for the new token rather
         // than refreshing with the same old one.
         let mut auth = self.auth.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(id) = self.acc.oauth.clone() else { return Ok(auth.secret.clone()) };
         if let Some(t) = &auth.access
-            && t.expires_at > Instant::now()
+            && !t.expired(margin)
         {
             return Ok(t.access.clone());
         }
-        let p = crate::oauth::provider_for_account(&self.acc)
-            .ok_or_else(|| NetError::Auth(format!("signing in with {id} isn't set up in this copy of MailCraft")))?;
-        let t = crate::oauth::refresh(&p, &auth.secret)?;
+        let p = p.ok_or_else(|| NetError::Auth(format!("signing in with {id} isn't set up in this copy of MailCraft")))?;
+        let t = match crate::oauth::refresh(&p, &auth.secret) {
+            Ok(t) => t,
+            Err(e) => {
+                // Refused: no token to try again with. Anything else keeps the refresh token for
+                // the next try (the error backs off).
+                if matches!(e, NetError::Auth(_)) {
+                    auth.access = None;
+                }
+                return Err(e);
+            }
+        };
+        log::debug!("{}: a new access token", self.acc.id);
         // Some providers hand out a new refresh token each time: keep the newest.
         if let Some(r) = t.refresh.clone().filter(|r| *r != auth.secret) {
             auth.secret = r.clone();
@@ -771,6 +862,58 @@ impl Worker {
         let access = t.access.clone();
         auth.access = Some(t);
         Ok(access)
+    }
+
+    /// Drop the access token, so the next one is fetched anew.
+    fn forget_token(&self) {
+        self.auth.lock().unwrap_or_else(std::sync::PoisonError::into_inner).access = None;
+    }
+
+    /// Give the API connection (Graph, JMAP) a current token before it's used: a token's lifetime
+    /// isn't the connection's (an hour or so for Microsoft's).
+    fn refresh_conn_token(&mut self) -> Result<()> {
+        if self.acc.oauth.is_none() || !matches!(self.conn, Some(Conn::Graph(_) | Conn::Jmap(_))) {
+            return Ok(());
+        }
+        let token = self.fresh_token()?;
+        match self.conn.as_mut() {
+            Some(Conn::Graph(c)) => c.set_token(&token),
+            Some(Conn::Jmap(c)) => c.set_token(&token),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// [`Worker::refresh_conn_token`]; a failure is handled as any (backing off, or asking to
+    /// sign in). `false` when there's no connection to go on with.
+    fn token_ok(&mut self) -> bool {
+        match self.refresh_conn_token() {
+            Ok(()) => true,
+            Err(e) => {
+                self.failed_in("renewing the sign-in", e);
+                false
+            }
+        }
+    }
+
+    /// A token refused on an OAuth account: once in a while that's a token that ran out early
+    /// (the computer slept, the provider revoked it): the connection lets go and the next one
+    /// gets a new token. `true` when that's what happens; a second refusal soon after is a
+    /// sign-in to ask for again.
+    fn token_refused(&mut self) -> bool {
+        if self.acc.oauth.is_none() || self.stopping() {
+            return false;
+        }
+        let cached = self.auth.lock().unwrap_or_else(std::sync::PoisonError::into_inner).access.is_some();
+        if !cached || self.retried_token_at.is_some_and(|t| t.elapsed() < TOKEN_RETRY_WINDOW) {
+            return false;
+        }
+        log::info!("{}: the token was refused; getting a new one", self.acc.id);
+        self.forget_token();
+        self.conn = None;
+        self.retried_token_at = Some(Instant::now());
+        self.next_attempt = Instant::now();
+        true
     }
 
     /// What Microsoft's sign-in granted (its scopes), when known.
@@ -808,6 +951,7 @@ impl Worker {
     }
 
     fn drain(&mut self, rx: &Receiver<Job>) {
+        self.urgent.store(false, Ordering::Relaxed);
         loop {
             match rx.try_recv() {
                 Ok(j) => push_job(&mut self.queue, j),
@@ -925,20 +1069,54 @@ impl Worker {
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
             };
+            self.token_ok();
             match job {
                 Job::Send { account, id, raw, from, recipients, sent_folder } => {
                     self.send_quick(Job::Send { account, id, raw, from, recipients, sent_folder });
                 }
                 j @ (Job::GetVacation { .. } | Job::SetVacation { .. }) => self.handle(j),
+                Job::FetchBody { key } => self.fetch_quick(key),
                 // Anything else belongs to the main connection.
-                other => {
-                    if let Some(m) = &self.main {
-                        let _ = m.send(other);
-                    }
-                }
+                other => self.to_main(other),
             }
         }
         self.let_go();
+    }
+
+    /// Hand a job to the account's main connection (from the second one).
+    fn to_main(&self, job: Job) {
+        let Some(m) = &self.main else { return };
+        let urgent = urgent_job(&job);
+        match m.send(job) {
+            Ok(()) if urgent => self.urgent.store(true, Ordering::Relaxed),
+            Ok(()) => {}
+            Err(mpsc::SendError(Job::FetchBody { key })) => {
+                self.sink.emit(Event::BodyFailed { key, error: "the account's connection stopped".into() })
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Open a message on the second connection. A message that came after this connection read
+    /// the message numbers (the main one keeps them) is looked up again, and left to the main
+    /// connection when it's still unknown.
+    fn fetch_quick(&mut self, key: MessageKey) {
+        if self.acc.is_api() && self.jstate.id(key.uid).is_none() && !self.store.has_body(&key) {
+            self.jstate = jmap::State::load(&self.store, &self.acc.id);
+            if self.jstate.id(key.uid).is_none() {
+                log::debug!("{}: {}/{}: not known here yet; left to the main connection", self.acc.id, key.folder, key.uid);
+                self.to_main(Job::FetchBody { key });
+                return;
+            }
+        }
+        self.fetch(key);
+        // Put back after a refused token: once more, with a new one.
+        while let Some(j) = self.queue.pop_front() {
+            match j {
+                Job::FetchBody { key } => self.fetch(key),
+                other => self.to_main(other),
+            }
+        }
     }
 
     /// Close an idle connection (servers drop them anyway).
@@ -960,6 +1138,8 @@ impl Worker {
                 self.sink.emit(Event::Sent { account: self.id(), id: *id });
                 self.file_sent_quick(raw, sent_folder.clone());
             }
+            // The token ran out early: once more with a new one.
+            Err(NetError::Auth(_)) if self.token_refused() => self.send_quick(job),
             Err(e) if e.is_retryable() => {
                 log::info!("{}: sending on the second connection: {e}; left to the main one", self.acc.id);
                 self.conn = None;
@@ -1156,6 +1336,9 @@ impl Worker {
             log::warn!("{}: {kind}: {e}", self.acc.id);
         } else {
             log::warn!("{}: {what}: {kind}: {e}", self.acc.id);
+        }
+        if matches!(e, NetError::Auth(ref m) if !m.to_ascii_lowercase().contains("authenticated but not connected")) && self.token_refused() {
+            return;
         }
         match e {
             // Microsoft took the token but won't open the mailbox: nothing to retry until changed.
@@ -1379,6 +1562,9 @@ impl Worker {
     fn sync_all(&mut self, rx: &Receiver<Job>) {
         let began = Instant::now();
         log::debug!("{}: reading every folder", self.acc.id);
+        if !self.token_ok() {
+            return;
+        }
         if !self.relist() {
             // Refused rather than cut off: without a folder list there's no sync, and asking
             // again at once looped (showing "Updating…" for good).
@@ -1444,23 +1630,31 @@ impl Worker {
     }
 
     fn sync_one(&mut self, path: &str) {
+        if !self.token_ok() {
+            return;
+        }
         let began = Instant::now();
         self.status(SyncStatus::Syncing { folder: path.to_string() });
         let (store, opts, id) = (self.store.clone(), self.opts, self.id());
+        // Reading ahead stops for a message being opened or a change made meanwhile: they're
+        // handled when the sync returns (before the next folder).
+        let urgent = self.urgent.clone();
+        let waiting = self.queue.iter().any(urgent_job);
+        let mut pause = move || waiting || urgent.load(Ordering::Relaxed);
         let result = match self.conn.as_mut() {
-            Some(Conn::Imap(c)) => sync_folder(c, &store, &id, path, &opts),
+            Some(Conn::Imap(c)) => crate::sync::sync_folder_pausing(c, &store, &id, path, &opts, &mut pause),
             Some(Conn::Jmap(c)) => {
-                let r = jmap::sync_folder(c, &mut self.jstate, &store, &id, path, &opts);
+                let r = jmap::sync_folder_pausing(c, &mut self.jstate, &store, &id, path, &opts, &mut pause);
                 self.save_jstate();
                 r
             }
             Some(Conn::Graph(c)) => {
-                let r = crate::graph::sync_folder(c, &mut self.jstate, &store, &id, path, &opts);
+                let r = crate::graph::sync_folder_pausing(c, &mut self.jstate, &store, &id, path, &opts, &mut pause);
                 self.save_jstate();
                 r
             }
             Some(Conn::Ews(c)) => {
-                let r = crate::ews::sync_folder(c, &mut self.jstate, &store, &id, path, &opts);
+                let r = crate::ews::sync_folder_pausing(c, &mut self.jstate, &store, &id, path, &opts, &mut pause);
                 self.save_jstate();
                 r
             }
@@ -1533,6 +1727,8 @@ impl Worker {
     }
 
     fn handle(&mut self, job: Job) {
+        // Failing, the connection is gone: the job connects again, or says why it can't.
+        self.token_ok();
         match job {
             Job::SyncAll { .. } => {
                 if self.conn.is_none() {
@@ -1799,10 +1995,13 @@ impl Worker {
     }
 
     fn fetch(&mut self, key: MessageKey) {
+        let asked = self.asked.lock().ok().and_then(|mut a| a.remove(&key));
         if let Some(raw) = self.store.read_body(&key) {
             self.sink.emit(Event::Body { key, raw });
             return;
         }
+        let in_line = asked.map_or(Duration::ZERO, |t| t.elapsed());
+        let began = Instant::now();
         let store = self.store.clone();
         let r = (|| -> Result<Vec<u8>> {
             if self.conn.is_none() {
@@ -1819,12 +2018,38 @@ impl Worker {
         })();
         match r {
             Ok(raw) => {
+                // The line to ask for when opening a message is slow: where the time went.
+                log::info!(
+                    "{}: {}/{}: downloaded {} KB in {} ms after {} ms in line{}",
+                    self.acc.id,
+                    key.folder,
+                    key.uid,
+                    raw.len().div_ceil(1024),
+                    began.elapsed().as_millis(),
+                    in_line.as_millis(),
+                    if self.main.is_some() { " (second connection)" } else { "" }
+                );
                 // The download saved the folder's list again: changes waiting stay in it.
                 self.keep_pending(Some(&key.folder));
                 self.sink.emit(Event::Body { key: key.clone(), raw });
                 self.sink.emit(Event::FolderChanged { account: key.account.clone(), folder: key.folder.clone() });
             }
+            // The token ran out early: fetched again with a new one, not reported.
+            Err(NetError::Auth(_)) if self.token_refused() => {
+                if let (Ok(mut a), Some(t)) = (self.asked.lock(), asked) {
+                    a.insert(key.clone(), t);
+                }
+                self.queue.push_front(Job::FetchBody { key })
+            }
             Err(e) => {
+                log::info!(
+                    "{}: {}/{}: not downloaded after {} ms ({} ms in line): {e}",
+                    self.acc.id,
+                    key.folder,
+                    key.uid,
+                    began.elapsed().as_millis(),
+                    in_line.as_millis()
+                );
                 self.sink.emit(Event::BodyFailed { key, error: e.to_string() });
                 if e.is_fatal() || matches!(e, NetError::Auth(_)) {
                     self.failed(e);
@@ -1880,6 +2105,12 @@ impl Worker {
     fn send(&mut self, id: u64, raw: &[u8], from: &str, recipients: &[String], sent_folder: Option<String>) {
         let sent = self.deliver(raw, from, recipients, sent_folder.as_deref());
         if let Err(e) = sent {
+            if matches!(e, NetError::Auth(_)) && self.token_refused() {
+                // Sent again once connected with a new token.
+                let (account, raw, from, recipients) = (self.id(), raw.to_vec(), from.to_string(), recipients.to_vec());
+                self.queue.push_front(Job::Send { account, id, raw, from, recipients, sent_folder });
+                return;
+            }
             if e.is_retryable() {
                 // Offline or asked to wait: keep it in the Outbox and send it on reconnect.
                 let item = OutboxItem {
@@ -1927,6 +2158,8 @@ impl Worker {
                     let folder = item.sent_folder.take();
                     self.after_sent(item.id, &raw, folder);
                 }
+                // Tried again from the Outbox once connected with a new token.
+                Err(NetError::Auth(_)) if self.token_refused() => return,
                 Err(e) => {
                     let retry = e.is_retryable();
                     item.attempts = item.attempts.saturating_add(1);
@@ -2000,6 +2233,12 @@ impl Worker {
         let trash = self.folders.iter().find(|f| f.role == FolderRole::Trash).map(|f| f.path.clone());
         loop {
             let Some(op) = pending(&self.ops).first().cloned() else { break };
+            // A folder made or renamed just now has its id once the list is read again, and a
+            // change made meanwhile (renaming the new folder) may need it.
+            if relist && self.acc.is_api() {
+                relist = false;
+                self.relist();
+            }
             let began = Instant::now();
             let r = match self.conn.as_mut() {
                 Some(Conn::Imap(c)) => apply_remote_with(c, &op, trash.as_deref()),
@@ -2288,6 +2527,283 @@ mod tests {
         w.status(SyncStatus::Connecting);
         assert!(pool.poll().is_empty());
         assert!(w.conn.is_none() && !w.auth_failed);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    fn until(pool: &Pool, what: &str, mut f: impl FnMut(&Event) -> bool) -> Vec<Event> {
+        let end = Instant::now() + Duration::from_secs(20);
+        let mut seen = Vec::new();
+        while Instant::now() < end {
+            if let Some(e) = pool.wait(Duration::from_millis(100)) {
+                let hit = f(&e);
+                seen.push(e);
+                if hit {
+                    return seen;
+                }
+            }
+        }
+        panic!("timed out waiting for {what}; saw {seen:?}");
+    }
+
+    /// A Graph account signed in with OAuth: refresh token `r1`, access token `t1` running out
+    /// in `left`, the fake server's token endpoint handing out `t2`.
+    fn oauth_graph(
+        name: &str,
+        left: Duration,
+        setup: impl FnOnce(&mut crate::fake_graph::Data),
+    ) -> (Worker, crate::fake_graph::Server, Store, Pool, Arc<Mutex<Auth>>) {
+        let mut d = crate::fake_graph::Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        d.deliver(&inbox, b"From: zoe@contoso.example\r\nSubject: Contract\r\nMessage-ID: <c1@x>\r\n\r\nHello.\r\n", true, "2026-10-01T09:00:00Z");
+        d.tokens = vec!["t1".into()];
+        d.issue.push_back("t2".into());
+        setup(&mut d);
+        let server = crate::fake_graph::serve(d);
+        let store = crate::fake::tests_store(name);
+        let pool = Pool::new(store.clone(), Arc::new(MemoryCredentials::default()));
+        let acc = AccountConfig {
+            id: "a1".into(),
+            email: "me@contoso.example".into(),
+            graph: Some(server.base.clone()),
+            oauth: Some("microsoft".into()),
+            ..Default::default()
+        };
+        let auth = Auth::shared("r1");
+        let wall = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        auth.lock().unwrap().access = Some(crate::oauth::Tokens {
+            access: "t1".into(),
+            refresh: None,
+            expires_at: Instant::now() + left,
+            expires_at_wall: wall + left.as_secs(),
+            granted: String::new(),
+            user: None,
+        });
+        let opts = SyncOptions { prefetch: 0, ..SyncOptions::default() };
+        let mut w = Worker::new(acc, auth.clone(), store.clone(), pool.sink.clone(), opts);
+        w.provider = Some(crate::oauth::tests::local(&format!("{}/token", server.base.trim_end_matches("/v1.0"))));
+        (w, server, store, pool, auth)
+    }
+
+    /// Run a worker on its own thread, as the pool does; stopped when the guard goes.
+    struct Running(Option<Sender<Job>>, Arc<AtomicBool>, Option<JoinHandle<()>>);
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.1.store(true, Ordering::Relaxed);
+            drop(self.0.take());
+            if let Some(t) = self.2.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    fn run(w: Worker) -> Running {
+        let (tx, rx) = mpsc::channel();
+        let stop = w.stop.clone();
+        Running(Some(tx), stop, Some(std::thread::spawn(move || w.run(rx))))
+    }
+
+    fn asked_to_sign_in(seen: &[Event]) -> bool {
+        seen.iter().any(|e| matches!(e, Event::Status { status: SyncStatus::NeedsPassword { .. }, .. }))
+    }
+
+    /// Microsoft's access tokens last an hour or so (less after the computer slept); the
+    /// connection lives longer. A refused token is swapped for a new one from the refresh token
+    /// and the request goes again, without asking to sign in. It used to ask every hour.
+    #[test]
+    fn an_expired_graph_token_is_refreshed_without_asking() {
+        let (w, server, store, pool, _auth) = oauth_graph("token-refreshed", Duration::from_secs(3600), |_| {});
+        let running = run(w);
+        // Up to date, calendars too (they're read after the mail).
+        let mut seen = until(&pool, "synced", |e| matches!(e, Event::DavSynced { .. }));
+        assert_eq!(server.data.lock().unwrap().refreshes, 0);
+        // Microsoft ends t1 early.
+        {
+            let mut d = server.data.lock().unwrap();
+            d.tokens = vec!["t2".into()];
+            d.seen_tokens.clear();
+            d.calls.clear();
+        }
+        let key = store.load_folder("a1", "INBOX").unwrap().messages[0].key.clone();
+        running.0.as_ref().unwrap().send(Job::FetchBody { key }).unwrap();
+        seen.extend(until(&pool, "the body", |e| matches!(e, Event::Body { .. } | Event::BodyFailed { .. })));
+        assert!(matches!(seen.last(), Some(Event::Body { .. })), "{seen:?}");
+        assert!(!asked_to_sign_in(&seen), "{seen:?}");
+        let d = server.data.lock().unwrap();
+        assert_eq!(d.refreshes, 1);
+        assert_eq!(d.seen_tokens.first().map(String::as_str), Some("t1"), "{:?}", d.seen_tokens);
+        assert!(d.seen_tokens.iter().skip(1).all(|t| t == "t2"), "{:?}", d.seen_tokens);
+        assert_eq!(d.calls.iter().filter(|c| c.ends_with("/$value")).count(), 1, "sent again once: {:?}", d.calls);
+        drop(d);
+        drop(running);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// A token about to run out is renewed before it's used, not after a refusal.
+    #[test]
+    fn a_token_near_its_end_is_refreshed_before_use() {
+        let (w, server, store, pool, _auth) = oauth_graph("token-near-end", Duration::from_secs(120), |d| d.tokens = vec!["t1".into(), "t2".into()]);
+        let running = run(w);
+        let seen = until(&pool, "synced", |e| matches!(e, Event::DavSynced { .. }));
+        assert!(!asked_to_sign_in(&seen));
+        {
+            let d = server.data.lock().unwrap();
+            assert_eq!(d.refreshes, 1);
+            // Connecting checked t1; everything after had t2.
+            assert_eq!(d.seen_tokens.first().map(String::as_str), Some("t1"), "{:?}", d.seen_tokens);
+            assert!(d.seen_tokens.len() > 2 && d.seen_tokens.iter().skip(1).all(|t| t == "t2"), "{:?}", d.seen_tokens);
+        }
+        server.data.lock().unwrap().seen_tokens.clear();
+        let key = store.load_folder("a1", "INBOX").unwrap().messages[0].key.clone();
+        running.0.as_ref().unwrap().send(Job::FetchBody { key }).unwrap();
+        until(&pool, "the body", |e| matches!(e, Event::Body { .. }));
+        let d = server.data.lock().unwrap();
+        assert!(d.seen_tokens.iter().all(|t| t == "t2") && d.refreshes == 1, "{:?}", d.seen_tokens);
+        drop(d);
+        drop(running);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// A new token refused too means signing in again: once, not a loop.
+    #[test]
+    fn a_second_401_asks_to_sign_in() {
+        let (w, server, store, pool, _auth) = oauth_graph("token-second-401", Duration::from_secs(3600), |d| d.tokens = vec!["none".into()]);
+        let running = run(w);
+        until(&pool, "asked to sign in", |e| matches!(e, Event::Status { status: SyncStatus::NeedsPassword { .. }, .. }));
+        assert_eq!(server.data.lock().unwrap().refreshes, 1);
+        drop(running);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// The sign-in service failing (a 500) is the network failing: tried again later, keeping
+    /// the refresh token, not a sign-in to ask for.
+    #[test]
+    fn a_refresh_that_fails_with_a_500_backs_off() {
+        let (w, server, store, pool, auth) = oauth_graph("token-refresh-500", Duration::ZERO, |d| {
+            d.token_error = Some((500, r#"{"error":"server_error","error_description":"busy"}"#.into()));
+        });
+        let running = run(w);
+        let seen =
+            until(&pool, "an error", |e| matches!(e, Event::Status { status: SyncStatus::Error { .. } | SyncStatus::NeedsPassword { .. }, .. }));
+        assert!(!asked_to_sign_in(&seen), "{seen:?}");
+        assert_eq!(server.data.lock().unwrap().refreshes, 1);
+        assert_eq!(auth.lock().unwrap().secret, "r1");
+        drop(running);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    fn graph_mail(n: usize) -> Vec<u8> {
+        format!("From: zoe@contoso.example\r\nTo: me@contoso.example\r\nSubject: Note {n}\r\nMessage-ID: <n{n}@x>\r\n\r\nHello {n}.\r\n").into_bytes()
+    }
+
+    /// A Graph account with 41 messages synced (40 read ahead, the oldest not), then 40 new ones
+    /// whose sources take 50 ms each, a sync reading them ahead, and the oldest opened meanwhile:
+    /// how long it took to come, and how many sources the sync had read by then.
+    fn open_during_a_sync(name: &str, second: bool) -> (Duration, usize) {
+        let mut d = crate::fake_graph::Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        for i in 0..41 {
+            d.deliver(&inbox, &graph_mail(i), true, &format!("2026-10-01T09:{i:02}:00Z"));
+        }
+        let server = crate::fake_graph::serve(d);
+        let store = crate::fake::tests_store(name);
+        let mut pool = Pool::new(store.clone(), Arc::new(MemoryCredentials::default()));
+        pool.connections.second = second;
+        let account = AccountConfig { id: "a1".into(), email: "me@contoso.example".into(), graph: Some(server.base.clone()), ..Default::default() };
+        pool.submit(Job::Start { account, password: Some(Secret(crate::fake_graph::TOKEN.into())) });
+        until(&pool, "synced", |e| matches!(e, Event::DavSynced { .. }));
+        let oldest = store.load_folder("a1", "INBOX").unwrap().messages.last().unwrap().key.clone();
+        assert!(!store.has_body(&oldest), "not read ahead");
+        {
+            let mut d = server.data.lock().unwrap();
+            d.value_delay = Duration::from_millis(50);
+            for i in 0..40 {
+                d.deliver(&inbox, &graph_mail(100 + i), true, &format!("2026-10-02T09:{i:02}:00Z"));
+            }
+            d.calls.clear();
+        }
+        pool.submit(Job::SyncFolder { account: "a1".into(), folder: "INBOX".into() });
+        let reading = Instant::now() + Duration::from_secs(20);
+        while !server.data.lock().unwrap().calls.iter().any(|c| c.ends_with("/$value")) {
+            assert!(Instant::now() < reading, "the sync never read ahead");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let asked = Instant::now();
+        pool.submit(Job::FetchBody { key: oldest.clone() });
+        until(&pool, "the body", |e| matches!(e, Event::Body { key, .. } | Event::BodyFailed { key, .. } if *key == oldest));
+        let took = asked.elapsed();
+        let read = server.data.lock().unwrap().calls.iter().filter(|c| c.ends_with("/$value")).count();
+        assert!(store.has_body(&oldest));
+        drop(pool);
+        let _ = std::fs::remove_dir_all(store.root());
+        (took, read)
+    }
+
+    /// Opening a message goes on the second connection: it doesn't wait for a folder sync's
+    /// reading ahead (40 sources, two seconds here; minutes on Graph) to finish.
+    #[test]
+    fn fetch_body_does_not_wait_for_a_folder_sync() {
+        let (took, read) = open_during_a_sync("open-during-sync", true);
+        assert!(took < Duration::from_millis(500), "took {took:?}");
+        assert!(read < 41, "the sync's reading ahead was still going: {read}");
+    }
+
+    /// With one connection, the sync stops reading ahead for the message being opened.
+    #[test]
+    fn a_prefetch_pauses_for_an_opened_message() {
+        let (took, read) = open_during_a_sync("prefetch-pauses", false);
+        assert!(took < Duration::from_millis(500), "took {took:?}");
+        assert!(read < 10, "reading ahead stopped: {read} sources read");
+    }
+
+    /// The second connection read the message numbers when it started; a message that came
+    /// later is looked up in what the main connection saved since, and one still unknown is left
+    /// to the main connection.
+    #[test]
+    fn the_quick_connection_reloads_ids_it_does_not_know() {
+        let mut d = crate::fake_graph::Data::default();
+        let inbox = d.folder("Inbox", None, Some("inbox"));
+        d.deliver(&inbox, &graph_mail(1), true, "2026-10-01T09:00:00Z");
+        let server = crate::fake_graph::serve(d);
+        let store = crate::fake::tests_store("quick-reloads-ids");
+        let pool = Pool::new(store.clone(), Arc::new(MemoryCredentials::default()));
+        let acc = AccountConfig { id: "a1".into(), email: "me@contoso.example".into(), graph: Some(server.base.clone()), ..Default::default() };
+        let opts = SyncOptions { prefetch: 0, ..SyncOptions::default() };
+        let auth = Auth::shared(crate::fake_graph::TOKEN);
+        let mut q = Worker::new(acc.clone(), auth.clone(), store.clone(), pool.sink.clone(), opts);
+        let (tx, rx) = mpsc::channel();
+        q.main = Some(tx);
+        let mut w = Worker::new(acc, auth, store.clone(), pool.sink.clone(), opts);
+        w.connect().unwrap();
+        assert!(w.relist());
+        w.sync_one("INBOX");
+        let key = store.load_folder("a1", "INBOX").unwrap().messages[0].key.clone();
+        assert!(q.jstate.id(key.uid).is_none());
+        let _ = pool.poll();
+        q.fetch_quick(key.clone());
+        assert!(pool.poll().iter().any(|e| matches!(e, Event::Body { key: k, .. } if *k == key)));
+        assert!(rx.try_recv().is_err(), "fetched here");
+        let unknown = MessageKey { uid: 999, ..key };
+        q.fetch_quick(unknown.clone());
+        assert_eq!(rx.try_recv().ok(), Some(Job::FetchBody { key: unknown }));
+        assert!(q.urgent.load(Ordering::Relaxed), "the main connection's sync makes way for it");
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// Graph and Exchange can't say when mail comes: the Inbox is looked at every 30 s, not
+    /// every 2 minutes (a phone showed a message long before MailCraft did).
+    #[test]
+    fn api_accounts_look_for_mail_every_30_seconds() {
+        let mut d = crate::fake_graph::Data::default();
+        d.folder("Inbox", None, Some("inbox"));
+        let server = crate::fake_graph::serve(d);
+        let store = crate::fake::tests_store("api-poll");
+        let pool = Pool::new(store.clone(), Arc::new(MemoryCredentials::default()));
+        let acc = AccountConfig { id: "a1".into(), graph: Some(server.base.clone()), ..Default::default() };
+        let mut w = Worker::new(acc, Auth::shared(crate::fake_graph::TOKEN), store.clone(), pool.sink.clone(), SyncOptions::default());
+        assert_eq!(w.poll_every(), Duration::from_secs(120), "not connected: the setting");
+        w.connect().unwrap();
+        assert_eq!(w.poll_every(), Duration::from_secs(30));
         let _ = std::fs::remove_dir_all(store.root());
     }
 

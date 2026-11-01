@@ -227,14 +227,17 @@ pub struct Conn {
     url: Url,
     /// The server said it closes the connection after the last answer.
     closing: bool,
+    /// How long opening it took, said with its first request (later ones reuse it: 0 ms).
+    opening: Option<std::time::Duration>,
 }
 
 impl Conn {
     pub fn open(url: &str) -> Result<Conn> {
         let url = Url::parse(url)?;
+        let began = std::time::Instant::now();
         let sock = stream::tcp(&url.host, url.port)?;
         let s = if url.https { stream::tls(sock, &url.host)? } else { Stream::Plain(sock) };
-        Ok(Conn { s, url, closing: false })
+        Ok(Conn { s, url, closing: false, opening: Some(began.elapsed()) })
     }
 
     /// Whether this connection reaches `url`'s server.
@@ -256,8 +259,21 @@ impl Conn {
         if !self.reaches(&req.url) {
             return Err(NetError::Protocol("a request for another server".into()));
         }
+        // Failing part way, the connection's state is unknown: never used again.
+        self.closing = true;
         write_request(&mut self.s, req, &url, true)?;
-        let resp = read_response(&mut self.s, req.max, req.method == "HEAD")?;
+        let asked = std::time::Instant::now();
+        let mut timed = Timed { s: &mut self.s, first: None, bytes: 0 };
+        let resp = read_response(&mut timed, req.max, req.method == "HEAD")?;
+        let first = timed.first.unwrap_or(asked);
+        log::debug!(
+            "{}: connected in {} ms; the answer began {} ms after asking; {} KB in {} ms",
+            url.host,
+            self.opening.take().unwrap_or_default().as_millis(),
+            first.saturating_duration_since(asked).as_millis(),
+            timed.bytes / 1024,
+            first.elapsed().as_millis()
+        );
         self.closing = resp.header("Connection").is_some_and(|c| c.eq_ignore_ascii_case("close"))
             || (resp.header("Content-Length").is_none() && resp.header("Transfer-Encoding").is_none() && resp.status != 204 && resp.status != 304);
         Ok(resp)

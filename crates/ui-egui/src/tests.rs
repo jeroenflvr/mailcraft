@@ -59,6 +59,60 @@ fn a_banner_and_a_placed_label_draw() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A forwarded newsletter keeps its pictures: carried with the message, they draw in the editor.
+#[test]
+fn a_forward_shows_the_originals_pictures() {
+    let (mut a, dir) = app("forward-pictures");
+    let ctx = egui::Context::default();
+    let k = a.session.list.iter().find(|m| m.subject.contains("winter group show")).map(|m| m.key.clone()).unwrap();
+    a.run("list.open", json!({"key": k.to_id()}));
+    a.run("mail.forward", json!({}));
+    let c = a.session.compose.clone().unwrap();
+    assert!(c.quoted.is_some() && !c.inline.is_empty());
+    let at = c.body.chars().position(|ch| ch == mailcraft_engine::mime::rich::PICTURE).expect("the poster in the text");
+    let cid = c.styles.style(at).picture.unwrap();
+    for _ in 0..3 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    assert!(a.ui.editor.as_ref().is_some_and(|e| e.has_picture(&cid)), "the poster drew");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The signature editor has the message's formatting bar, and takes a logo: it draws, and is
+/// saved with the signature, which then carries it into new messages.
+#[test]
+fn a_signature_takes_a_logo() {
+    let (mut a, dir) = app("signature-logo");
+    let ctx = egui::Context::default();
+    a.act(crate::Action::EditSignature { account: "sample".into(), insert: false });
+    for _ in 0..2 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    a.signature_picture("logo.png", mailcraft_engine::sample::sample_png());
+    let Some(Dialog::Signature(f)) = a.ui.dialog.as_ref() else { panic!("the signature dialog") };
+    let cid = f.compose.inline.last().map(|p| p.cid.clone()).unwrap();
+    assert!(f.compose.body.starts_with(mailcraft_engine::mime::rich::PICTURE), "at the cursor: {:?}", f.compose.body);
+    let params = f.save_params();
+    for _ in 0..3 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    let Some(Dialog::Signature(f)) = a.ui.dialog.as_ref() else { panic!("the signature dialog") };
+    assert!(f.editor_has_picture(&cid), "the logo drew");
+    // Not a picture, or too big: said, and left out.
+    a.signature_picture("notes.txt", b"hi".to_vec());
+    a.signature_picture("huge.png", vec![0; 600 << 10]);
+    let Some(Dialog::Signature(f)) = a.ui.dialog.as_ref() else { panic!("the signature dialog") };
+    assert_eq!(f.compose.inline.len(), 1);
+    a.run("account.setSignature", params);
+    let config = a.session.account("sample").unwrap().config.clone();
+    assert_eq!(config.signature_pictures.len(), 1);
+    a.ui.dialog = None;
+    a.run("mail.new", json!({}));
+    let c = a.session.compose.as_ref().unwrap();
+    assert!(c.inline.iter().any(|p| p.cid == config.signature_pictures[0].cid));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// People's list and A–Z index were a few pixels wider than the pane, so the pane (shared by
 /// every module) grew each frame to its widest and Mail, Calendar and Notes stayed that wide.
 #[test]
