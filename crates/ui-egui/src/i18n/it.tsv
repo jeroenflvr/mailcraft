@@ -941,3 +941,6 @@ month	May	maggio
 	Copy picture	Copia immagine
 	Save picture as…	Salva immagine con nome…
 	{name} could not be saved: {error}	Impossibile salvare {name}: {error}
+	In line with text	In linea con il testo
+	Left of the text	A sinistra del testo
+	Right of the text	A destra del testo

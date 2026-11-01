@@ -249,6 +249,32 @@ impl crate::Services for SavingTo {
     }
 }
 
+/// A signature with its logo set left of the text: the logo is drawn in the margin and the
+/// lines beside it start right of it.
+#[test]
+fn a_logo_with_the_address_beside_it_draws() {
+    use mailcraft_engine::mime::rich::{PICTURE, Style, Styles, Wrap};
+    let (mut a, dir) = app("logo-beside");
+    let ctx = egui::Context::default();
+    let text = format!("{PICTURE}\nRiley Moreno\nStudio Lantern\nriley@studio.example");
+    let mut styles = Styles::plain(&text);
+    styles.restyle(&text, 0..1, |s| Style { picture: Some("logo".into()), wrap: Some(Wrap::Left), ..s.clone() });
+    let png = mailcraft_engine::mime::b64::encode(&sample::sample_png());
+    a.run(
+        "account.setSignature",
+        json!({"account": "sample", "signature": text, "styles": styles, "pictures": [{"cid": "logo", "name": "logo.png", "mime": "image/png", "data": png}]}),
+    );
+    let (sig, st) = a.session.signature_rich("sample");
+    assert_eq!(st.style(0).wrap, Some(Wrap::Left), "kept as saved: {sig:?}");
+    a.run("mail.new", json!({}));
+    for _ in 0..4 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    let placed = a.ui.editor.as_ref().map(|e| e.placed_pictures()).unwrap_or_default();
+    assert_eq!(placed.len(), 1, "the logo drawn beside the text");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// People's list and A–Z index were a few pixels wider than the pane, so the pane (shared by
 /// every module) grew each frame to its widest and Mail, Calendar and Notes stayed that wide.
 #[test]

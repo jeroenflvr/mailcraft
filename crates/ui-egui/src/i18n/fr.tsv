@@ -942,3 +942,6 @@ month	May	mai
 	Copy picture	Copier l’image
 	Save picture as…	Enregistrer l’image sous…
 	{name} could not be saved: {error}	Impossible d’enregistrer {name} : {error}
+	In line with text	Aligné sur le texte
+	Left of the text	À gauche du texte
+	Right of the text	À droite du texte

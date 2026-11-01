@@ -51,6 +51,19 @@ pub struct Style {
     /// The `cid:` of the picture this character stands for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub picture: Option<String>,
+    /// How the text goes round the picture: in line with it (`None`), or beside it, with the
+    /// picture set to the left or the right and the paragraphs after it flowing alongside (a
+    /// logo with the address next to it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<Wrap>,
+}
+
+/// Where a picture sits that text flows beside.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Wrap {
+    Left,
+    Right,
 }
 
 impl Style {
@@ -60,7 +73,7 @@ impl Style {
 
     /// The same look without what belongs to one spot only (a picture).
     pub fn for_typing(&self) -> Style {
-        Style { picture: None, ..self.clone() }
+        Style { picture: None, wrap: None, ..self.clone() }
     }
 }
 
@@ -322,7 +335,13 @@ fn para_html(line: &str, start: usize, styles: &Styles) -> String {
         }
         let run: String = chars.get(i..j).map(|c| c.iter().collect()).unwrap_or_default();
         if let Some(cid) = st.picture.as_ref().filter(|_| run.starts_with(PICTURE)) {
-            out.push_str(&format!("<img src=\"cid:{}\" style=\"max-width:100%\">", esc(cid)));
+            // Beside the text: floated (and `align`, which Outlook's own renderer reads).
+            let placed = match st.wrap {
+                Some(Wrap::Left) => " align=\"left\" style=\"float:left; margin:0 12px 6px 0; max-width:50%\"",
+                Some(Wrap::Right) => " align=\"right\" style=\"float:right; margin:0 0 6px 12px; max-width:50%\"",
+                None => " style=\"max-width:100%\"",
+            };
+            out.push_str(&format!("<img src=\"cid:{}\"{placed}>", esc(cid)));
             i = j;
             continue;
         }
@@ -703,6 +722,12 @@ mod tests {
         assert!(html.contains("<div><br></div>") && html.contains("x<img src=\"cid:pic@x\""), "{html}");
         let t = to_text(text, &s);
         assert_eq!(t, "Hi team\n1. first\n2. second\n\nsee site <https://a.example/>\nx[picture]");
+        // A picture the text flows beside: floated, and `align` for Outlook's renderer.
+        s.restyle(text, 32..33, |st| Style { wrap: Some(Wrap::Left), ..st.clone() });
+        let html = to_html(text, &s);
+        assert!(html.contains("<img src=\"cid:pic@x\" align=\"left\" style=\"float:left;"), "{html}");
+        assert_eq!(to_text(text, &s), t, "the text twin is the same");
+        assert!(s.style(32).for_typing().wrap.is_none(), "typing after it isn't beside anything");
         // Nothing typed can become markup.
         let evil = "<script>x</script>";
         assert!(!to_html(evil, &Styles::plain(evil)).contains("<script>"));

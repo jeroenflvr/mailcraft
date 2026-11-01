@@ -941,3 +941,6 @@ month	May	5월
 	Copy picture	그림 복사
 	Save picture as…	다른 이름으로 그림 저장…
 	{name} could not be saved: {error}	{name}을(를) 저장할 수 없습니다: {error}
+	In line with text	텍스트 줄 안에
+	Left of the text	텍스트 왼쪽
+	Right of the text	텍스트 오른쪽

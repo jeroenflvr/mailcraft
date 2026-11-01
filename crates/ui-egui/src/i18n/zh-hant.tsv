@@ -941,3 +941,6 @@ month	May	5月
 	Copy picture	複製圖片
 	Save picture as…	另存圖片…
 	{name} could not be saved: {error}	無法儲存 {name}：{error}
+	In line with text	嵌入文字行
+	Left of the text	文字左側
+	Right of the text	文字右側

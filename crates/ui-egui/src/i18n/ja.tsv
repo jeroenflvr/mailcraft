@@ -938,3 +938,6 @@ month	May	5月
 	Copy picture	画像をコピー
 	Save picture as…	名前を付けて画像を保存…
 	{name} could not be saved: {error}	{name} を保存できませんでした: {error}
+	In line with text	行内に配置
+	Left of the text	テキストの左
+	Right of the text	テキストの右

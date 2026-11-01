@@ -654,3 +654,8 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
 - **Pictures in a message:** a right-click on a picture in a message (in its text, or an
   attached picture shown below it) offers *Copy picture* (as pixels, for any program) and *Save
   picture as…*; in the message being written, the pictures of the original under it too.
+- **Text beside a picture:** a picture in a message or signature can be set *Left of the text*
+  or *Right of the text* (its right-click menu › Picture, as Word's wrap text): it's drawn in
+  the margin, no larger than a logo, and the lines after it flow beside it until its height is
+  used up (a logo with the name, address and phone next to it). Sent as a floated `<img>`
+  (`float` and `align`, which Outlook's own renderer reads); *In line with text* is the default.

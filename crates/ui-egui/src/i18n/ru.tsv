@@ -941,3 +941,6 @@ month	May	Май
 	Copy picture	Копировать рисунок
 	Save picture as…	Сохранить рисунок как…
 	{name} could not be saved: {error}	Не удалось сохранить {name}: {error}
+	In line with text	В тексте
+	Left of the text	Слева от текста
+	Right of the text	Справа от текста
