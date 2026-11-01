@@ -59,6 +59,25 @@ fn a_banner_and_a_placed_label_draw() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A forwarded newsletter keeps its pictures: carried with the message, they draw in the editor.
+#[test]
+fn a_forward_shows_the_originals_pictures() {
+    let (mut a, dir) = app("forward-pictures");
+    let ctx = egui::Context::default();
+    let k = a.session.list.iter().find(|m| m.subject.contains("winter group show")).map(|m| m.key.clone()).unwrap();
+    a.run("list.open", json!({"key": k.to_id()}));
+    a.run("mail.forward", json!({}));
+    let c = a.session.compose.clone().unwrap();
+    assert!(c.quoted.is_some() && !c.inline.is_empty());
+    let at = c.body.chars().position(|ch| ch == mailcraft_engine::mime::rich::PICTURE).expect("the poster in the text");
+    let cid = c.styles.style(at).picture.unwrap();
+    for _ in 0..3 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    assert!(a.ui.editor.as_ref().is_some_and(|e| e.has_picture(&cid)), "the poster drew");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// People's list and A–Z index were a few pixels wider than the pane, so the pane (shared by
 /// every module) grew each frame to its widest and Mail, Calendar and Notes stayed that wide.
 #[test]

@@ -281,6 +281,126 @@ fn compose_reply_and_send_locally() {
     done(s);
 }
 
+/// A message laid out with a table, a logo shown by `cid:`, a script and a PDF attached, put in
+/// the sample Inbox and opened.
+fn open_newsletter(s: &mut Session) {
+    let d = mailcraft_mime::Draft {
+        to: vec![mailcraft_model::EmailAddress::new("Riley", "riley@studio.example")],
+        subject: "Quarterly report".into(),
+        body: "Revenue up. Regards".into(),
+        html: Some(
+            "<html><body><table><tr><td><img src=\"cid:logo@x\" alt=\"Logo\"></td><td><b>Revenue</b> up</td></tr></table>\
+             <script>alert(1)</script><p>Regards</p></body></html>"
+                .into(),
+        ),
+        inline: vec![mailcraft_mime::InlinePicture { cid: "logo@x".into(), name: "logo.png".into(), mime: "image/png".into(), data: vec![1, 2, 3] }],
+        attachments: vec![mailcraft_mime::OutAttachment { name: "report.pdf".into(), mime: "application/pdf".into(), data: b"%PDF-1.4".to_vec() }],
+        ..Default::default()
+    };
+    let raw = mailcraft_mime::build(&d, &mailcraft_model::EmailAddress::new("Zoe Park", "zoe@studio.example"), NOW, "<nl@x>").unwrap();
+    let store = s.store.clone().unwrap();
+    let mut inbox = store.load_folder("sample", "INBOX").unwrap();
+    let key = mailcraft_model::MessageKey { account: "sample".into(), folder: "INBOX".into(), validity: inbox.validity, uid: 998 };
+    inbox.messages.insert(0, mailcraft_mime::summary_from_full(&raw, key.clone(), mailcraft_model::Flags::default(), 0, NOW));
+    store.save_folder("sample", "INBOX", &inbox).unwrap();
+    store.write_body(&key, &raw).unwrap();
+    s.apply(Event::FolderChanged { account: "sample".into(), folder: "INBOX".into() });
+    s.run("folder.open", &json!({"account": "sample", "folder": "INBOX"})).unwrap();
+    s.run("list.open", &json!({"key": key.to_id()})).unwrap();
+}
+
+/// Outlook sends the original under a forward as it was received: its HTML (a table here) and
+/// its pictures, with the PDF attached and the logo inline only (not both).
+#[test]
+fn a_forward_carries_the_original_html_and_its_pictures() {
+    let mut s = sample_session("forward-html");
+    open_newsletter(&mut s);
+    s.run("mail.forward", &json!({})).unwrap();
+    // As before: an untouched forward has its subject written.
+    assert!(s.compose_written());
+    let c = s.compose.clone().unwrap();
+    assert!(c.quoted.is_some());
+    assert_eq!(c.inline.len(), 1);
+    let names: Vec<&str> = c.attachments.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["report.pdf"]);
+    let cid = c.inline[0].cid.clone();
+    let at = c.body.chars().position(|ch| ch == mailcraft_mime::rich::PICTURE).expect("the logo in the text");
+    assert_eq!(c.styles.style(at).picture.as_deref(), Some(cid.as_str()));
+    let (text, html, pictures) = c.bodies();
+    let html = html.unwrap();
+    assert!(html.contains("<table") && html.contains(&format!("cid:{cid}")) && html.contains("<hr"), "{html}");
+    assert!(!html.contains("<script") && !html.contains("alert"), "{html}");
+    assert!(html.contains("<b>Subject:</b> Quarterly report"), "{html}");
+    assert_eq!(pictures.len(), 1);
+    assert!(text.contains("Revenue up") && !text.contains("<table"));
+    // What goes out: the picture as a part of its own, the HTML pointing at it.
+    s.run("compose.update", &json!({"to": "ana@soundlab.example"})).unwrap();
+    s.run("compose.send", &json!({})).unwrap();
+    s.run("folder.open", &json!({"account": "sample", "folder": "Sent"})).unwrap();
+    let k = s.list.iter().find(|m| m.subject == "Fwd: Quarterly report").unwrap().key.clone();
+    let sent = s.store.as_ref().unwrap().read_body(&k).unwrap();
+    let p = mailcraft_mime::parse(&sent).unwrap();
+    assert!(p.attachments.iter().any(|a| a.content_id.as_deref() == Some(cid.as_str()) && a.inline));
+    assert!(p.attachments.iter().any(|a| a.name == "report.pdf" && !a.inline));
+    assert!(mailcraft_mime::html_body(&sent).unwrap().contains("<table"));
+    done(s);
+}
+
+/// Changed inside the original, what the editor shows is sent (no table), its picture kept.
+#[test]
+fn editing_inside_the_quote_sends_what_is_seen() {
+    let mut s = sample_session("forward-edited");
+    open_newsletter(&mut s);
+    s.run("mail.forward", &json!({})).unwrap();
+    let c = s.compose.as_mut().unwrap();
+    let old = c.body.clone();
+    c.body = old.replacen("Regards", "Cheers", 1);
+    c.styles.edit(&old, &c.body, &mailcraft_mime::rich::Style::default());
+    let cid = c.inline[0].cid.clone();
+    let (_, html, pictures) = c.bodies();
+    let html = html.unwrap();
+    assert!(!html.contains("<table") && html.contains("Cheers") && html.contains(&format!("cid:{cid}")), "{html}");
+    assert_eq!(pictures.len(), 1);
+    done(s);
+}
+
+#[test]
+fn a_reply_quotes_the_html_too() {
+    let mut s = sample_session("reply-html");
+    open_newsletter(&mut s);
+    s.run("mail.reply", &json!({})).unwrap();
+    let c = s.compose.clone().unwrap();
+    assert!(c.attachments.is_empty(), "a reply attaches nothing");
+    let (_, html, pictures) = c.bodies();
+    assert!(html.unwrap().contains("<table"));
+    assert_eq!(pictures.len(), 1);
+    done(s);
+}
+
+#[test]
+fn plain_text_drops_the_quote() {
+    let mut s = sample_session("forward-plain");
+    open_newsletter(&mut s);
+    s.run("mail.forward", &json!({})).unwrap();
+    let c = s.compose.as_mut().unwrap();
+    c.plain = true;
+    let (text, html, pictures) = c.bodies();
+    assert!(html.is_none() && pictures.is_empty());
+    assert!(text.contains("Revenue up"));
+    done(s);
+}
+
+#[test]
+fn forward_as_attachment_has_no_quote() {
+    let mut s = sample_session("forward-attached-no-quote");
+    open_newsletter(&mut s);
+    s.run("mail.forwardAsAttachment", &json!({})).unwrap();
+    let c = s.compose.clone().unwrap();
+    assert!(c.quoted.is_none() && c.inline.is_empty());
+    assert_eq!(c.attachments.len(), 1);
+    done(s);
+}
+
 #[test]
 fn folders_create_rename_move_delete_and_favorites() {
     let mut s = sample_session("folders");

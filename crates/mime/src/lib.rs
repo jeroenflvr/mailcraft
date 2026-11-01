@@ -17,7 +17,10 @@ mod fonts;
 pub mod layout;
 pub mod markup;
 pub mod office;
+mod quote;
 pub mod rich;
+
+pub use quote::{Quoted, QuotedHtml, clean_html, quoted_html};
 
 use mail_builder::MessageBuilder;
 use mail_builder::headers::content_type::ContentType;
@@ -1072,9 +1075,8 @@ fn prefixed(prefix: &str, subject: &str) -> String {
     if already { subject.trim().to_string() } else { format!("{prefix} {base}") }
 }
 
-/// The original under a reply or forward, the way Outlook lays it out: a rule, then who sent it
-/// to whom and when (labels in bold), then the original with its own formatting.
-fn quoted_original(p: &Parsed, clock: &Clock) -> (String, rich::Styles) {
+/// Who sent the original to whom and when, as the lines above it in a reply or forward.
+fn header_lines(p: &Parsed, clock: &Clock) -> Vec<(&'static str, String)> {
     let mut lines: Vec<(&str, String)> = vec![("From:", p.from.to_string()), ("Sent:", full_time(p.date, clock))];
     if !p.to.is_empty() {
         lines.push(("To:", mailcraft_model::addr::format_list(&p.to)));
@@ -1083,6 +1085,25 @@ fn quoted_original(p: &Parsed, clock: &Clock) -> (String, rich::Styles) {
         lines.push(("Cc:", mailcraft_model::addr::format_list(&p.cc)));
     }
     lines.push(("Subject:", p.subject.clone()));
+    lines
+}
+
+/// [`header_lines`] as HTML, as the text has them (the rule above them is the text's own).
+fn header_html(p: &Parsed, clock: &Clock) -> String {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let lines: Vec<String> = header_lines(p, clock).into_iter().map(|(label, value)| format!("<b>{label}</b> {}", esc(&value))).collect();
+    format!(
+        "<div style=\"font-family: Aptos, Calibri, 'Segoe UI', Arial, sans-serif; font-size: {}pt\">{}</div>\n<div><br></div>\n",
+        rich::DEFAULT_SIZE,
+        lines.join("<br>\n")
+    )
+}
+
+/// The original under a reply or forward, the way Outlook lays it out: a rule, then who sent it
+/// to whom and when (labels in bold), then the original with its own formatting; its pictures
+/// where `pictures` gives them a `cid:`.
+fn quoted_original(p: &Parsed, clock: &Clock, pictures: &dyn Fn(&str) -> Option<String>) -> (String, rich::Styles) {
+    let lines = header_lines(p, clock);
     // The rule: an empty paragraph drawn as a line.
     let mut text = String::new();
     let mut styles = rich::Styles::plain("");
@@ -1096,7 +1117,8 @@ fn quoted_original(p: &Parsed, clock: &Clock) -> (String, rich::Styles) {
         st.restyle(&line, 1..1 + label.chars().count(), |_| bold.clone());
         rich::append(&mut text, &mut styles, &line, &st);
     }
-    let (orig, ost) = if p.had_html && !p.rich.is_empty() { rich::from_rich(&p.rich) } else { (p.text.clone(), rich::Styles::plain(&p.text)) };
+    let (orig, ost) =
+        if p.had_html && !p.rich.is_empty() { rich::from_rich_with(&p.rich, pictures) } else { (p.text.clone(), rich::Styles::plain(&p.text)) };
     rich::append(&mut text, &mut styles, "\n\n", &rich::Styles::plain("\n\n"));
     rich::append(&mut text, &mut styles, &orig, &ost);
     (text, styles)
@@ -1113,14 +1135,47 @@ pub fn reply(p: &Parsed, mode: ReplyMode, me: &[String], clock: &Clock, signatur
 /// A reply or forward of `p` to edit: the draft (its body the editable text) and the text's
 /// styles.
 pub fn reply_doc(p: &Parsed, mode: ReplyMode, me: &[String], clock: &Clock, signature: &str) -> (Draft, rich::Styles) {
+    let r = reply_doc_with(p, None, mode, me, clock, signature, &mut String::new);
+    (r.draft, r.styles)
+}
+
+/// A reply or forward to edit, with the original as it was received to send under it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReplyDoc {
+    pub draft: Draft,
+    pub styles: rich::Styles,
+    /// The original's HTML (when it has some, and `raw` was given).
+    pub quoted: Option<Quoted>,
+    /// The original's pictures, placed in the text and shown by `quoted`'s HTML.
+    pub pictures: Vec<InlinePicture>,
+    /// The original's attachments those pictures are (not to attach again).
+    pub carried: Vec<usize>,
+}
+
+/// [`reply_doc`], with `raw` (the original's source) for its HTML and pictures, which get
+/// `cid:`s from `cid_for`.
+pub fn reply_doc_with(
+    p: &Parsed,
+    raw: Option<&[u8]>,
+    mode: ReplyMode,
+    me: &[String],
+    clock: &Clock,
+    signature: &str,
+    cid_for: &mut dyn FnMut() -> String,
+) -> ReplyDoc {
     let mine = |a: &EmailAddress| me.iter().any(|m| m.eq_ignore_ascii_case(a.email.trim()));
     let sig = if signature.trim().is_empty() { String::new() } else { format!("\n\n-- \n{}", signature.trim_end()) };
+    let html = raw.filter(|_| p.had_html).and_then(|raw| quoted_html(raw, p, cid_for));
+    let map = html.as_ref().map(|h| h.map.clone()).unwrap_or_default();
+    let picture = |src: &str| map.iter().find(|(s, _)| s == src).map(|(_, cid)| cid.clone());
     // The cursor's line, the signature, a blank line, then the original under its rule.
     let mut body = sig;
     let mut styles = rich::Styles::plain(&body);
     rich::append(&mut body, &mut styles, "\n\n", &rich::Styles::plain("\n\n"));
-    let (orig, ost) = quoted_original(p, clock);
+    let (orig, ost) = quoted_original(p, clock, &picture);
     rich::append(&mut body, &mut styles, &orig, &ost);
+    let quoted = html.as_ref().map(|h| Quoted { html: h.html.clone(), header_html: header_html(p, clock), text: orig.clone() });
+    let (pictures, carried) = html.map(|h| (h.pictures, h.carried)).unwrap_or_default();
     let mut d = Draft::default();
     match mode {
         ReplyMode::Forward => {
@@ -1155,7 +1210,7 @@ pub fn reply_doc(p: &Parsed, mode: ReplyMode, me: &[String], clock: &Clock, sign
         }
     }
     d.body = body;
-    (d, styles)
+    ReplyDoc { draft: d, styles, quoted, pictures, carried }
 }
 
 #[cfg(test)]
@@ -1405,6 +1460,63 @@ iVBORw0KGgo=\r\n\
         let plain = Draft { attachments: Vec::new(), ..d };
         let raw = build(&plain, &EmailAddress::new("", "zoe@studio.example"), 5, "x4@studio.example").unwrap();
         assert!(!String::from_utf8_lossy(&raw).contains("multipart"));
+    }
+
+    /// A message laid out with a table, a logo shown by `cid:`, a script and a PDF attached.
+    fn newsletter() -> Vec<u8> {
+        let d = Draft {
+            to: vec![EmailAddress::new("Riley", "riley@studio.example")],
+            subject: "Quarterly report".into(),
+            body: "Revenue up. Regards".into(),
+            html: Some(
+                "<html><head><style>td{color:#123456}</style></head><body><table><tr><td><img src=\"cid:logo@x\" alt=\"Logo\"></td>\
+                 <td><b>Revenue</b> up</td></tr></table><script>alert(1)</script><p onclick=\"x()\">Regards</p></body></html>"
+                    .into(),
+            ),
+            inline: vec![InlinePicture { cid: "logo@x".into(), name: "logo.png".into(), mime: "image/png".into(), data: vec![1, 2, 3] }],
+            attachments: vec![OutAttachment { name: "report.pdf".into(), mime: "application/pdf".into(), data: b"%PDF-1.4".to_vec() }],
+            ..Default::default()
+        };
+        build(&d, &EmailAddress::new("Zoe Park", "zoe@studio.example"), 1_791_963_000, "nl@studio.example").unwrap()
+    }
+
+    /// The original under a forward goes as it was received: its HTML (a table, the logo under
+    /// a fresh `cid:`), cleaned; the editor's text has the logo in place.
+    #[test]
+    fn a_forward_carries_the_original_html_and_its_pictures() {
+        let raw = newsletter();
+        let p = parse(&raw).unwrap();
+        let clock = Clock::new(0, 0);
+        let mut n = 0;
+        let r = reply_doc_with(&p, Some(&raw), ReplyMode::Forward, &[], &clock, "Zoe", &mut || {
+            n += 1;
+            format!("c{n}@mailcraft")
+        });
+        let q = r.quoted.unwrap();
+        assert!(q.html.contains("<table") && q.html.contains("src=\"cid:c1@mailcraft\"") && q.html.contains("color:"), "{}", q.html);
+        assert!(!q.html.contains("<script") && !q.html.contains("onclick") && !q.html.contains("cid:logo@x"), "{}", q.html);
+        assert!(q.header_html.contains("<b>From:</b> Zoe Park &lt;zoe@studio.example&gt;"), "{}", q.header_html);
+        assert!(r.draft.body.ends_with(&q.text) && q.text.contains("Subject: Quarterly report"));
+        assert_eq!(r.pictures.len(), 1);
+        assert_eq!((r.pictures[0].cid.as_str(), r.pictures[0].data.as_slice()), ("c1@mailcraft", &[1u8, 2, 3][..]));
+        let logo = p.attachments.iter().find(|a| a.content_id.as_deref() == Some("logo@x")).unwrap();
+        assert_eq!(r.carried, vec![logo.index]);
+        // The picture stands in the text, styled with its cid.
+        let at = r.draft.body.chars().position(|c| c == rich::PICTURE).unwrap();
+        assert_eq!(r.styles.style(at).picture.as_deref(), Some("c1@mailcraft"));
+        // Without the source: as before, no HTML to carry.
+        let (d, _) = reply_doc(&p, ReplyMode::Forward, &[], &clock, "Zoe");
+        assert!(!d.body.contains(rich::PICTURE));
+        // A plain-text original has no HTML to carry.
+        let plain = build(
+            &Draft { to: vec![EmailAddress::new("", "r@x.example")], subject: "Hi".into(), body: "Hello".into(), ..Default::default() },
+            &EmailAddress::new("", "z@x.example"),
+            0,
+            "p@x",
+        )
+        .unwrap();
+        let r = reply_doc_with(&parse(&plain).unwrap(), Some(&plain), ReplyMode::Reply, &[], &clock, "", &mut String::new);
+        assert!(r.quoted.is_none() && r.pictures.is_empty());
     }
 
     #[test]

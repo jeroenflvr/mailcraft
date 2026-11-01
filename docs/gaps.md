@@ -626,3 +626,10 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   session keeps one HTTPS connection open (it was a TLS handshake a request), and a request Graph keeps turning away is retried for 45 s at most, logged, instead of
   minutes in silence. Graph and Exchange accounts look for new mail every 30 s (it was every
   2 minutes).
+- **Forward lost the message's formatting:** the original under a reply or forward was the
+  editor's approximation (tables stacked, cell colours, underline and alignment gone, pictures
+  as `[picture]`). Reply, Reply All and Forward now send the original as received: its HTML
+  (cleaned of scripts, event handlers, `javascript:` links, forms, frames and comments with the
+  html5ever tokenizer) under the user's text, its pictures carried as `cid:` parts (50 and 15 MB
+  at most) and shown in the editor, and a forward attaches only what isn't one of those pictures.
+  Edited inside the original, what the editor shows is sent; plain text sends text only.

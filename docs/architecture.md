@@ -92,6 +92,10 @@ written (`Compose`), preferences and status-bar notices.
   source of truth).
 - Local-only accounts (the sample mailbox) apply changes to the cache directly, including moves
   (new UIDs in the destination) and sending (filed in Sent).
+- A reply or forward keeps the original as it was received in `Compose.quoted` (`mime::Quoted`:
+  its cleaned HTML, the header block as HTML, and the quoted text as it was put in), its pictures
+  in `Compose.inline`: while the quoted text is unchanged, `Compose::bodies` sends the user's part
+  as `to_html` followed by that HTML, as Outlook does; once it's edited, what the editor shows.
 
 ## Languages
 

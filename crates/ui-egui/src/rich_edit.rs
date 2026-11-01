@@ -185,6 +185,12 @@ struct Snap {
 }
 
 impl Editor {
+    /// Whether the picture `cid` was drawn from its bytes (tests).
+    #[cfg(test)]
+    pub(crate) fn has_picture(&self, cid: &str) -> bool {
+        self.pictures.get(cid).is_some_and(Option::is_some)
+    }
+
     pub fn new(id: u64) -> Editor {
         Editor {
             id,
