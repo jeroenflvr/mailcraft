@@ -633,3 +633,12 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   html5ever tokenizer) under the user's text, its pictures carried as `cid:` parts (50 and 15 MB
   at most) and shown in the editor, and a forward attaches only what isn't one of those pictures.
   Edited inside the original, what the editor shows is sent; plain text sends text only.
+- **The signature couldn't hold a logo or be formatted properly:** the signature editor had no
+  formatting bar (only Ctrl+B/I/U), took no pictures, and was saved as HTML and read back
+  through the text converter, losing underline, alignment, lists and indents. It now has the
+  message's formatting bar (size, colours, lists, alignment, links, Pictures), takes pictures
+  from a file, the clipboard, or pasted HTML that carries them (`data:`; Outlook's own clipboard
+  points at files it can't share, so its logo comes in with Pictures), and is saved exactly as
+  edited (`signature_styles`, `signature_pictures`: 8 pictures at most, 512 KB each, 2 MB
+  together); the pictures go into every new message, reply and Insert signature as `cid:` parts.
+  A signature saved as HTML by an earlier version still reads.

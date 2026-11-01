@@ -90,7 +90,8 @@ Before every commit: `cargo xtask ci`. Commit after every arc of work that build
 ## Running and looking at the app
 - `cargo run -p mailcraft -- --sample` (local sample mailbox). Script it at start-up:
   `--cmd 'list.open={"key":"sample:1:1:INBOX"}' --cmd mail.reply`, `--light` / `--dark`,
-  `--cmd ui.addAccount`, `--cmd ui.file` / `ui.options` / `ui.about` (the File page).
+  `--cmd ui.addAccount`, `--cmd ui.file` / `ui.options` / `ui.about` (the File page),
+  `--cmd ui.signature` (the signature editor).
 - For UI work, look at the result: screenshot **the MailCraft window only** and read the PNG.
 - Headless frames: `crates/ui-egui/src/tests.rs` renders every pane layout and dialog.
 - Browser: `trunk serve` in `apps/mailcraft-web`, then `/?sample`; a local JMAP server with CORS:

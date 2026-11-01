@@ -1203,6 +1203,22 @@ pub fn picture_from_file(name: &str, data: Vec<u8>) -> Result<mailcraft_mime::In
     Ok(mailcraft_mime::InlinePicture { cid: String::new(), name, mime, data })
 }
 
+/// A file as a picture for a signature that has `others` already: [`picture_from_file`], and
+/// small enough (with them) to go on every message.
+pub fn signature_picture(name: &str, data: Vec<u8>, others: &[mailcraft_mime::InlinePicture]) -> Result<mailcraft_mime::InlinePicture, CmdError> {
+    use crate::session::{SIGNATURE_PICTURE_MAX, SIGNATURE_PICTURES, SIGNATURE_PICTURES_MAX};
+    if data.len() > SIGNATURE_PICTURE_MAX {
+        return Err(CmdError::Params(format!("{name}: a picture in a signature is {} KB at most", SIGNATURE_PICTURE_MAX >> 10)));
+    }
+    if others.len() >= SIGNATURE_PICTURES {
+        return Err(CmdError::Params(format!("a signature holds {SIGNATURE_PICTURES} pictures at most")));
+    }
+    if others.iter().map(|p| p.data.len()).sum::<usize>() + data.len() > SIGNATURE_PICTURES_MAX {
+        return Err(CmdError::Params(format!("a signature's pictures are {} MB at most together", SIGNATURE_PICTURES_MAX >> 20)));
+    }
+    picture_from_file(name, data)
+}
+
 /// Place a picture in the text. With `"insert": false` the mark isn't added to the text (the
 /// editor puts it at the cursor itself).
 fn insert_picture(s: &mut Session, v: &Value) -> CmdResult {
@@ -1780,10 +1796,12 @@ fn set_signature(s: &mut Session, v: &Value) -> CmdResult {
     if pictures.iter().any(|p| p.data.len() > SIGNATURE_PICTURE_MAX) {
         return Err(CmdError::Params(format!("a picture in a signature is {} KB at most", SIGNATURE_PICTURE_MAX >> 10)));
     }
-    // Stable names: the account's, numbered (all renamed in one pass, whatever they were).
+    // Stable names: the account's, numbered, and the picture's own (a changed logo is another
+    // picture, never the old one's bytes under its name). All renamed in one pass.
     let tag: String = config.id.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.')).take(64).collect();
+    let fnv = |d: &[u8]| d.iter().fold(0x811c_9dc5_u32, |h, b| (h ^ u32::from(*b)).wrapping_mul(0x0100_0193));
     let renamed: std::collections::HashMap<String, String> =
-        pictures.iter().enumerate().map(|(n, p)| (p.cid.clone(), format!("sig-{}@{tag}.mailcraft", n + 1))).collect();
+        pictures.iter().enumerate().map(|(n, p)| (p.cid.clone(), format!("sig-{}-{:08x}@{tag}.mailcraft", n + 1, fnv(&p.data)))).collect();
     for st in &mut styles.palette {
         if let Some(new) = st.picture.as_ref().and_then(|old| renamed.get(old)) {
             st.picture = Some(new.clone());

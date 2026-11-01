@@ -9,7 +9,8 @@
 //! commands at start-up (`--cmd 'list.open={"key":"sample:1:1:INBOX"}'`); `ui.file` (or
 //! `ui.settings`), `ui.openExport`, `ui.options` and `ui.about` open the File page at that page;
 //! `ui.addAccount` (optionally `={"email":…,"advanced":true,"graph":true}` or `"pop":true`), `ui.newEvent` and
-//! `ui.newContact` open those dialogs.
+//! `ui.newContact` open those dialogs, and `ui.signature` (optionally `={"account":…}`) the
+//! signature editor.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -728,6 +729,12 @@ fn main() -> eframe::Result {
                     "ui.print" => app.open_print_dialog(),
                     "ui.newEvent" => app.ui.dialog = Some(mailcraft_ui_egui::Dialog::new_event(&app.session, None)),
                     "ui.newContact" => app.ui.dialog = Some(mailcraft_ui_egui::Dialog::new_contact()),
+                    "ui.signature" => {
+                        let p: serde_json::Value = serde_json::from_str(params).unwrap_or_default();
+                        let first = app.session.accounts.first().map(|a| a.config.id.clone()).unwrap_or_default();
+                        let account = p.get("account").and_then(|v| v.as_str()).map_or(first, str::to_string);
+                        app.ui.dialog = Some(mailcraft_ui_egui::Dialog::signature(&app.session, &account));
+                    }
                     _ => match serde_json::from_str(params) {
                         Ok(p) => app.run(id, p),
                         Err(e) => eprintln!("--cmd {id}: bad JSON: {e}"),

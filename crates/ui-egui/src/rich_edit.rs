@@ -444,10 +444,28 @@ fn keys(ui: &mut Ui, ed: &mut Editor, c: &mut Compose, acts: &mut Vec<Action>) {
 /// or it holds no text (a picture alone is pasted as a picture).
 fn paste_formatted(ui: &mut Ui, ed: &mut Editor, c: &mut Compose, id: egui::Id) -> bool {
     let Some(html) = crate::clipboard_html() else { return false };
-    let (add, add_styles) = mailcraft_engine::mime::pasted_html(&html);
-    if add.trim().is_empty() {
+    // The signature editor keeps the pictures the HTML carries itself (`data:` addresses), under
+    // names of its own.
+    let signature = c.id == SIGNATURE_ID;
+    let taken: Vec<String> = c.inline.iter().map(|p| p.cid.clone()).collect();
+    let mut n = 0;
+    let mut cid_for = || {
+        if !signature {
+            return None;
+        }
+        loop {
+            n += 1;
+            let cid = format!("pasted-{n}@mailcraft");
+            if !taken.contains(&cid) {
+                return Some(cid);
+            }
+        }
+    };
+    let (add, add_styles, pictures) = mailcraft_engine::mime::pasted_html_with_pictures(&html, &mut cid_for);
+    if add.trim().is_empty() && pictures.is_empty() {
         return false;
     }
+    c.inline.extend(pictures);
     ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
     c.styles.fit(&c.body);
     ed.undo.push(Snap { text: c.body.clone(), styles: c.styles.clone(), cursor: ed.sel.start });
@@ -940,19 +958,69 @@ fn color_button(
     picked
 }
 
-/// The Message ribbon: font size, bold / italic / underline / strikethrough, colours, lists,
-/// alignment, indent, clear formatting; then names, files, links and pictures.
-/// The Message ribbon; `signature` is the sending account's (for Insert › Signature).
+/// The Message ribbon: the [`format_bar`]'s formatting, links and pictures; then names, files
+/// and the signature (`signature` is the sending account's, for Insert › Signature).
 pub(crate) fn ribbon(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &mut Compose, signature: &str, acts: &mut Vec<Action>) {
+    let mut ops: Vec<Op> = Vec::new();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        format_items(ui, t, ed, c, acts, &mut ops);
+        ui.separator();
+        if crate::widgets::tool_button(ui, Icon::AddressBook, "Address Book", t, !c.sending).on_hover_text(tl!("Ctrl+Shift+B")).clicked() {
+            acts.push(Action::Dialog(Dialog::select_names(c, "to")));
+        }
+        if crate::widgets::tool_button(ui, Icon::Attach, "Attach File", t, !c.sending).clicked() {
+            acts.push(Action::AttachFiles);
+        }
+        // The account's signature at the cursor, or making and changing it, from the message
+        // (Outlook's Signature menu on the Message ribbon).
+        let r = crate::widgets::tool_button(ui, Icon::Drafts, "Signature", t, !c.sending);
+        egui::Popup::menu(&r).show(|ui| {
+            if ui.add_enabled(!signature.trim().is_empty(), egui::Button::new(tl!("Insert signature"))).clicked() {
+                acts.push(Action::InsertSignature);
+                ui.close();
+            }
+            if ui.button(tl!("Signatures…")).clicked() {
+                acts.push(Action::EditSignature { account: c.account.clone(), insert: true });
+                ui.close();
+            }
+        });
+    });
+    link_dialog(ui, t, ed, c);
+    apply_ops(ed, c, ops);
+}
+
+/// The formatting half of the ribbon on its own (the signature editor's): font size, bold /
+/// italic / underline / strikethrough, colours, lists, indent, alignment, clear formatting,
+/// links and pictures. The link dialog is the caller's to show.
+pub(crate) fn format_bar(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &mut Compose, acts: &mut Vec<Action>) {
+    let mut ops: Vec<Op> = Vec::new();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        format_items(ui, t, ed, c, acts, &mut ops);
+    });
+    apply_ops(ed, c, ops);
+}
+
+fn apply_ops(ed: &mut Editor, c: &mut Compose, ops: Vec<Op>) {
+    let changed = !ops.is_empty();
+    for op in ops {
+        apply(ed, c, op);
+    }
+    if changed {
+        ed.refocus = Some(ed.sel.clone());
+    }
+}
+
+/// The formatting buttons, then Link and Pictures, in the row being laid out.
+fn format_items(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &mut Compose, acts: &mut Vec<Action>, ops: &mut Vec<Op>) {
     c.styles.fit(&c.body);
     let n = c.body.chars().count();
     let sel = ed.sel.start.min(n)..ed.sel.end.min(n);
     let cur =
         ed.typing.clone().unwrap_or_else(|| if sel.is_empty() { typing_style(&c.body, &c.styles, sel.start) } else { c.styles.style(sel.start) });
     let para = c.styles.para(rich::lines_of(&c.body, sel.start..sel.start).0);
-    let mut ops: Vec<Op> = Vec::new();
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
+    {
         ui.add_enabled_ui(!c.plain, |ui| {
             egui::ComboBox::from_id_salt(("font-size", c.id)).width(48.0).selected_text(cur.size().to_string()).show_ui(ui, |ui| {
                 for z in rich::SIZES {
@@ -1006,39 +1074,12 @@ pub(crate) fn ribbon(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &mut Compose, 
             }
         });
         ui.separator();
-        if crate::widgets::tool_button(ui, Icon::AddressBook, "Address Book", t, !c.sending).on_hover_text(tl!("Ctrl+Shift+B")).clicked() {
-            acts.push(Action::Dialog(Dialog::select_names(c, "to")));
-        }
-        if crate::widgets::tool_button(ui, Icon::Attach, "Attach File", t, !c.sending).clicked() {
-            acts.push(Action::AttachFiles);
-        }
         if crate::widgets::tool_button(ui, Icon::Link, "Link", t, !c.sending && !c.plain).on_hover_text(tl!("Ctrl+K")).clicked() {
             ed.link = Some(LinkForm::open(c, sel.clone()));
         }
         if crate::widgets::tool_button(ui, Icon::Image, "Pictures", t, !c.sending && !c.plain).clicked() {
             acts.push(Action::InsertPicture);
         }
-        // The account's signature at the cursor, or making and changing it, from the message
-        // (Outlook's Signature menu on the Message ribbon).
-        let r = crate::widgets::tool_button(ui, Icon::Drafts, "Signature", t, !c.sending);
-        egui::Popup::menu(&r).show(|ui| {
-            if ui.add_enabled(!signature.trim().is_empty(), egui::Button::new(tl!("Insert signature"))).clicked() {
-                acts.push(Action::InsertSignature);
-                ui.close();
-            }
-            if ui.button(tl!("Signatures…")).clicked() {
-                acts.push(Action::EditSignature { account: c.account.clone(), insert: true });
-                ui.close();
-            }
-        });
-    });
-    link_dialog(ui, t, ed, c);
-    let changed = !ops.is_empty();
-    for op in ops {
-        apply(ed, c, op);
-    }
-    if changed {
-        ed.refocus = Some(ed.sel.clone());
     }
 }
 

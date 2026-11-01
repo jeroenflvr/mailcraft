@@ -2508,9 +2508,24 @@ fn a_signature_with_a_logo_goes_into_every_message() {
     )
     .unwrap();
     let config = s.account("sample").unwrap().config.clone();
-    let cid = "sig-1@sample.mailcraft";
     assert_eq!(config.signature_pictures.len(), 1);
-    assert_eq!(config.signature_pictures[0].cid, cid, "a stable name, the account's");
+    let cid = config.signature_pictures[0].cid.clone();
+    let cid = cid.as_str();
+    assert!(cid.starts_with("sig-1-") && cid.ends_with("@sample.mailcraft"), "a stable name, the account's: {cid}");
+    // Saved again unchanged, the same name; another logo, another name.
+    let (text2, styles2) = logo_signature(cid);
+    s.run("account.setSignature", &json!({"account": "sample", "signature": text2, "styles": styles2, "pictures": [picture_param(cid, &png)]}))
+        .unwrap();
+    assert_eq!(s.account("sample").unwrap().config.signature_pictures[0].cid, cid);
+    let (text3, styles3) = logo_signature(cid);
+    s.run("account.setSignature", &json!({"account": "sample", "signature": text3, "styles": styles3, "pictures": [picture_param(cid, &[9, 9])]}))
+        .unwrap();
+    assert_ne!(s.account("sample").unwrap().config.signature_pictures[0].cid, cid);
+    s.run(
+        "account.setSignature",
+        &json!({"account": "sample", "signature": text2, "styles": logo_signature(cid).1, "pictures": [picture_param(cid, &png)]}),
+    )
+    .unwrap();
     let has_logo = |s: &Session| {
         let c = s.compose.as_ref().unwrap();
         let at = c.body.chars().position(|ch| ch == PICTURE).expect("the logo in the text");

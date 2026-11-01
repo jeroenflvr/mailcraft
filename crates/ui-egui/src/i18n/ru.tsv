@@ -802,7 +802,7 @@
 	Mobile phone	Мобильный телефон
 	Home phone	Домашний телефон
 	Address book	Адресная книга
-	Paste one from Outlook or Word and it keeps its look; Ctrl+B, Ctrl+I and Ctrl+U format it.	Вставьте подпись из Outlook или Word — оформление сохранится; Ctrl+B, Ctrl+I и Ctrl+U форматируют её.
+	Paste one from Outlook or Word and it keeps its look; use Pictures for a logo (Outlook's clipboard doesn't carry its images).	Вставьте подпись из Outlook или Word — оформление сохранится; логотип добавьте кнопкой «Рисунки» (буфер обмена Outlook не переносит его изображения).
 	All contacts	Все контакты
 	Always open with this address book	Всегда открывать эту адресную книгу
 	Day and week show each calendar in a pane of its own	День и неделя показывают каждый календарь в отдельной панели
