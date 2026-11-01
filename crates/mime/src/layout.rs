@@ -989,6 +989,54 @@ fn has_columns(b: &[Block]) -> bool {
     })
 }
 
+/// A layout as lines of formatted text, in reading order, its columns stacked (as the reading
+/// pane shows a narrow newsletter): what a reply or forward puts in the editor. Tables lose
+/// their boxes and colours; the text keeps its own formatting. Never more than one blank line
+/// in a row.
+pub fn flatten(b: &[Block]) -> RichText {
+    fn walk(b: &[Block], out: &mut RichText, depth: usize) {
+        if depth > MAX_DEPTH * 2 || out.len() > crate::RICH_MAX_LINES {
+            return;
+        }
+        for x in b {
+            match x {
+                Block::Text(lines) => {
+                    for l in lines {
+                        push(out, l.clone());
+                    }
+                }
+                Block::Table(t) => {
+                    for row in &t.rows {
+                        for c in row {
+                            walk(&c.blocks, out, depth + 1);
+                            for o in &c.overlays {
+                                walk(&o.blocks, out, depth + 1);
+                            }
+                        }
+                        // Rows apart, as paragraphs.
+                        push(out, Vec::new());
+                    }
+                }
+            }
+        }
+    }
+    fn blank(l: &[crate::Span]) -> bool {
+        l.iter().all(|s| s.text.trim().is_empty() && s.image.is_none())
+    }
+    fn push(out: &mut RichText, l: Vec<crate::Span>) {
+        if blank(&l) && out.last().is_none_or(|p| blank(p)) {
+            return;
+        }
+        out.push(l);
+    }
+    let mut out = RichText::new();
+    walk(b, &mut out, 0);
+    while out.last().is_some_and(|l| blank(l)) {
+        out.pop();
+    }
+    out
+}
+
 /// The pictures behind boxes in a layout (to be shown, or held back, like the message's others).
 pub fn background_pictures(b: &[Block]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();

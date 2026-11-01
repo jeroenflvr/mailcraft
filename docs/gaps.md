@@ -632,7 +632,9 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   (cleaned of scripts, event handlers, `javascript:` links, forms, frames and comments with the
   html5ever tokenizer) under the user's text, its pictures carried as `cid:` parts (50 and 15 MB
   at most) and shown in the editor, and a forward attaches only what isn't one of those pictures.
-  Edited inside the original, what the editor shows is sent; plain text sends text only.
+  Edited inside the original, what the editor shows is sent; plain text sends text only. In the
+  editor, mail laid out with tables is quoted as its cells' text in reading order
+  (`layout::flatten`), not as the text converter's table (box lines in monospace).
 - **The signature couldn't hold a logo or be formatted properly:** the signature editor had no
   formatting bar (only Ctrl+B/I/U), took no pictures, and was saved as HTML and read back
   through the text converter, losing underline, alignment, lists and indents. It now has the

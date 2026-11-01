@@ -336,7 +336,7 @@ fn is_zero(v: &u8) -> bool {
 pub type RichText = Vec<Vec<Span>>;
 
 /// Most lines kept of a rich rendering (the rest is shown as text).
-const RICH_MAX_LINES: usize = 20_000;
+pub(crate) const RICH_MAX_LINES: usize = 20_000;
 
 /// Word's and Outlook's paragraphs (`class=MsoNormal`) have no space between them (their style
 /// sheet, which a copied fragment leaves behind, says so): as lines, not paragraphs.
@@ -1157,8 +1157,15 @@ fn quoted_original(p: &Parsed, clock: &Clock, pictures: &dyn Fn(&str) -> Option<
         st.restyle(&line, 1..1 + label.chars().count(), |_| bold.clone());
         rich::append(&mut text, &mut styles, &line, &st);
     }
-    let (orig, ost) =
-        if p.had_html && !p.rich.is_empty() { rich::from_rich_with(&p.rich, pictures) } else { (p.text.clone(), rich::Styles::plain(&p.text)) };
+    // Mail laid out with tables: its cells' text in reading order (html2text draws a table as
+    // preformatted text with box lines, which is no way to edit a newsletter).
+    let (orig, ost) = if p.had_html && !p.layout.is_empty() {
+        rich::from_rich_with(&layout::flatten(&p.layout), pictures)
+    } else if p.had_html && !p.rich.is_empty() {
+        rich::from_rich_with(&p.rich, pictures)
+    } else {
+        (p.text.clone(), rich::Styles::plain(&p.text))
+    };
     rich::append(&mut text, &mut styles, "\n\n", &rich::Styles::plain("\n\n"));
     rich::append(&mut text, &mut styles, &orig, &ost);
     (text, styles)
@@ -1587,6 +1594,35 @@ iVBORw0KGgo=\r\n\
         assert!(!plain.contains(rich::PICTURE));
         assert_eq!(data_picture("data:image/gif;base64,R0lG", 10).map(|(m, d)| (m, d.len())), Some(("image/gif".into(), 3)));
         assert_eq!(data_picture("data:image/png,raw", 10), None);
+    }
+
+    /// A newsletter laid out with tables is quoted as its text in reading order, not as the
+    /// text converter's table (box lines and monospace), with its pictures in place.
+    #[test]
+    fn a_table_newsletter_is_quoted_as_readable_text() {
+        let raw = newsletter();
+        let p = parse(&raw).unwrap();
+        assert!(!p.layout.is_empty(), "laid out with a table");
+        let r = reply_doc_with(&p, Some(&raw), ReplyMode::Forward, &[], &Clock::new(0, 0), "", &mut || "c1@x".to_string());
+        let body = &r.draft.body;
+        assert!(!body.contains(['│', '─', '┼', '|']), "no box lines: {body:?}");
+        assert!(body.contains("Revenue up") && body.contains("Regards"), "{body:?}");
+        let bold = body.find("Revenue").map(|b| body[..b].chars().count()).unwrap();
+        let st = r.styles.style(bold);
+        assert!(st.bold && !st.mono, "{st:?}");
+        assert_eq!(r.styles.style(body.chars().position(|c| c == rich::PICTURE).unwrap()).picture.as_deref(), Some("c1@x"));
+        // Flattening itself: rows become paragraphs, empty cells and runs of blank lines go.
+        let cell = |t: &str| layout::Cell {
+            blocks: vec![layout::Block::Text(vec![vec![Span { text: t.into(), ..Default::default() }]])],
+            ..Default::default()
+        };
+        let table = layout::Block::Table(layout::Table {
+            rows: vec![vec![cell("a"), layout::Cell::default(), cell("b")], vec![], vec![cell("c")]],
+            ..Default::default()
+        });
+        let lines: Vec<String> = layout::flatten(&[table]).iter().map(|l| l.iter().map(|s| s.text.as_str()).collect()).collect();
+        assert_eq!(lines, ["a", "b", "", "c"]);
+        assert!(layout::flatten(&[]).is_empty());
     }
 
     #[test]
