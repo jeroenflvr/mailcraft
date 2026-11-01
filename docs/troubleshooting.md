@@ -94,6 +94,20 @@ the path the message takes:
    in the provider's webmail. Some providers keep a message you send to yourself only under Sent,
    and spam filters can move it to Junk.
 
+## Asked to sign in again
+
+- **Every hour, or after the computer slept** (Microsoft 365 through Graph): fixed in 0.19.4.
+  Tokens are renewed before they run out and after a refusal (see
+  [Staying signed in](oauth.md#staying-signed-in)); the log says
+  `<account>: the token was refused; getting a new one` when that happens.
+- **At every start:** the sign-in isn't kept, almost always because no keychain is running. On
+  Linux that's the Secret Service (`org.freedesktop.secrets`: gnome-keyring, KWallet, KeePassXC);
+  on NixOS see [NIXOS.md § Keychain](../NIXOS.md#keychain-secret-service). Look in the log for
+  `needs signing in again: the sign-in couldn't be kept in the keychain: …`, and list what is
+  saved with `secret-tool search service MailCraft`.
+- **Now and then, with "invalid_grant" or "interaction_required":** Microsoft revoked the
+  sign-in (a changed password, an administrator's policy, 90 days unused): sign in again.
+
 ## Checking an account from the command line
 
 `mailcraft-cli` uses the same app folder and accounts as the app, and prints each step to the

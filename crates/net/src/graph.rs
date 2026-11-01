@@ -192,6 +192,11 @@ impl Client {
         Ok(c)
     }
 
+    /// Sign the next requests with a new access token (the old one ran out or was refused).
+    pub fn set_token(&mut self, token: &str) {
+        self.auth = format!("Bearer {token}");
+    }
+
     fn request(&self, mut r: Request) -> Result<Value> {
         r = r.header("Authorization", &self.auth).header("Accept", "application/json").header("Prefer", PREFER);
         let resp = self.send_patiently(&r)?;

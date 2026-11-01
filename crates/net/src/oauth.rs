@@ -108,6 +108,9 @@ pub struct Tokens {
     pub access: String,
     pub refresh: Option<String>,
     pub expires_at: Instant,
+    /// The same moment on the wall clock (Unix seconds): `Instant` stands still while the
+    /// computer sleeps, so a token that "has 40 minutes left" after a night's sleep is long dead.
+    pub expires_at_wall: u64,
     /// The permissions the provider says it granted (Microsoft lists them; empty when not said).
     pub granted: String,
     /// Who signed in, from the ID token (its `email`, else `preferred_username`): only after a
@@ -136,6 +139,21 @@ pub fn id_token_user(id_token: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn wall_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+impl Tokens {
+    /// Whether the token ends within `margin`, by either clock.
+    pub fn expired(&self, margin: Duration) -> bool {
+        Instant::now().checked_add(margin).is_none_or(|t| t >= self.expires_at) || wall_now().saturating_add(margin.as_secs()) >= self.expires_at_wall
+    }
+}
+
+/// Token endpoint error codes (RFC 6749 §5.2, OpenID Connect) that mean the grant itself is no
+/// good: only signing in again helps. Anything else is the service having a bad moment.
+const REFUSALS: [&str; 5] = ["invalid_grant", "interaction_required", "consent_required", "invalid_client", "unauthorized_client"];
+
 impl std::fmt::Debug for Tokens {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Tokens(<redacted>)")
@@ -160,8 +178,13 @@ fn token_request(p: &Provider, mut fields: Vec<(&str, String)>, extra_scope: &st
         serde_json::from_slice(&r.body).map_err(|_| NetError::Protocol(format!("the sign-in service answered HTTP {} without JSON", r.status)))?;
     if !r.ok() || v.get("error").is_some() {
         let what = v.get("error_description").or_else(|| v.get("error")).and_then(Value::as_str).unwrap_or("refused");
-        // A revoked or expired grant means signing in again.
-        return Err(NetError::Auth(format!("{}: {what}", p.name)));
+        let code = v.get("error").and_then(Value::as_str).unwrap_or_default();
+        // A revoked or expired grant means signing in again; a hiccup (a 5xx, 429, an unknown
+        // error code) is retried later, keeping the refresh token.
+        if REFUSALS.contains(&code) {
+            return Err(NetError::Auth(format!("{}: {what}", p.name)));
+        }
+        return Err(NetError::Closed(format!("{}: the sign-in service answered {}: {what}", p.name, r.status)));
     }
     let access = v
         .get("access_token")
@@ -176,6 +199,7 @@ fn token_request(p: &Provider, mut fields: Vec<(&str, String)>, extra_scope: &st
         user: v.get("id_token").and_then(Value::as_str).and_then(id_token_user),
         // A minute early, so a token never runs out mid-command.
         expires_at: Instant::now() + Duration::from_secs(expires - 60),
+        expires_at_wall: wall_now().saturating_add(expires - 60),
     })
 }
 
@@ -386,5 +410,48 @@ pub(crate) mod tests {
             Ok(())
         };
         assert!(matches!(authorize(&p, "", &mut deny, Duration::from_secs(10)), Err(NetError::Auth(m)) if m.contains("access_denied")));
+    }
+
+    fn json(status: &str, body: &str) -> Vec<u8> {
+        format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).into_bytes()
+    }
+
+    #[test]
+    fn a_500_from_the_token_endpoint_is_not_a_sign_in_failure() {
+        let (base, _seen) = crate::http::tests::serve(vec![
+            json("500 Internal Server Error", r#"{"error":"server_error","error_description":"try later"}"#),
+            json("503 Service Unavailable", "{}"),
+            json("429 Too Many Requests", r#"{"error":"temporarily_unavailable"}"#),
+        ]);
+        let p = local(&format!("{base}/token"));
+        for _ in 0..3 {
+            let e = refresh(&p, "r1").unwrap_err();
+            assert!(matches!(e, NetError::Closed(_)) && e.is_fatal(), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_grant_still_is() {
+        let (base, _seen) = crate::http::tests::serve(REFUSALS.iter().map(|c| json("400 Bad Request", &format!(r#"{{"error":"{c}"}}"#))).collect());
+        let p = local(&format!("{base}/token"));
+        for c in REFUSALS {
+            assert!(matches!(refresh(&p, "r1"), Err(NetError::Auth(_))), "{c}");
+        }
+    }
+
+    #[test]
+    fn expiry_by_either_clock() {
+        let t = |secs: u64, wall: u64| Tokens {
+            access: "a".into(),
+            refresh: None,
+            expires_at: Instant::now() + Duration::from_secs(secs),
+            expires_at_wall: wall_now() + wall,
+            granted: String::new(),
+            user: None,
+        };
+        assert!(!t(3600, 3600).expired(Duration::from_secs(300)));
+        assert!(t(120, 3600).expired(Duration::from_secs(300)));
+        // Asleep: the monotonic clock says 40 minutes left, the wall clock says it's over.
+        assert!(t(2400, 0).expired(Duration::ZERO));
     }
 }

@@ -66,6 +66,16 @@ pub struct Data {
     /// The next this many requests for a later page of a folder's listing fail as a gateway
     /// that gave up (504).
     pub gateway_errors: u32,
+    /// The access tokens taken (none: [`TOKEN`] only).
+    pub tokens: Vec<String>,
+    /// The token each request was signed with.
+    pub seen_tokens: Vec<String>,
+    /// The token endpoint (`/token`, beside `/v1.0`): the access tokens it hands out, in turn.
+    pub issue: std::collections::VecDeque<String>,
+    /// … or else this answer (status, JSON body).
+    pub token_error: Option<(u16, String)>,
+    /// Refresh requests the token endpoint had.
+    pub refreshes: u32,
     late: Vec<(std::time::Instant, Vec<u8>)>,
     next: u32,
 }
@@ -485,7 +495,7 @@ pub fn serve(data: Data) -> Server {
             if reader.read_line(&mut first).unwrap_or(0) == 0 {
                 continue;
             }
-            let (mut len, mut authorized, mut immutable) = (0usize, false, false);
+            let (mut len, mut token, mut immutable) = (0usize, String::new(), false);
             loop {
                 let mut line = String::new();
                 if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
@@ -495,12 +505,32 @@ pub fn serve(data: Data) -> Server {
                 if let Some(v) = lower.strip_prefix("content-length:") {
                     len = v.trim().parse().unwrap_or(0);
                 }
-                authorized |=
-                    line.split_once(':').is_some_and(|(k, v)| k.eq_ignore_ascii_case("authorization") && v.trim() == format!("Bearer {TOKEN}"));
+                if let Some((k, v)) = line.split_once(':')
+                    && k.eq_ignore_ascii_case("authorization")
+                {
+                    token = v.trim().strip_prefix("Bearer ").unwrap_or_default().to_string();
+                }
                 immutable |= line.starts_with("Prefer: IdType=\"ImmutableId\"");
             }
             let mut body = vec![0u8; len];
             let _ = reader.read_exact(&mut body);
+            if first.starts_with("POST /token ") {
+                let mut d = shared.lock().unwrap();
+                d.refreshes += 1;
+                let (status, out) = match (d.token_error.clone(), d.issue.pop_front()) {
+                    (Some(e), _) => e,
+                    (None, Some(t)) => (200, json!({"access_token": t, "expires_in": 3600}).to_string()),
+                    (None, None) => (400, json!({"error": "invalid_grant"}).to_string()),
+                };
+                drop(d);
+                respond(&mut s, status, out.as_bytes(), "application/json");
+                continue;
+            }
+            let authorized = {
+                let mut d = shared.lock().unwrap();
+                d.seen_tokens.push(token.clone());
+                if d.tokens.is_empty() { token == TOKEN } else { d.tokens.contains(&token) }
+            };
             if !authorized {
                 respond(&mut s, 401, br#"{"error": {"code": "InvalidAuthenticationToken"}}"#, "application/json");
                 continue;

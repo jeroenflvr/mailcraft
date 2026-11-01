@@ -6,7 +6,7 @@ the items it deferred (calendar, contacts, Exchange, PST import, a web build) ar
 limits below. What each version brought is under [Done](#done); the milestones are in
 [ROADMAP.md](../ROADMAP.md).
 
-_Status: v0.19.3, 2026-10-25._
+_Status: v0.19.4, 2026-11-01._
 
 ## Open
 
@@ -610,3 +610,12 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   `lp` (20 s) have timeouts: a command that doesn't answer is killed and is an ordinary error.
   The preview (one in flight at a time) and the printing itself are laid out and sent off the UI
   thread; the result is said when it arrives.
+
+### v0.19.4 — staying signed in, quick downloads, forwards and signatures
+- **Signing in again every hour (Microsoft 365):** a Graph or JMAP connection kept the access
+  token it was opened with, so the first request after it ran out (an hour, or less after sleep)
+  was refused and the account asked to sign in. Now each piece of work gets a token that lasts five
+  minutes more (renewed from the refresh token when not), by the wall clock too; a 401 gets a new
+  token and goes again once; only the token service's own refusals (`invalid_grant`…) ask to sign
+  in, and a 5xx while refreshing backs off keeping the refresh token. The keychain entry no longer
+  names the IMAP server (the old one is moved once).
