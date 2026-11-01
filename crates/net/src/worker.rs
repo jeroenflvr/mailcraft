@@ -669,6 +669,8 @@ const SENT_SOON: Duration = Duration::from_secs(3);
 const SENT_LATER: Duration = Duration::from_secs(15);
 /// An account's second connection lets go after this long with nothing to do.
 const QUICK_IDLE: Duration = Duration::from_secs(5 * 60);
+/// How often Graph and Exchange accounts look for new mail (they have no push).
+const API_POLL: Duration = Duration::from_secs(30);
 /// An access token is renewed this long before it runs out.
 const TOKEN_MARGIN: Duration = Duration::from_secs(5 * 60);
 /// A token refused again within this long of getting a new one means signing in again.
@@ -786,9 +788,11 @@ impl Worker {
         }
     }
 
-    /// Minutes between checks for new mail where the server can't say at once.
+    /// Minutes between checks for new mail where the server can't say at once; 30 seconds at
+    /// most for Graph and Exchange, which can't (a check is one small request there).
     fn poll_every(&self) -> Duration {
-        Duration::from_secs(u64::from(self.connections.check_minutes.max(1)) * 60)
+        let every = Duration::from_secs(u64::from(self.connections.check_minutes.max(1)) * 60);
+        if matches!(self.conn, Some(Conn::Graph(_) | Conn::Ews(_))) { every.min(API_POLL) } else { every }
     }
 
     /// Minutes between reads of every folder.
@@ -2783,6 +2787,23 @@ mod tests {
         q.fetch_quick(unknown.clone());
         assert_eq!(rx.try_recv().ok(), Some(Job::FetchBody { key: unknown }));
         assert!(q.urgent.load(Ordering::Relaxed), "the main connection's sync makes way for it");
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// Graph and Exchange can't say when mail comes: the Inbox is looked at every 30 s, not
+    /// every 2 minutes (a phone showed a message long before MailCraft did).
+    #[test]
+    fn api_accounts_look_for_mail_every_30_seconds() {
+        let mut d = crate::fake_graph::Data::default();
+        d.folder("Inbox", None, Some("inbox"));
+        let server = crate::fake_graph::serve(d);
+        let store = crate::fake::tests_store("api-poll");
+        let pool = Pool::new(store.clone(), Arc::new(MemoryCredentials::default()));
+        let acc = AccountConfig { id: "a1".into(), graph: Some(server.base.clone()), ..Default::default() };
+        let mut w = Worker::new(acc, Auth::shared(crate::fake_graph::TOKEN), store.clone(), pool.sink.clone(), SyncOptions::default());
+        assert_eq!(w.poll_every(), Duration::from_secs(120), "not connected: the setting");
+        w.connect().unwrap();
+        assert_eq!(w.poll_every(), Duration::from_secs(30));
         let _ = std::fs::remove_dir_all(store.root());
     }
 

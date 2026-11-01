@@ -624,4 +624,5 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   It now goes on the account's second connection, a sync on the main connection stops reading
   ahead when a message is being opened, and the log says how long each download took and waited. A Graph
   session keeps one HTTPS connection open (it was a TLS handshake a request), and a request Graph keeps turning away is retried for 45 s at most, logged, instead of
-  minutes in silence.
+  minutes in silence. Graph and Exchange accounts look for new mail every 30 s (it was every
+  2 minutes).

@@ -58,7 +58,7 @@ Message sources live next to it as `<validity>/<uid>.eml`. A message is identifi
   sync and a change isn't undone on screen by folders read before it's made.
 - Then **wait for mail**: `IDLE` on the Inbox (RFC 2177) in half-second slices, so new jobs interrupt
   it at once; re-issued every 10 minutes (servers drop IDLE after 30). Without IDLE, poll every 2
-  minutes. A full sync runs every 15 minutes. Both are settings (File › Options › Connections,
+  minutes (Graph and Exchange: every 30 s, see below). A full sync runs every 15 minutes. Both are settings (File › Options › Connections,
   `account.connections`). The account is up to date once its mail folders (and the Outbox and
   quota) are; the calendars and contacts follow (a big Microsoft 365 calendar takes minutes to
   read, and the account said "Updating…" all that time).
@@ -184,6 +184,9 @@ switched IMAP off.
   times), on its own or as the throttled part of a batch, for 45 s at most: then its last answer
   is the error ("HTTP 504"), and the account backs off. Each retry is logged (`warn`) with the
   request's path and the attempt.
+- **Polling:** Graph has no push, so the Inbox is looked at every 30 s (the *check for new mail*
+  setting when it's shorter): one request for the newest ids, and a message the phone shows at
+  once shows here within half a minute rather than two. Exchange (EWS) is polled the same way.
 - **One connection per session:** the requests of a Graph session go one after another on one
   kept-open HTTPS connection (one TLS handshake, not one per request; the detailed log says
   `connected in 0 ms` for a reused one). When the server said it closes, the next request opens
