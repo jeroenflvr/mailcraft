@@ -64,8 +64,8 @@ Message sources live next to it as `<validity>/<uid>.eml`. A message is identifi
   read, and the account said "Updating…" all that time).
 - **Connections per account:** the main one (syncing, changes) and, unless turned off, a second
   one for opening messages, sending and automatic replies that connects when there's something to
-  do and lets go after 5 idle minutes. Graph keeps no connection open: each request is its own
-  HTTPS connection. A connection that replaces another (signing in again, a changed setting)
+  do and lets go after 5 idle minutes. A Graph session keeps one HTTPS connection open for all its
+  requests (see below). A connection that replaces another (signing in again, a changed setting)
   waits up to 30 s for the old one to stop, which it does at its next chance (a Graph wait ends
   at once), so two never save the same cache.
 - **Opening a message** never waits behind a sync: it goes on the second connection (POP: the
@@ -181,7 +181,14 @@ switched IMAP off.
   Graph runs a batch's requests side by side, so batches hold 4 (a setting: requests at once, 1
   to 20). A request turned away as too
   busy (429, or for a read 502–504, a gateway that gave up) goes again after the server's `Retry-After` (at most 30 s, five
-  times), on its own or as the throttled part of a batch; only then does the account back off.
+  times), on its own or as the throttled part of a batch, for 45 s at most: then its last answer
+  is the error ("HTTP 504"), and the account backs off. Each retry is logged (`warn`) with the
+  request's path and the attempt.
+- **One connection per session:** the requests of a Graph session go one after another on one
+  kept-open HTTPS connection (one TLS handshake, not one per request; the detailed log says
+  `connected in 0 ms` for a reused one). When the server said it closes, the next request opens
+  another; a kept connection the server let go of while idle fails before answering, and the
+  request goes once more on a new one.
 - **Sending** posts the MIME source to `sendMail`, which files the copy in Sent Items; recipients
   only on the envelope go in a `Bcc:` header, which Exchange strips. Drafts are made from MIME and
   moved where they belong.

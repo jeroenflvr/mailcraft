@@ -40,6 +40,9 @@ const BATCH: usize = 4;
 const RETRIES: u32 = 5;
 /// Longest wait before sending a throttled request again.
 const MAX_WAIT_SECS: u64 = 30;
+/// Longest a request may spend being asked again: then its last answer is the answer ("HTTP
+/// 504"), rather than the user waiting minutes in silence.
+const RETRY_CAP: Duration = Duration::from_secs(45);
 /// Messages a page when details are read from a folder's listing.
 const LIST_PAGE: usize = 100;
 /// What every request asks for: ids in their immutable form, times in UTC. It applies to the
@@ -67,6 +70,10 @@ const LIST_FIELDS: &str = "id,isRead,isDraft,flag,subject,from,sender,toRecipien
 pub struct Client {
     base: String,
     auth: String,
+    /// The connection kept open between requests (one TLS handshake a session, not a request).
+    conn: std::sync::Mutex<Option<http::Conn>>,
+    /// [`RETRY_CAP`] (tests shorten it).
+    retry_cap: Duration,
     /// Requests in one JSON batch (the account's "requests at once").
     at_once: usize,
     /// Set when the account's connection is being let go: waits end and no request starts.
@@ -160,22 +167,84 @@ impl Client {
         }
     }
 
-    /// Send, and when Graph says it's too busy, wait as long as it asks and send again.
+    /// Send, and when Graph says it's too busy, wait as long as it asks and send again (for
+    /// [`RETRY_CAP`] at most).
     fn send_patiently(&self, r: &Request) -> Result<Response> {
         let mut attempt = 0;
+        let first = Instant::now();
         loop {
             self.stopped()?;
             let began = Instant::now();
-            let resp = http::send(r)?;
+            let resp = self.send_on_conn(r)?;
             log::debug!("Graph {} {}: HTTP {} in {} ms", r.method, log_path(&r.url), resp.status, began.elapsed().as_millis());
             if attempt >= RETRIES || !throttled(resp.status, &r.method) {
                 return Ok(resp);
             }
             let wait = retry_wait(resp.header("Retry-After"), attempt);
-            log::info!("Graph is busy (HTTP {}): asking again in {}s", resp.status, wait.as_secs());
-            self.nap(wait)?;
+            if first.elapsed() + wait > self.retry_cap {
+                log::warn!("Graph {} {}: still HTTP {} after {} s; giving up", r.method, log_path(&r.url), resp.status, first.elapsed().as_secs());
+                return Ok(resp);
+            }
             attempt += 1;
+            log::warn!(
+                "Graph {} {}: busy (HTTP {}); asking again in {} s (attempt {attempt})",
+                r.method,
+                log_path(&r.url),
+                resp.status,
+                wait.as_secs()
+            );
+            self.nap(wait)?;
         }
+    }
+
+    /// Send on the session's connection, opening one when there's none (or the server closed
+    /// it). A kept connection the server let go of meanwhile (normal after a while idle) fails
+    /// before answering: the request goes once more on a new one.
+    fn send_on_conn(&self, r: &Request) -> Result<Response> {
+        let mut slot = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut reopened = false;
+        loop {
+            let reused = slot.as_ref().is_some_and(|c| c.usable() && c.reaches(&r.url));
+            if !reused {
+                *slot = Some(http::Conn::open(&r.url)?);
+            }
+            let Some(c) = slot.as_mut() else { return Err(NetError::Closed("no connection".into())) };
+            match c.send(r) {
+                Ok(resp) => {
+                    if !c.usable() {
+                        *slot = None;
+                    }
+                    return Ok(resp);
+                }
+                Err(e) => {
+                    *slot = None;
+                    if reused && !reopened && stale(&e) {
+                        log::debug!("Graph: the kept connection was closed ({e}); opening another");
+                        reopened = true;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Shorten [`RETRY_CAP`] (tests).
+    #[cfg(test)]
+    pub(crate) fn with_retry_cap(mut self, cap: Duration) -> Client {
+        self.retry_cap = cap;
+        self
+    }
+}
+
+/// Whether an error on a kept connection means the server had closed it before the request (so
+/// nothing was done, and sending it again is safe), rather than failing while answering.
+fn stale(e: &NetError) -> bool {
+    use std::io::ErrorKind as K;
+    match e {
+        NetError::Closed(_) => true,
+        NetError::Io(io) => matches!(io.kind(), K::BrokenPipe | K::ConnectionReset | K::ConnectionAborted | K::UnexpectedEof),
+        _ => false,
     }
 }
 
@@ -187,7 +256,7 @@ impl Client {
         if !url.https && !matches!(url.host.as_str(), "127.0.0.1" | "localhost") {
             return Err(NetError::Tls("the Graph address isn't https".into()));
         }
-        let c = Client { base, at_once: BATCH, stop: None, auth: format!("Bearer {token}") };
+        let c = Client { base, at_once: BATCH, stop: None, conn: std::sync::Mutex::new(None), retry_cap: RETRY_CAP, auth: format!("Bearer {token}") };
         c.get("/me/mailFolders/inbox?$select=id")?;
         Ok(c)
     }
@@ -260,6 +329,7 @@ impl Client {
     /// turns away as too busy go again, after the wait it asks for.
     fn batch(&self, requests: &[(&str, String, Option<Value>)]) -> Result<Vec<(u16, Value)>> {
         let mut out = Vec::with_capacity(requests.len());
+        let first = Instant::now();
         for (n, chunk) in requests.chunks(self.at_once.max(1)).enumerate() {
             let mut answers: Vec<Option<(u16, Value)>> = vec![None; chunk.len()];
             let mut pending: Vec<usize> = (0..chunk.len()).collect();
@@ -280,6 +350,7 @@ impl Client {
                 let v = self.post("/$batch", &json!({ "requests": reqs }))?;
                 let got = v.get("responses").and_then(Value::as_array).cloned().unwrap_or_default();
                 let mut again = Vec::new();
+                let mut busy = Vec::new();
                 let mut wait = Duration::ZERO;
                 for &i in &pending {
                     let id = (i + 1).to_string();
@@ -298,6 +369,7 @@ impl Client {
                         });
                         wait = wait.max(retry_wait(after.as_deref(), attempt));
                         again.push(i);
+                        busy.push((i, status, a.and_then(|a| a.get("body")).cloned().unwrap_or(Value::Null)));
                         continue;
                     }
                     let body = a.and_then(|a| a.get("body")).cloned().unwrap_or(Value::Null);
@@ -308,7 +380,16 @@ impl Client {
                 if again.is_empty() {
                     break;
                 }
-                log::info!("Graph is busy: asking again for {} of a batch in {}s", again.len(), wait.as_secs());
+                if first.elapsed() + wait > self.retry_cap {
+                    log::warn!("Graph: {} of a batch still busy after {} s; giving up", again.len(), first.elapsed().as_secs());
+                    for (i, status, body) in busy {
+                        if let Some(slot) = answers.get_mut(i) {
+                            *slot = Some((status, body));
+                        }
+                    }
+                    break;
+                }
+                log::warn!("Graph is busy: asking again for {} of a batch in {} s (attempt {})", again.len(), wait.as_secs(), attempt + 1);
                 self.nap(wait)?;
                 pending = again;
             }
