@@ -113,6 +113,68 @@ fn a_signature_takes_a_logo() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Forwarding a message whose web pictures weren't shown asks once whether to carry them;
+/// dismissing the question leaves them as addresses.
+#[test]
+fn a_forward_asks_about_web_pictures_once() {
+    let (mut a, dir) = app("ask-web-pictures");
+    let ctx = egui::Context::default();
+    let d = mailcraft_engine::mime::Draft {
+        to: vec![mailcraft_engine::model::EmailAddress::new("Riley", "riley@studio.example")],
+        subject: "Web picture".into(),
+        body: "See it".into(),
+        html: Some("<p>See <img src=\"https://web.example/tick.png\"> it</p>".into()),
+        ..Default::default()
+    };
+    let raw = mailcraft_engine::mime::build(&d, &mailcraft_engine::model::EmailAddress::new("Zoe", "zoe@studio.example"), NOW, "<wp@x>").unwrap();
+    let store = a.session.store.clone().unwrap();
+    let mut inbox = store.load_folder("sample", "INBOX").unwrap();
+    let key = MessageKey { account: "sample".into(), folder: "INBOX".into(), validity: inbox.validity, uid: 997 };
+    inbox.messages.insert(0, mailcraft_engine::mime::summary_from_full(&raw, key.clone(), Default::default(), 0, NOW));
+    store.save_folder("sample", "INBOX", &inbox).unwrap();
+    store.write_body(&key, &raw).unwrap();
+    a.session.apply(MailEvent::FolderChanged { account: "sample".into(), folder: "INBOX".into() });
+    a.run("folder.open", json!({"account": "sample", "folder": "INBOX"}));
+    a.run("list.open", json!({"key": key.to_id()}));
+    a.run("mail.forward", json!({}));
+    // (The first frame installs the fonts and draws nothing.)
+    for _ in 0..2 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    assert!(matches!(a.ui.dialog, Some(Dialog::IncludePictures { count: 1 })), "{:?}", a.ui.dialog);
+    frame(&ctx, &mut a, vec![]);
+    // Dismissed (Escape): as declined, and not asked again.
+    a.ui.dialog = None;
+    frame(&ctx, &mut a, vec![]);
+    assert_eq!(a.session.compose.as_ref().unwrap().include_web, Some(false));
+    assert!(a.ui.dialog.is_none());
+    frame(&ctx, &mut a, vec![]);
+    assert!(a.ui.dialog.is_none());
+    // Included: the picture draws once it has come, in a box that was empty before.
+    a.run("compose.includePictures", json!({"include": true}));
+    let cid = a.session.compose.as_ref().unwrap().web_pictures[0].cid.clone();
+    frame(&ctx, &mut a, vec![]);
+    assert!(!a.ui.editor.as_ref().is_some_and(|e| e.has_picture(&cid)), "not downloaded yet");
+    a.session.apply(MailEvent::Fetched {
+        url: "https://web.example/tick.png".into(),
+        data: Some(mailcraft_engine::sample::sample_png()),
+        error: None,
+    });
+    for _ in 0..2 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    assert!(a.ui.editor.as_ref().is_some_and(|e| e.has_picture(&cid)), "drawn once it came");
+    // Shown first: no question.
+    a.run("compose.discard", json!({}));
+    a.run("list.open", json!({"key": key.to_id()}));
+    a.run("message.showPictures", json!({}));
+    a.run("mail.forward", json!({}));
+    frame(&ctx, &mut a, vec![]);
+    assert!(a.ui.dialog.is_none());
+    assert_eq!(a.session.compose.as_ref().unwrap().include_web, Some(true));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// People's list and A–Z index were a few pixels wider than the pane, so the pane (shared by
 /// every module) grew each frame to its widest and Mail, Calendar and Notes stayed that wide.
 #[test]
@@ -218,6 +280,7 @@ pub(crate) fn tour() {
             Dialog::ConfirmDelete { count: 2 },
             Dialog::ConfirmDeleteContact { uid: "zoe".into(), name: "Zoe Park".into() },
             Dialog::EmptySubject,
+            Dialog::IncludePictures { count: 3 },
             Dialog::edit_account(&a.session.accounts[0].config),
             Dialog::vacation(
                 "sample",

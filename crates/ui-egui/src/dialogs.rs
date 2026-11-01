@@ -524,6 +524,11 @@ pub enum Dialog {
         filter: String,
     },
     EmptySubject,
+    /// A forward or reply of a message with pictures from the web that weren't shown: carry
+    /// them with the message, or send their addresses?
+    IncludePictures {
+        count: usize,
+    },
     RemoveAccount {
         account: String,
         email: String,
@@ -827,7 +832,8 @@ impl Dialog {
 
     /// Dialogs that belong to the message being written (shown in its window when it has one).
     pub fn for_compose(&self) -> bool {
-        matches!(self, Dialog::SelectNames(_) | Dialog::SaveChanges | Dialog::EmptySubject) || matches!(self, Dialog::Signature(f) if f.insert)
+        matches!(self, Dialog::SelectNames(_) | Dialog::SaveChanges | Dialog::EmptySubject | Dialog::IncludePictures { .. })
+            || matches!(self, Dialog::Signature(f) if f.insert)
     }
 
     /// The add-account dialog with the address filled in (servers guessed from it).
@@ -1655,6 +1661,36 @@ fn body(ui: &mut Ui, d: &mut Dialog, s: &Session, t: &Tokens, acts: &mut Vec<Act
                 }
             });
             keep
+        }
+        Dialog::IncludePictures { count } => {
+            ui.set_width(420.0);
+            title(ui, t, "Include pictures from the web?");
+            let what = if *count == 1 {
+                tl!("The message you're forwarding shows a picture from the web, which you hadn't chosen to show.").to_string()
+            } else {
+                tf!("The message you're forwarding shows {count} pictures from the web, which you hadn't chosen to show.", count = count)
+            };
+            ui.label(RichText::new(what).color(t.dim));
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(tl!(
+                    "Included, they're downloaded now and sent with your message; otherwise your message points at them on the web, as the original does."
+                ))
+                .color(t.dim),
+            );
+            ui.add_space(10.0);
+            let mut done = false;
+            button_row(ui, |ui| {
+                if widgets::primary_button(ui, "Include pictures", t, true).clicked() {
+                    acts.push(Action::Run("compose.includePictures", json!({"include": true})));
+                    done = true;
+                }
+                if ui.button(tl!("Don't include")).clicked() {
+                    acts.push(Action::Run("compose.includePictures", json!({"include": false})));
+                    done = true;
+                }
+            });
+            !done
         }
         Dialog::EmptySubject => {
             ui.set_width(360.0);

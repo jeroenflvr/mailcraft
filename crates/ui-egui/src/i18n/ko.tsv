@@ -929,3 +929,9 @@ month	May	5월
 	The PDF app's print dialog decides the rest, such as both sides and color.	양면 인쇄와 색상 같은 나머지 설정은 PDF 앱의 인쇄 대화 상자에서 정합니다.
 	The message has only {total} pages	이 메시지는 {total}쪽뿐입니다
 	Use page numbers like 1-3, 5	1-3, 5처럼 페이지 번호를 입력하세요
+	Include pictures from the web?	웹 그림을 포함할까요?
+	The message you're forwarding shows {count} pictures from the web, which you hadn't chosen to show.	전달하는 메시지에는 표시하지 않기로 한 웹 그림이 {count}개 있습니다.
+	Included, they're downloaded now and sent with your message; otherwise your message points at them on the web, as the original does.	포함하면 지금 다운로드하여 메시지와 함께 보냅니다. 포함하지 않으면 원본처럼 웹의 그림을 가리킵니다.
+	Include pictures	그림 포함
+	Don't include	포함 안 함
+	The message you're forwarding shows a picture from the web, which you hadn't chosen to show.	전달하는 메시지에는 표시하지 않기로 한 웹 그림이 1개 있습니다.

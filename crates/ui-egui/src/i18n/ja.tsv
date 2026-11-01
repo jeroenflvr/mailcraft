@@ -926,3 +926,9 @@ month	May	5月
 	The PDF app's print dialog decides the rest, such as both sides and color.	両面印刷やカラーなどのほかの設定は、PDF アプリの印刷ダイアログで決まります。
 	The message has only {total} pages	このメッセージは {total} ページしかありません
 	Use page numbers like 1-3, 5	1-3, 5 のようにページ番号を入力してください
+	Include pictures from the web?	ウェブの画像を含めますか？
+	The message you're forwarding shows {count} pictures from the web, which you hadn't chosen to show.	転送するメッセージには、表示を選択していないウェブの画像が {count} 枚あります。
+	Included, they're downloaded now and sent with your message; otherwise your message points at them on the web, as the original does.	含めると今ダウンロードしてメッセージと一緒に送ります。含めない場合は、元のメッセージと同様にウェブ上の画像を参照します。
+	Include pictures	画像を含める
+	Don't include	含めない
+	The message you're forwarding shows a picture from the web, which you hadn't chosen to show.	転送するメッセージには、表示を選択していないウェブの画像が 1 枚あります。

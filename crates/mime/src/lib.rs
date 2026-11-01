@@ -1182,7 +1182,7 @@ pub fn reply(p: &Parsed, mode: ReplyMode, me: &[String], clock: &Clock, signatur
 /// A reply or forward of `p` to edit: the draft (its body the editable text) and the text's
 /// styles.
 pub fn reply_doc(p: &Parsed, mode: ReplyMode, me: &[String], clock: &Clock, signature: &str) -> (Draft, rich::Styles) {
-    let r = reply_doc_with(p, None, mode, me, clock, signature, &mut String::new);
+    let r = reply_doc_with(p, None, mode, me, clock, signature, &mut String::new, &mut |_| None);
     (r.draft, r.styles)
 }
 
@@ -1197,10 +1197,15 @@ pub struct ReplyDoc {
     pub pictures: Vec<InlinePicture>,
     /// The original's attachments those pictures are (not to attach again).
     pub carried: Vec<usize>,
+    /// The original's pictures from the web, each with the `cid:` `web` gave it: to download and
+    /// carry, or to send as the address.
+    pub web: Vec<(String, String)>,
 }
 
 /// [`reply_doc`], with `raw` (the original's source) for its HTML and pictures, which get
-/// `cid:`s from `cid_for`.
+/// `cid:`s from `cid_for`; its pictures from the web get theirs from `web` (`None`: they stay
+/// web addresses).
+#[allow(clippy::too_many_arguments)]
 pub fn reply_doc_with(
     p: &Parsed,
     raw: Option<&[u8]>,
@@ -1209,11 +1214,14 @@ pub fn reply_doc_with(
     clock: &Clock,
     signature: &str,
     cid_for: &mut dyn FnMut() -> String,
+    web: &mut dyn FnMut(&str) -> Option<String>,
 ) -> ReplyDoc {
     let mine = |a: &EmailAddress| me.iter().any(|m| m.eq_ignore_ascii_case(a.email.trim()));
     let sig = if signature.trim().is_empty() { String::new() } else { format!("\n\n-- \n{}", signature.trim_end()) };
-    let html = raw.filter(|_| p.had_html).and_then(|raw| quoted_html(raw, p, cid_for));
+    let html = raw.filter(|_| p.had_html).and_then(|raw| quoted_html(raw, p, cid_for, web));
     let map = html.as_ref().map(|h| h.map.clone()).unwrap_or_default();
+    let web_pictures: Vec<(String, String)> =
+        map.iter().filter(|(s, _)| !s.starts_with("cid:") && picture_attachment(p, s).is_none()).cloned().collect();
     let picture = |src: &str| map.iter().find(|(s, _)| s == src).map(|(_, cid)| cid.clone());
     // The cursor's line, the signature, a blank line, then the original under its rule.
     let mut body = sig;
@@ -1223,6 +1231,7 @@ pub fn reply_doc_with(
     rich::append(&mut body, &mut styles, &orig, &ost);
     let quoted = html.as_ref().map(|h| Quoted { html: h.html.clone(), header_html: header_html(p, clock), text: orig.clone() });
     let (pictures, carried) = html.map(|h| (h.pictures, h.carried)).unwrap_or_default();
+    let web = web_pictures;
     let mut d = Draft::default();
     match mode {
         ReplyMode::Forward => {
@@ -1257,7 +1266,37 @@ pub fn reply_doc_with(
         }
     }
     d.body = body;
-    ReplyDoc { draft: d, styles, quoted, pictures, carried }
+    ReplyDoc { draft: d, styles, quoted, pictures, carried, web }
+}
+
+/// The type of a picture by its first bytes (what a web server said is not to be trusted), else
+/// by its address's extension; `None` when it isn't a picture.
+pub fn picture_mime(data: &[u8], url: &str) -> Option<String> {
+    let kind = if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else if data.starts_with(b"BM") {
+        "image/bmp"
+    } else if data.iter().take(512).all(|b| !b.is_ascii_control() || b.is_ascii_whitespace())
+        && String::from_utf8_lossy(data.get(..512).unwrap_or(data)).to_ascii_lowercase().contains("<svg")
+    {
+        "image/svg+xml"
+    } else {
+        // Binary of some other kind: as its address says; text (an error page) isn't a picture.
+        let text = data.iter().take(512).all(|b| b.is_ascii_graphic() || b.is_ascii_whitespace());
+        if text || data.is_empty() {
+            return None;
+        }
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        let m = mime_from_name(path.rsplit('/').next().unwrap_or(path));
+        if m.starts_with("image/") { m } else { return None }
+    };
+    Some(kind.to_string())
 }
 
 #[cfg(test)]
@@ -1535,10 +1574,19 @@ iVBORw0KGgo=\r\n\
         let p = parse(&raw).unwrap();
         let clock = Clock::new(0, 0);
         let mut n = 0;
-        let r = reply_doc_with(&p, Some(&raw), ReplyMode::Forward, &[], &clock, "Zoe", &mut || {
-            n += 1;
-            format!("c{n}@mailcraft")
-        });
+        let r = reply_doc_with(
+            &p,
+            Some(&raw),
+            ReplyMode::Forward,
+            &[],
+            &clock,
+            "Zoe",
+            &mut || {
+                n += 1;
+                format!("c{n}@mailcraft")
+            },
+            &mut |_| None,
+        );
         let q = r.quoted.unwrap();
         assert!(q.html.contains("<table") && q.html.contains("src=\"cid:c1@mailcraft\"") && q.html.contains("color:"), "{}", q.html);
         assert!(!q.html.contains("<script") && !q.html.contains("onclick") && !q.html.contains("cid:logo@x"), "{}", q.html);
@@ -1562,7 +1610,7 @@ iVBORw0KGgo=\r\n\
             "p@x",
         )
         .unwrap();
-        let r = reply_doc_with(&parse(&plain).unwrap(), Some(&plain), ReplyMode::Reply, &[], &clock, "", &mut String::new);
+        let r = reply_doc_with(&parse(&plain).unwrap(), Some(&plain), ReplyMode::Reply, &[], &clock, "", &mut String::new, &mut |_| None);
         assert!(r.quoted.is_none() && r.pictures.is_empty());
     }
 
@@ -1603,7 +1651,7 @@ iVBORw0KGgo=\r\n\
         let raw = newsletter();
         let p = parse(&raw).unwrap();
         assert!(!p.layout.is_empty(), "laid out with a table");
-        let r = reply_doc_with(&p, Some(&raw), ReplyMode::Forward, &[], &Clock::new(0, 0), "", &mut || "c1@x".to_string());
+        let r = reply_doc_with(&p, Some(&raw), ReplyMode::Forward, &[], &Clock::new(0, 0), "", &mut || "c1@x".to_string(), &mut |_| None);
         let body = &r.draft.body;
         assert!(!body.contains(['│', '─', '┼', '|']), "no box lines: {body:?}");
         assert!(body.contains("Revenue up") && body.contains("Regards"), "{body:?}");
@@ -1623,6 +1671,44 @@ iVBORw0KGgo=\r\n\
         let lines: Vec<String> = layout::flatten(&[table]).iter().map(|l| l.iter().map(|s| s.text.as_str()).collect()).collect();
         assert_eq!(lines, ["a", "b", "", "c"]);
         assert!(layout::flatten(&[]).is_empty());
+    }
+
+    /// A picture from the web in the original gets a `cid:` when asked, so it can be carried
+    /// (downloaded) or sent as its address; the text shows it as a picture either way.
+    #[test]
+    fn web_pictures_in_the_original_can_get_cids() {
+        let d = Draft {
+            to: vec![EmailAddress::new("", "r@x.example")],
+            subject: "Hi".into(),
+            body: "Hello".into(),
+            html: Some("<p>Hello <img src=\"https://web.example/a.png\"> and <img src=\"https://web.example/a.png\"> again</p>".into()),
+            ..Default::default()
+        };
+        let raw = build(&d, &EmailAddress::new("", "z@x.example"), 0, "w@x").unwrap();
+        let p = parse(&raw).unwrap();
+        let mut n = 0;
+        let r = reply_doc_with(&p, Some(&raw), ReplyMode::Forward, &[], &Clock::new(0, 0), "", &mut String::new, &mut |_| {
+            n += 1;
+            Some(format!("web{n}@x"))
+        });
+        assert_eq!(r.web, vec![("https://web.example/a.png".to_string(), "web1@x".to_string())], "once per address");
+        assert!(r.quoted.as_ref().unwrap().html.contains("src=\"cid:web1@x\"") && !r.quoted.as_ref().unwrap().html.contains("https://"));
+        assert_eq!(r.draft.body.chars().filter(|c| *c == rich::PICTURE).count(), 2);
+        assert!(r.pictures.is_empty(), "nothing downloaded here");
+        // Not asked for: they stay web addresses, shown as [picture].
+        let r = reply_doc_with(&p, Some(&raw), ReplyMode::Forward, &[], &Clock::new(0, 0), "", &mut String::new, &mut |_| None);
+        assert!(r.web.is_empty() && r.quoted.unwrap().html.contains("https://web.example/a.png"));
+        assert!(r.draft.body.contains("[picture]"));
+        // What a download turned out to be.
+        assert_eq!(picture_mime(b"\x89PNG\r\n\x1a\n....", "x").as_deref(), Some("image/png"));
+        assert_eq!(picture_mime(&[0xFF, 0xD8, 0xFF, 0xE0], "x").as_deref(), Some("image/jpeg"));
+        assert_eq!(picture_mime(b"GIF89a..", "x").as_deref(), Some("image/gif"));
+        assert_eq!(picture_mime(b"RIFF....WEBPVP8 ", "x").as_deref(), Some("image/webp"));
+        assert_eq!(picture_mime(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>", "x").as_deref(), Some("image/svg+xml"));
+        assert_eq!(picture_mime(b"\x00\x01junk", "https://x/a.jpg?s=1").as_deref(), Some("image/jpeg"), "by the address");
+        assert_eq!(picture_mime(b"<html>not found</html>", "https://x/a"), None);
+        assert_eq!(picture_mime(b"<html>not found</html>", "https://x/a.png"), None, "text isn't a picture whatever its name");
+        assert_eq!(picture_mime(b"", "https://x/a.png"), None);
     }
 
     #[test]

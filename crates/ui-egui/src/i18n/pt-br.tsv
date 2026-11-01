@@ -930,3 +930,9 @@ month	May	maio
 	The PDF app's print dialog decides the rest, such as both sides and color.	A caixa de impressão do aplicativo de PDF decide o resto, como frente e verso e cor.
 	The message has only {total} pages	A mensagem tem apenas {total} páginas
 	Use page numbers like 1-3, 5	Use números de página como 1-3, 5
+	Include pictures from the web?	Incluir as imagens da web?
+	The message you're forwarding shows {count} pictures from the web, which you hadn't chosen to show.	A mensagem que você está encaminhando mostra {count} imagens da web que você não tinha escolhido exibir.
+	Included, they're downloaded now and sent with your message; otherwise your message points at them on the web, as the original does.	Se incluídas, elas são baixadas agora e enviadas com a sua mensagem; caso contrário, a mensagem aponta para elas na web, como a original.
+	Include pictures	Incluir imagens
+	Don't include	Não incluir
+	The message you're forwarding shows a picture from the web, which you hadn't chosen to show.	A mensagem que você está encaminhando mostra uma imagem da web que você não tinha escolhido exibir.

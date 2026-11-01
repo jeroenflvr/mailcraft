@@ -930,3 +930,9 @@ month	May	Mai
 	The PDF app's print dialog decides the rest, such as both sides and color.	Den Rest, etwa beidseitiges Drucken und Farbe, legt der Druckdialog der PDF-App fest.
 	The message has only {total} pages	Die Nachricht hat nur {total} Seiten
 	Use page numbers like 1-3, 5	Seitenzahlen wie 1-3, 5 verwenden
+	Include pictures from the web?	Bilder aus dem Web einfügen?
+	The message you're forwarding shows {count} pictures from the web, which you hadn't chosen to show.	Die weitergeleitete Nachricht zeigt {count} Bilder aus dem Web, die Sie nicht anzeigen lassen wollten.
+	Included, they're downloaded now and sent with your message; otherwise your message points at them on the web, as the original does.	Eingefügt werden sie jetzt heruntergeladen und mit Ihrer Nachricht gesendet; sonst verweist Ihre Nachricht wie das Original auf sie im Web.
+	Include pictures	Bilder einfügen
+	Don't include	Nicht einfügen
+	The message you're forwarding shows a picture from the web, which you hadn't chosen to show.	Die weitergeleitete Nachricht zeigt ein Bild aus dem Web, das Sie nicht anzeigen lassen wollten.

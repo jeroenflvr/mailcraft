@@ -925,3 +925,9 @@ month	May	מאי
 	The PDF app's print dialog decides the rest, such as both sides and color.	שאר ההגדרות, כמו הדפסה דו-צדדית וצבע, נקבעות בחלון ההדפסה של אפליקציית ה-PDF.
 	The message has only {total} pages	בהודעה יש רק {total} עמודים
 	Use page numbers like 1-3, 5	השתמשו במספרי עמודים כמו 1-3, 5
+	Include pictures from the web?	לכלול תמונות מהאינטרנט?
+	The message you're forwarding shows {count} pictures from the web, which you hadn't chosen to show.	ההודעה שאתם מעבירים מציגה {count} תמונות מהאינטרנט שלא בחרתם להציג.
+	Included, they're downloaded now and sent with your message; otherwise your message points at them on the web, as the original does.	אם ייכללו, הן יורדו עכשיו ויישלחו עם ההודעה; אחרת ההודעה תפנה אליהן באינטרנט, כמו המקור.
+	Include pictures	לכלול תמונות
+	Don't include	לא לכלול
+	The message you're forwarding shows a picture from the web, which you hadn't chosen to show.	ההודעה שאתם מעבירים מציגה תמונה מהאינטרנט שלא בחרתם להציג.

@@ -96,6 +96,9 @@ written (`Compose`), preferences and status-bar notices.
   its cleaned HTML, the header block as HTML, and the quoted text as it was put in), its pictures
   in `Compose.inline`: while the quoted text is unchanged, `Compose::bodies` sends the user's part
   as `to_html` followed by that HTML, as Outlook does; once it's edited, what the editor shows.
+  Its web pictures (`Compose.web_pictures`, each with a `cid:`) are carried once downloaded when
+  `include_web` is `Some(true)` (set when they were shown, or by `compose.includePictures` after
+  the UI asked), else `bodies()` points their `cid:`s back at the web addresses.
 
 ## Languages
 

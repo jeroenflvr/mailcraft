@@ -45,8 +45,9 @@ pub struct QuotedHtml {
 }
 
 /// The HTML body of `raw` (parsed as `p`), cleaned to quote, its pictures from the message carried
-/// under fresh `cid:`s from `cid_for`. `None` for a message without an HTML body.
-pub fn quoted_html(raw: &[u8], p: &Parsed, cid_for: &mut dyn FnMut() -> String) -> Option<QuotedHtml> {
+/// under fresh `cid:`s from `cid_for`; its pictures from the web under the `cid:`s `web` gives
+/// them (`None`: left as web addresses). `None` for a message without an HTML body.
+pub fn quoted_html(raw: &[u8], p: &Parsed, cid_for: &mut dyn FnMut() -> String, web: &mut dyn FnMut(&str) -> Option<String>) -> Option<QuotedHtml> {
     let html = layout::inline_css(&html_body(raw)?);
     let m = MessageParser::default().parse(raw)?;
     let parts: Vec<_> = m.attachments().collect();
@@ -54,6 +55,12 @@ pub fn quoted_html(raw: &[u8], p: &Parsed, cid_for: &mut dyn FnMut() -> String) 
     let mut bytes = 0usize;
     let mut rewrite = |src: &str| -> Option<String> {
         if let Some((_, cid)) = q.map.iter().find(|(s, _)| s == src) {
+            return Some(format!("cid:{cid}"));
+        }
+        let lower = src.trim().to_ascii_lowercase();
+        if lower.starts_with("https://") || lower.starts_with("http://") {
+            let cid = web(src.trim())?;
+            q.map.push((src.to_string(), cid.clone()));
             return Some(format!("cid:{cid}"));
         }
         let index = picture_attachment(p, src)?;

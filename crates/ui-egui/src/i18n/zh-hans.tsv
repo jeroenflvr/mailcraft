@@ -926,3 +926,9 @@ month	May	5月
 	The PDF app's print dialog decides the rest, such as both sides and color.	双面打印和颜色等其他设置由 PDF 应用的打印对话框决定。
 	The message has only {total} pages	此邮件只有 {total} 页
 	Use page numbers like 1-3, 5	请输入页码，例如 1-3, 5
+	Include pictures from the web?	是否包含来自网络的图片？
+	The message you're forwarding shows {count} pictures from the web, which you hadn't chosen to show.	您转发的邮件显示 {count} 张来自网络的图片，您此前未选择显示它们。
+	Included, they're downloaded now and sent with your message; otherwise your message points at them on the web, as the original does.	包含时会立即下载并随邮件一起发送；否则邮件将像原件一样引用网络上的图片。
+	Include pictures	包含图片
+	Don't include	不包含
+	The message you're forwarding shows a picture from the web, which you hadn't chosen to show.	您转发的邮件显示一张来自网络的图片，您此前未选择显示它。

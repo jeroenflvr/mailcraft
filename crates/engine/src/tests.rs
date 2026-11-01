@@ -390,6 +390,108 @@ fn plain_text_drops_the_quote() {
     done(s);
 }
 
+/// A message whose HTML shows a picture from the web, put in the sample Inbox and opened.
+fn open_web_picture_mail(s: &mut Session) {
+    let d = mailcraft_mime::Draft {
+        to: vec![mailcraft_model::EmailAddress::new("Riley", "riley@studio.example")],
+        subject: "Web picture".into(),
+        body: "See it".into(),
+        html: Some("<p>See <img src=\"https://web.example/tick.png\"> it</p>".into()),
+        ..Default::default()
+    };
+    let raw = mailcraft_mime::build(&d, &mailcraft_model::EmailAddress::new("Zoe Park", "zoe@studio.example"), NOW, "<wp@x>").unwrap();
+    let store = s.store.clone().unwrap();
+    let mut inbox = store.load_folder("sample", "INBOX").unwrap();
+    let key = mailcraft_model::MessageKey { account: "sample".into(), folder: "INBOX".into(), validity: inbox.validity, uid: 997 };
+    inbox.messages.insert(0, mailcraft_mime::summary_from_full(&raw, key.clone(), mailcraft_model::Flags::default(), 0, NOW));
+    store.save_folder("sample", "INBOX", &inbox).unwrap();
+    store.write_body(&key, &raw).unwrap();
+    s.apply(Event::FolderChanged { account: "sample".into(), folder: "INBOX".into() });
+    s.run("folder.open", &json!({"account": "sample", "folder": "INBOX"})).unwrap();
+    s.run("list.open", &json!({"key": key.to_id()})).unwrap();
+}
+
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n-tick-";
+const URL: &str = "https://web.example/tick.png";
+
+/// The pictures were shown for the message: a forward carries them, no question asked.
+#[test]
+fn web_pictures_shown_are_carried_in_a_forward() {
+    let mut s = sample_session("web-pictures-shown");
+    open_web_picture_mail(&mut s);
+    s.run("message.showPictures", &json!({})).unwrap();
+    assert!(s.take_jobs().iter().any(|j| matches!(j, Job::FetchUrl { url } if url == URL)));
+    s.apply(Event::Fetched { url: URL.into(), data: Some(PNG.to_vec()), error: None });
+    let r = s.run("mail.forward", &json!({})).unwrap();
+    assert_eq!(r["webPictures"], false, "nothing to ask");
+    let c = s.compose.clone().unwrap();
+    assert_eq!(c.include_web, Some(true));
+    assert_eq!(c.web_pictures.len(), 1);
+    let cid = c.web_pictures[0].cid.clone();
+    assert_eq!(c.inline.iter().find(|p| p.cid == cid).map(|p| (p.mime.as_str(), p.data.as_slice())), Some(("image/png", PNG)));
+    let (_, html, pictures) = c.bodies();
+    let html = html.unwrap();
+    assert!(html.contains(&format!("cid:{cid}")) && !html.contains(URL), "{html}");
+    assert_eq!(pictures.len(), 1);
+    assert!(s.take_jobs().is_empty(), "already downloaded");
+    done(s);
+}
+
+/// Not shown: the forward asks (the UI's dialog). No: the pictures go as their web addresses,
+/// shown as pictures in the text all the same. Yes: downloaded, and carried as they come.
+#[test]
+fn web_pictures_not_shown_are_asked_about() {
+    let mut s = sample_session("web-pictures-asked");
+    open_web_picture_mail(&mut s);
+    let r = s.run("mail.forward", &json!({})).unwrap();
+    assert_eq!(r["webPictures"], true);
+    let c = s.compose.clone().unwrap();
+    assert_eq!((c.include_web, c.web_pictures.len()), (None, 1));
+    let cid = c.web_pictures[0].cid.clone();
+    assert_eq!(c.body.chars().filter(|ch| *ch == mailcraft_mime::rich::PICTURE).count(), 1);
+    assert!(c.inline.is_empty());
+    assert!(s.take_jobs().is_empty(), "nothing downloaded before the answer");
+    // Undecided or declined: the address, in the quoted HTML and in the editor's own.
+    let (_, html, pictures) = c.bodies();
+    let html = html.unwrap();
+    assert!(html.contains(&format!("src=\"{URL}\"")) && !html.contains("cid:"), "{html}");
+    assert!(pictures.is_empty());
+    s.run("compose.includePictures", &json!({"include": false})).unwrap();
+    assert_eq!(s.compose.as_ref().unwrap().include_web, Some(false));
+    assert!(s.take_jobs().is_empty());
+    let c = s.compose.as_mut().unwrap();
+    let old = c.body.clone();
+    c.body = old.replacen("See", "Look", 1);
+    c.styles.edit(&old, &c.body, &mailcraft_mime::rich::Style::default());
+    let (_, html, _) = c.bodies();
+    assert!(html.unwrap().contains(&format!("src=\"{URL}\"")), "edited too");
+    // Yes: downloaded, then carried.
+    s.run("compose.includePictures", &json!({})).unwrap();
+    assert!(s.take_jobs().iter().any(|j| matches!(j, Job::FetchUrl { url } if url == URL)));
+    assert!(s.compose.as_ref().unwrap().inline.is_empty(), "not here yet");
+    s.apply(Event::Fetched { url: URL.into(), data: Some(PNG.to_vec()), error: None });
+    let c = s.compose.clone().unwrap();
+    assert_eq!(c.inline.len(), 1);
+    let (_, html, pictures) = c.bodies();
+    assert!(html.unwrap().contains(&format!("cid:{cid}")));
+    assert_eq!(pictures.len(), 1);
+    // Not a picture after all (an error page): left as the address.
+    let mut s2 = sample_session("web-pictures-junk");
+    open_web_picture_mail(&mut s2);
+    s2.run("mail.forward", &json!({})).unwrap();
+    s2.run("compose.includePictures", &json!({})).unwrap();
+    s2.apply(Event::Fetched { url: URL.into(), data: Some(b"<html>gone</html>".to_vec()), error: None });
+    let c = s2.compose.clone().unwrap();
+    assert!(c.inline.is_empty());
+    assert!(c.bodies().1.unwrap().contains(URL));
+    // Plain text: text only, the picture as [picture].
+    s2.compose.as_mut().unwrap().plain = true;
+    let (text, html, _) = s2.compose.as_ref().unwrap().bodies();
+    assert!(html.is_none() && text.contains("[picture]"));
+    done(s2);
+    done(s);
+}
+
 #[test]
 fn forward_as_attachment_has_no_quote() {
     let mut s = sample_session("forward-attached-no-quote");

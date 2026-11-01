@@ -635,6 +635,11 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
   Edited inside the original, what the editor shows is sent; plain text sends text only. In the
   editor, mail laid out with tables is quoted as its cells' text in reading order
   (`layout::flatten`), not as the text converter's table (box lines in monospace).
+  The original's pictures from the web: shown for the message (or its sender) already, they're
+  downloaded and sent with the forward; otherwise the forward asks once (*Include pictures from
+  the web?*), and declined (or dismissed) they go as their web addresses, as the original had
+  them (`compose.includePictures`). The editor shows a picture box either way; a download that
+  isn't a picture (an error page) is left as the address.
 - **The signature couldn't hold a logo or be formatted properly:** the signature editor had no
   formatting bar (only Ctrl+B/I/U), took no pictures, and was saved as HTML and read back
   through the text converter, losing underline, alignment, lists and indents. It now has the

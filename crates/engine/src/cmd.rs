@@ -467,6 +467,11 @@ pub fn registry() -> Registry {
         .params(r#"{"by": "modified"|"title"|"color"}"#),
         CommandSpec::new("compose.insertSignature", "Insert signature", "Message › Signature", insert_signature)
             .params(r#"{"at"?: number (the character it goes at; default the end)}"#),
+        CommandSpec::new("compose.includePictures", "Include pictures from the web", "Message", |s, v| {
+            s.include_web_pictures(Some(p::bool(v, "include").unwrap_or(true)))
+        })
+        .when(has_compose)
+        .params(r#"{"include"?: bool (default true: the forwarded or replied-to message's pictures from the web are downloaded and sent with the message; false: sent as their web addresses)}"#),
         CommandSpec::new("view.readingOptions", "Reading pane options", "File › Options › Mail", |s, v| {
             if let Some(on) = p::bool(v, "markRead") {
                 s.prefs.mark_read_on_open = on;

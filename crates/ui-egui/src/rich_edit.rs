@@ -876,9 +876,13 @@ fn decorate(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &Compose, g: &Galley, o
             let Some(cid) = c.styles.style(i + k).picture else { continue };
             let (a, b) = (at(i + k), at(i + k + 1));
             let room = Rect::from_min_max(egui::pos2(a.min.x + 2.0, a.min.y), egui::pos2(b.min.x.max(a.min.x + 8.0) - 2.0, a.max.y));
-            let tex = ed.pictures.entry(cid.clone()).or_insert_with(|| {
-                c.inline.iter().find(|p| p.cid == cid).and_then(|p| crate::reading::decode(ui.ctx(), &format!("compose-{cid}"), &p.data, 400))
-            });
+            // A picture not here yet (a web picture being downloaded) is looked for again.
+            let tex = ed.pictures.entry(cid.clone()).or_insert(None);
+            if tex.is_none()
+                && let Some(p) = c.inline.iter().find(|p| p.cid == cid)
+            {
+                *tex = crate::reading::decode(ui.ctx(), &format!("compose-{cid}"), &p.data, 400);
+            }
             match tex {
                 Some(tex) => {
                     let size = tex.size_vec2();

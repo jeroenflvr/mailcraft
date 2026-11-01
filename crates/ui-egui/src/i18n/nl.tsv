@@ -925,3 +925,9 @@ month	May	mei
 	The PDF app's print dialog decides the rest, such as both sides and color.	De pdf-app bepaalt de rest in zijn eigen afdrukvenster, zoals dubbelzijdig en kleur.
 	The message has only {total} pages	Het bericht heeft maar {total} pagina's
 	Use page numbers like 1-3, 5	Gebruik paginanummers zoals 1-3, 5
+	Include pictures from the web?	Afbeeldingen van het web opnemen?
+	The message you're forwarding shows {count} pictures from the web, which you hadn't chosen to show.	Het bericht dat u doorstuurt toont {count} afbeeldingen van het web die u niet had laten tonen.
+	Included, they're downloaded now and sent with your message; otherwise your message points at them on the web, as the original does.	Opgenomen worden ze nu gedownload en met uw bericht meegestuurd; anders verwijst uw bericht ernaar op het web, zoals het origineel.
+	Include pictures	Afbeeldingen opnemen
+	Don't include	Niet opnemen
+	The message you're forwarding shows a picture from the web, which you hadn't chosen to show.	Het bericht dat u doorstuurt toont een afbeelding van het web die u niet had laten tonen.

@@ -460,6 +460,8 @@ pub struct UiState {
     search_due: Option<f64>,
     /// Why the message being written couldn't be sent or saved, shown over it until dismissed.
     pub compose_alert: Option<String>,
+    /// The message whose web pictures were asked about (once).
+    pub(crate) asked_pictures: Option<u64>,
     /// The attachment shown in place of its message's text (a click on its chip), as Outlook
     /// previews attachments in the reading pane.
     pub attachment_view: Option<(MessageKey, usize)>,
@@ -592,6 +594,7 @@ impl MailApp {
                 search_cursor_end: false,
                 search_due: None,
                 compose_alert: None,
+                asked_pictures: None,
                 attachment_view: None,
                 attachment_selected: None,
                 attachments_active: false,
@@ -901,6 +904,7 @@ impl MailApp {
         self.ui.frame_time = ctx.input(|i| i.time);
         self.apply_language(&ctx);
         self.pump();
+        self.ask_about_web_pictures();
         if let Some(waiting) = self.poll_print_dialog() {
             ctx.request_repaint_after(std::time::Duration::from_millis(if waiting { 150 } else { 1000 }));
         }
@@ -1678,6 +1682,23 @@ impl MailApp {
         } else {
             self.ui.dialog = Some(Dialog::password(&config));
         }
+    }
+
+    /// A forward or reply of a message with web pictures that weren't shown: ask once whether to
+    /// carry them (an open dialog waits its turn; closing the dialog without answering leaves
+    /// them as addresses).
+    fn ask_about_web_pictures(&mut self) {
+        let Some(c) = &self.session.compose else { return };
+        if c.include_web.is_some() || c.web_pictures.is_empty() || self.ui.dialog.is_some() {
+            return;
+        }
+        if self.ui.asked_pictures == Some(c.id) {
+            // The dialog was dismissed: as declined.
+            self.run("compose.includePictures", json!({"include": false}));
+            return;
+        }
+        self.ui.asked_pictures = Some(c.id);
+        self.ui.dialog = Some(Dialog::IncludePictures { count: c.web_pictures.len() });
     }
 
     /// The signature being edited, while its dialog is up: pictures go into it, not the message.

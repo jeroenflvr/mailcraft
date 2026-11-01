@@ -25,7 +25,7 @@ pub use mailcraft_print as print;
 pub use mailcraft_store as store;
 pub use session::{
     ARRANGE_HEADINGS, AccountState, Arrange, Compose, FolderRef, ListFilter, MoveTarget, NotesOrder, Notice, Picture, Prefs, PrintRequest,
-    ReadInPane, Reading, ReadingPane, Row, SearchScope, Session, VacationState, View,
+    ReadInPane, Reading, ReadingPane, Row, SearchScope, Session, VacationState, View, WebPicture,
     invite::Invite,
     parse_key,
     pim::{AgendaItem, CalMode, Module, NoteRef, Person, parse_local},

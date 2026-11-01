@@ -925,3 +925,9 @@ month	May	مايو
 	The PDF app's print dialog decides the rest, such as both sides and color.	يحدد مربع حوار الطباعة في تطبيق PDF بقية الخيارات، مثل الطباعة على الوجهين واللون.
 	The message has only {total} pages	تحتوي الرسالة على {total} صفحات فقط
 	Use page numbers like 1-3, 5	استخدم أرقام صفحات مثل 1-3, 5
+	Include pictures from the web?	هل تريد تضمين الصور من الويب؟
+	The message you're forwarding shows {count} pictures from the web, which you hadn't chosen to show.	تحتوي الرسالة التي تعيد توجيهها على {count} صورة من الويب لم تختر عرضها.
+	Included, they're downloaded now and sent with your message; otherwise your message points at them on the web, as the original does.	عند تضمينها تُنزَّل الآن وتُرسل مع رسالتك؛ وإلا فستشير رسالتك إليها على الويب كما تفعل الرسالة الأصلية.
+	Include pictures	تضمين الصور
+	Don't include	عدم التضمين
+	The message you're forwarding shows a picture from the web, which you hadn't chosen to show.	تحتوي الرسالة التي تعيد توجيهها على صورة من الويب لم تختر عرضها.

@@ -526,6 +526,21 @@ pub struct Compose {
     /// The original under a reply or forward, as it was received, to send as Outlook does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quoted: Option<mime::Quoted>,
+    /// The original's pictures from the web, each with the `cid:` it has in the text and the
+    /// HTML: downloaded and carried when `include_web` says so, else sent as their addresses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub web_pictures: Vec<WebPicture>,
+    /// Whether to carry the web pictures: `None` until the user has said (the UI asks), unless
+    /// they were already shown for the message or its sender.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_web: Option<bool>,
+}
+
+/// A picture from the web in a quoted original.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebPicture {
+    pub url: String,
+    pub cid: String,
 }
 
 impl Compose {
@@ -546,15 +561,35 @@ impl Compose {
             let pictures: Vec<mime::InlinePicture> =
                 self.inline.iter().filter(|p| used.contains(&p.cid) || q.html.contains(&format!("cid:{}", p.cid))).cloned().collect();
             let html = format!("{}{}{}", mime::rich::to_html(&part, &part_styles), q.header_html, q.html);
-            return (text, Some(html), pictures);
+            return (text, Some(self.web_addresses(html)), pictures);
         }
         let used = mime::rich::pictures(&self.body, &styles);
         let pictures: Vec<mime::InlinePicture> = self.inline.iter().filter(|p| used.contains(&p.cid)).cloned().collect();
-        if styles.is_plain() && pictures.is_empty() {
+        if styles.is_plain() && pictures.is_empty() && self.web_pictures.is_empty() {
             (text, None, Vec::new())
         } else {
-            (text, Some(mime::rich::to_html(&self.body, &styles)), pictures)
+            (text, Some(self.web_addresses(mime::rich::to_html(&self.body, &styles))), pictures)
         }
+    }
+
+    /// `html` with the web pictures that weren't carried (not included, or not downloaded)
+    /// pointing at their addresses again, as the original did.
+    fn web_addresses(&self, mut html: String) -> String {
+        for w in &self.web_pictures {
+            if !self.inline.iter().any(|p| p.cid == w.cid) {
+                let url = w.url.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
+                html = html.replace(&format!("cid:{}", w.cid), &url);
+            }
+        }
+        html
+    }
+
+    /// The web pictures still to carry: wanted, and not downloaded yet.
+    pub fn web_pictures_wanted(&self) -> Vec<WebPicture> {
+        if self.include_web != Some(true) {
+            return Vec::new();
+        }
+        self.web_pictures.iter().filter(|w| !self.inline.iter().any(|p| p.cid == w.cid)).cloned().collect()
     }
 
     /// Where the quoted original starts in the text (characters), when it's there unchanged
@@ -575,6 +610,8 @@ impl Compose {
         self.body = text;
         self.quoted = None;
         self.inline.clear();
+        self.web_pictures.clear();
+        self.include_web = None;
     }
 }
 
@@ -2585,13 +2622,24 @@ impl Session {
         let me = self.me(&account);
         // Fresh `cid:`s for the original's pictures: one random stem, numbered.
         let stem = self.random();
-        let mut n = 0u32;
+        let n = std::cell::Cell::new(0u32);
         let mut cid_for = || {
-            n += 1;
-            format!("{stem:016x}.{n}@mailcraft")
+            n.set(n.get() + 1);
+            format!("{stem:016x}.{}@mailcraft", n.get())
         };
-        let doc = mime::reply_doc_with(&parsed, raw.as_deref(), mode, &me, &self.clock, &sig, &mut cid_for);
+        // Its pictures from the web get `cid:`s too: carried once downloaded (if the user has
+        // them shown, or says yes when asked), else sent as their addresses.
+        let webs = std::cell::Cell::new(0usize);
+        let mut web_cid = |_: &str| {
+            webs.set(webs.get() + 1);
+            (webs.get() <= MAX_PICTURES).then(|| {
+                n.set(n.get() + 1);
+                format!("{stem:016x}.w{}@mailcraft", n.get())
+            })
+        };
+        let doc = mime::reply_doc_with(&parsed, raw.as_deref(), mode, &me, &self.clock, &sig, &mut cid_for, &mut web_cid);
         let (d, styles) = (doc.draft, doc.styles);
+        let include_web = if doc.web.is_empty() { None } else { self.pictures_allowed().then_some(true) };
         let id = self.fresh_id();
         let mut attachments = Vec::new();
         if mode == ReplyMode::Forward
@@ -2620,10 +2668,61 @@ impl Session {
             source: Some(r.key),
             quoted: doc.quoted,
             inline: doc.pictures,
+            web_pictures: doc.web.into_iter().map(|(url, cid)| WebPicture { url, cid }).collect(),
+            include_web,
             ..Default::default()
         });
         self.style_signature();
-        Ok(serde_json::json!({ "compose": id }))
+        self.carry_web_pictures();
+        let asking = self.compose.as_ref().is_some_and(|c| c.include_web.is_none() && !c.web_pictures.is_empty());
+        Ok(serde_json::json!({ "compose": id, "webPictures": asking }))
+    }
+
+    /// Carry (or not) the quoted original's pictures from the web in the message being written:
+    /// `Some(true)` downloads them (what came already is carried now, the rest as it comes),
+    /// `Some(false)` leaves them as addresses, `None` asks again.
+    pub fn include_web_pictures(&mut self, include: Option<bool>) -> CmdResult {
+        let c = self.compose.as_mut().ok_or_else(|| CmdError::Disabled("no message is being written".into()))?;
+        c.include_web = include;
+        let n = c.web_pictures.len();
+        self.carry_web_pictures();
+        Ok(serde_json::json!({ "pictures": n, "included": include }))
+    }
+
+    /// Download the web pictures the message being written wants, and carry those downloaded.
+    fn carry_web_pictures(&mut self) {
+        let Some(c) = &self.compose else { return };
+        let wanted = c.web_pictures_wanted();
+        for w in wanted {
+            match self.pictures.get(&w.url) {
+                Some(Picture::Ready(data)) => {
+                    let data = data.clone();
+                    self.carry_web_picture(&w, &data);
+                }
+                Some(Picture::Loading) => {}
+                Some(Picture::Failed(_)) | None => {
+                    self.pictures.insert(w.url.clone(), Picture::Loading);
+                    self.jobs.push(Job::FetchUrl { url: w.url });
+                }
+            }
+        }
+    }
+
+    /// A downloaded web picture into the message being written, where its `cid:` stands; not a
+    /// picture (an error page), or more than a message should carry: left as its address.
+    fn carry_web_picture(&mut self, w: &WebPicture, data: &[u8]) {
+        let Some(c) = self.compose.as_mut() else { return };
+        if c.inline.iter().any(|p| p.cid == w.cid) {
+            return;
+        }
+        let Some(mime) = mime::picture_mime(data, &w.url) else { return };
+        let carried: usize = c.inline.iter().map(|p| p.data.len()).sum();
+        if data.len() > WEB_PICTURE_MAX || carried.saturating_add(data.len()) > WEB_PICTURES_MAX {
+            return;
+        }
+        let path = w.url.split(['?', '#']).next().unwrap_or(&w.url);
+        let name = path.rsplit('/').next().filter(|n| !n.is_empty() && n.len() < 200).map_or_else(|| "picture".to_string(), mime::sanitize_filename);
+        c.inline.push(mime::InlinePicture { cid: w.cid.clone(), name, mime, data: data.to_vec() });
     }
 
     /// Forward the open message as an attachment, as Outlook's More › Forward as Attachment: the
@@ -3530,6 +3629,13 @@ impl Session {
                     (Some(d), _) => Picture::Ready(Arc::new(d)),
                     (None, e) => Picture::Failed(e.unwrap_or_default()),
                 };
+                // A picture the message being written waits for.
+                if let Picture::Ready(d) = &p
+                    && let Some(w) = self.compose.as_ref().and_then(|c| c.web_pictures_wanted().into_iter().find(|w| w.url == url))
+                {
+                    let d = d.clone();
+                    self.carry_web_picture(&w, &d);
+                }
                 self.pictures.insert(url, p);
             }
             Event::Notice { account, message } => {
@@ -3542,6 +3648,9 @@ impl Session {
 
 /// Most web pictures loaded for one message.
 const MAX_PICTURES: usize = 60;
+/// Most a forwarded message carries of the original's web pictures: each, and all together.
+const WEB_PICTURE_MAX: usize = 5 << 20;
+const WEB_PICTURES_MAX: usize = 15 << 20;
 
 /// A picture from the web.
 #[derive(Clone, Debug, PartialEq, Eq)]
