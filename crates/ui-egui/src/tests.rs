@@ -275,6 +275,78 @@ fn a_logo_with_the_address_beside_it_draws() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A logo-sized PNG (the sample's is a few pixels).
+fn logo_png() -> Vec<u8> {
+    let img =
+        image::RgbaImage::from_fn(300, 200, |x, y| image::Rgba([u8::try_from(x % 256).unwrap_or(0), u8::try_from(y % 256).unwrap_or(0), 200, 255]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
+/// A picture in the signature editor is selected with a click (its handles show) and resized by
+/// dragging a corner handle; the size is saved with the signature and sent.
+#[test]
+fn a_logo_is_resized_by_its_handle() {
+    use mailcraft_engine::mime::rich::{PICTURE, Style, Styles, Wrap};
+    let (mut a, dir) = app("logo-resize");
+    let ctx = egui::Context::default();
+    let text = format!("{PICTURE}\nRiley Moreno\nStudio Lantern");
+    let mut styles = Styles::plain(&text);
+    styles.restyle(&text, 0..1, |s| Style { picture: Some("logo".into()), wrap: Some(Wrap::Left), ..s.clone() });
+    let png = mailcraft_engine::mime::b64::encode(&logo_png());
+    a.run(
+        "account.setSignature",
+        json!({"account": "sample", "signature": text, "styles": styles, "pictures": [{"cid": "logo", "name": "logo.png", "mime": "image/png", "data": png}]}),
+    );
+    a.act(crate::Action::EditSignature { account: "sample".into(), insert: false });
+    let placed = |a: &MailApp| match a.ui.dialog.as_ref() {
+        Some(Dialog::Signature(f)) => f.placed_pictures(),
+        _ => Vec::new(),
+    };
+    for _ in 0..4 {
+        frame(&ctx, &mut a, vec![]);
+    }
+    let logo = placed(&a).first().copied().expect("the logo drawn");
+    let press = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    // A click on it selects it.
+    frame(&ctx, &mut a, vec![Event::PointerMoved(logo.center())]);
+    frame(&ctx, &mut a, vec![press(logo.center(), true)]);
+    frame(&ctx, &mut a, vec![press(logo.center(), false)]);
+    frame(&ctx, &mut a, vec![]);
+    let Some(Dialog::Signature(f)) = a.ui.dialog.as_ref() else { panic!("the signature dialog") };
+    assert_eq!(f.selection(), 0..1, "the logo selected");
+    // Its bottom-right handle dragged 40 px in: narrower, keeping its proportions.
+    let corner = logo.right_bottom();
+    frame(&ctx, &mut a, vec![Event::PointerMoved(corner)]);
+    frame(&ctx, &mut a, vec![press(corner, true)]);
+    for step in 1..=4 {
+        frame(&ctx, &mut a, vec![Event::PointerMoved(corner - egui::vec2(10.0 * step as f32, 10.0 * step as f32))]);
+    }
+    let end = corner - egui::vec2(40.0, 40.0);
+    frame(&ctx, &mut a, vec![press(end, false)]);
+    frame(&ctx, &mut a, vec![]);
+    let Some(Dialog::Signature(f)) = a.ui.dialog.as_ref() else { panic!("the signature dialog") };
+    let st = f.compose.styles.style(0);
+    let (w, h) = (st.width.expect("a width set"), st.height.expect("a height set"));
+    assert!((logo.width() - 300.0).abs() < 0.5, "drawn at its own size first: {logo:?}");
+    assert!(f32::from(w) < logo.width() - 30.0 && f32::from(w) >= 16.0, "narrower: {w} from {}", logo.width());
+    assert!((f32::from(w) / f32::from(h) - 1.5).abs() < 0.1, "in proportion: {w}×{h}");
+    let shown = placed(&a).first().copied().unwrap();
+    assert!((shown.width() - f32::from(w)).abs() < 1.5, "drawn at that size: {shown:?}");
+    // Saved with the signature, and sent as the picture's size.
+    let params = f.save_params();
+    a.run("account.setSignature", params);
+    let (_, saved) = a.session.signature_rich("sample");
+    assert_eq!((saved.style(0).width, saved.style(0).height), (Some(w), Some(h)));
+    a.ui.dialog = None;
+    a.run("mail.new", json!({}));
+    let c = a.session.compose.as_ref().unwrap();
+    let html = mailcraft_engine::mime::rich::to_html(&c.body, &c.styles);
+    assert!(html.contains(&format!("width=\"{w}\" height=\"{h}\"")) && html.contains("<table"), "{html}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// People's list and A–Z index were a few pixels wider than the pane, so the pane (shared by
 /// every module) grew each frame to its widest and Mail, Calendar and Notes stayed that wide.
 #[test]

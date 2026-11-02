@@ -52,11 +52,24 @@ pub struct Style {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub picture: Option<String>,
     /// How the text goes round the picture: in line with it (`None`), or beside it, with the
-    /// picture set to the left or the right and the paragraphs after it flowing alongside (a
-    /// logo with the address next to it).
+    /// picture set to the left or the right and the paragraphs after it, up to a blank line,
+    /// in a column alongside (a logo with the name, title and phone next to it); see
+    /// [`beside_blocks`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap: Option<Wrap>,
+    /// The size the picture is shown and sent at, in pixels (`None`: its own); set by resizing
+    /// it in the editor, or by the `width` and `height` of a pasted `<img>`. One alone keeps
+    /// the picture's proportions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u16>,
 }
+
+/// The widest (or tallest) a picture can be set, in pixels.
+pub const PICTURE_MAX_PX: u16 = 2000;
+/// The narrowest.
+pub const PICTURE_MIN_PX: u16 = 16;
 
 /// Where a picture sits that text flows beside.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -73,7 +86,7 @@ impl Style {
 
     /// The same look without what belongs to one spot only (a picture).
     pub fn for_typing(&self) -> Style {
-        Style { picture: None, wrap: None, ..self.clone() }
+        Style { picture: None, wrap: None, width: None, height: None, ..self.clone() }
     }
 }
 
@@ -334,14 +347,11 @@ fn para_html(line: &str, start: usize, styles: &Styles) -> String {
             j += 1;
         }
         let run: String = chars.get(i..j).map(|c| c.iter().collect()).unwrap_or_default();
-        if let Some(cid) = st.picture.as_ref().filter(|_| run.starts_with(PICTURE)) {
-            // Beside the text: floated (and `align`, which Outlook's own renderer reads).
-            let placed = match st.wrap {
-                Some(Wrap::Left) => " align=\"left\" style=\"float:left; margin:0 12px 6px 0; max-width:50%\"",
-                Some(Wrap::Right) => " align=\"right\" style=\"float:right; margin:0 0 6px 12px; max-width:50%\"",
-                None => " style=\"max-width:100%\"",
-            };
-            out.push_str(&format!("<img src=\"cid:{}\"{placed}>", esc(cid)));
+        if st.picture.is_some() && run.starts_with(PICTURE) {
+            // Beside the text, the picture is the table's own cell (`to_html`): not here.
+            if st.wrap.is_none() {
+                out.push_str(&img_html(&st, " style=\"max-width:100%\""));
+            }
             i = j;
             continue;
         }
@@ -388,6 +398,74 @@ fn para_html(line: &str, start: usize, styles: &Styles) -> String {
     out
 }
 
+/// A picture as `<img>`: its `cid:`, and its size when set (the attributes, which Outlook's own
+/// renderer reads, and the style); `own_size` is the style a picture without a size gets.
+fn img_html(st: &Style, own_size: &str) -> String {
+    let cid = st.picture.as_deref().unwrap_or_default();
+    let w = st.width.map(|w| w.clamp(PICTURE_MIN_PX, PICTURE_MAX_PX));
+    let h = st.height.map(|h| h.clamp(PICTURE_MIN_PX, PICTURE_MAX_PX));
+    let mut attrs = String::new();
+    let mut css = Vec::new();
+    if let Some(w) = w {
+        attrs.push_str(&format!(" width=\"{w}\""));
+        css.push(format!("width:{w}px"));
+    }
+    if let Some(h) = h {
+        attrs.push_str(&format!(" height=\"{h}\""));
+        css.push(format!("height:{h}px"));
+    }
+    let style = if css.is_empty() { own_size.to_string() } else { format!(" style=\"{}\"", css.join("; ")) };
+    format!("<img src=\"cid:{}\"{attrs}{style}>", esc(cid))
+}
+
+/// A picture the text sits beside: the character it is, which side it's on, and the
+/// paragraphs of its column: its own and those after it, up to a blank one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Beside {
+    /// The picture's character.
+    pub at: usize,
+    pub side: Wrap,
+    /// The paragraphs (line indices) beside it, the picture's own first.
+    pub paras: std::ops::Range<usize>,
+}
+
+/// Where the text sits beside a picture (one set *Left of the text* or *Right of the text*):
+/// the picture's own paragraph and those after it make a column alongside it, up to a blank
+/// paragraph, a rule, or the next such picture, as a table with the logo in one cell and the
+/// name, title and phone in the other does. The editor lays it out so, and [`to_html`] sends
+/// that table.
+pub fn beside_blocks(text: &str, styles: &Styles) -> Vec<Beside> {
+    let mut st = styles.clone();
+    st.fit(text);
+    let paras = paragraphs(text);
+    // The paragraph each such picture starts in, in order.
+    let mut starts: Vec<(usize, usize, Wrap)> = Vec::new();
+    for (n, (line, start)) in paras.iter().enumerate() {
+        for (k, ch) in line.chars().enumerate() {
+            if ch != PICTURE {
+                continue;
+            }
+            let s = st.style(start + k);
+            if let (Some(_), Some(side)) = (&s.picture, s.wrap)
+                && starts.last().is_none_or(|(p, _, _)| *p != n)
+            {
+                starts.push((n, start + k, side));
+            }
+        }
+    }
+    let blank = |n: usize| paras.get(n).is_none_or(|(l, _)| l.trim().is_empty()) || st.para(n).rule;
+    let mut out = Vec::new();
+    for (i, (n, at, side)) in starts.iter().enumerate() {
+        let next_start = starts.get(i + 1).map_or(paras.len(), |(p, _, _)| *p);
+        let mut end = n + 1;
+        while end < next_start && !blank(end) {
+            end += 1;
+        }
+        out.push(Beside { at: *at, side: *side, paras: *n..end });
+    }
+    out
+}
+
 fn para_css(p: &Para) -> String {
     let mut css = Vec::new();
     if p.indent > 0 {
@@ -401,15 +479,18 @@ fn para_css(p: &Para) -> String {
     if css.is_empty() { String::new() } else { format!(" style=\"{}\"", css.join("; ")) }
 }
 
-/// The message as HTML: a `<div>` per paragraph (as Outlook writes them), lists grouped, rules
-/// as `<hr>`, pictures by `cid:`.
-pub fn to_html(text: &str, styles: &Styles) -> String {
-    let mut st = styles.clone();
-    st.fit(text);
-    let mut out = format!("<div style=\"font-family: Aptos, Calibri, 'Segoe UI', Arial, sans-serif; font-size: {DEFAULT_SIZE}pt\">\n");
+/// Paragraphs `range` as HTML: a `<div>` each (as Outlook writes them), lists grouped, rules as
+/// `<hr>`. `skip_empty_first`: the first is left out when it has no text (a picture's own
+/// paragraph, in its column).
+fn paras_html(paras: &[(&str, usize)], range: std::ops::Range<usize>, st: &Styles, skip_empty_first: bool, out: &mut String) {
     let mut open: Option<(List, u8)> = None;
-    for (n, (line, start)) in paragraphs(text).into_iter().enumerate() {
+    for n in range.clone() {
+        let Some((line, start)) = paras.get(n) else { break };
         let p = st.para(n);
+        let body = para_html(line, *start, st);
+        if n == range.start && skip_empty_first && body.is_empty() && !p.rule {
+            continue;
+        }
         let want = (p.list != List::None).then_some((p.list, p.indent));
         if want != open {
             if let Some((l, _)) = open.take() {
@@ -421,7 +502,6 @@ pub fn to_html(text: &str, styles: &Styles) -> String {
                 open = want;
             }
         }
-        let body = para_html(line, start, &st);
         if p.rule {
             out.push_str("<hr style=\"border:none; border-top:1px solid #e1e1e1; margin:0.5em 0\">\n");
         } else if open.is_some() {
@@ -432,6 +512,44 @@ pub fn to_html(text: &str, styles: &Styles) -> String {
     }
     if let Some((l, _)) = open {
         out.push_str(if l == List::Number { "</ol>\n" } else { "</ul>\n" });
+    }
+}
+
+/// The message as HTML: a `<div>` per paragraph (as Outlook writes them), lists grouped, rules
+/// as `<hr>`, pictures by `cid:`; a picture the text sits beside and its column as a table of
+/// two cells (what every mail renderer, Outlook's included, lays out the same).
+pub fn to_html(text: &str, styles: &Styles) -> String {
+    let mut st = styles.clone();
+    st.fit(text);
+    let paras = paragraphs(text);
+    let blocks = beside_blocks(text, &st);
+    let mut out = format!("<div style=\"font-family: Aptos, Calibri, 'Segoe UI', Arial, sans-serif; font-size: {DEFAULT_SIZE}pt\">\n");
+    let mut n = 0usize;
+    while n < paras.len() {
+        if let Some(b) = blocks.iter().find(|b| b.paras.start == n) {
+            let pic = st.style(b.at);
+            let width = pic.width.map(|w| format!(" width=\"{}\"", w.clamp(PICTURE_MIN_PX, PICTURE_MAX_PX))).unwrap_or_default();
+            let img = img_html(&pic, " style=\"display:block\"");
+            let mut column = String::new();
+            paras_html(&paras, b.paras.clone(), &st, true, &mut column);
+            out.push_str("<table cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border-collapse:collapse\"><tr>\n");
+            match b.side {
+                Wrap::Left => {
+                    out.push_str(&format!("<td valign=\"top\"{width} style=\"padding:0 12px 0 0\">{img}</td>\n"));
+                    out.push_str(&format!("<td valign=\"top\">\n{column}</td>\n"));
+                }
+                Wrap::Right => {
+                    out.push_str(&format!("<td valign=\"top\">\n{column}</td>\n"));
+                    out.push_str(&format!("<td valign=\"top\"{width} style=\"padding:0 0 0 12px\">{img}</td>\n"));
+                }
+            }
+            out.push_str("</tr></table>\n");
+            n = b.paras.end.max(n + 1);
+            continue;
+        }
+        let end = blocks.iter().map(|b| b.paras.start).filter(|s| *s > n).min().unwrap_or(paras.len());
+        paras_html(&paras, n..end, &st, false, &mut out);
+        n = end;
     }
     out.push_str("</div>\n");
     out
@@ -722,10 +840,16 @@ mod tests {
         assert!(html.contains("<div><br></div>") && html.contains("x<img src=\"cid:pic@x\""), "{html}");
         let t = to_text(text, &s);
         assert_eq!(t, "Hi team\n1. first\n2. second\n\nsee site <https://a.example/>\nx[picture]");
-        // A picture the text flows beside: floated, and `align` for Outlook's renderer.
+        // A picture the text sits beside: a table, the picture in one cell and the paragraphs
+        // after it (to a blank line) in the other.
         s.restyle(text, 32..33, |st| Style { wrap: Some(Wrap::Left), ..st.clone() });
         let html = to_html(text, &s);
-        assert!(html.contains("<img src=\"cid:pic@x\" align=\"left\" style=\"float:left;"), "{html}");
+        assert!(
+            html.contains("<table")
+                && html.contains("<td valign=\"top\" style=\"padding:0 12px 0 0\"><img src=\"cid:pic@x\" style=\"display:block\"></td>"),
+            "{html}"
+        );
+        assert!(html.contains("<td valign=\"top\">\n<div>x</div>\n</td>"), "the picture's own paragraph's text is in the column: {html}");
         assert_eq!(to_text(text, &s), t, "the text twin is the same");
         assert!(s.style(32).for_typing().wrap.is_none(), "typing after it isn't beside anything");
         // Nothing typed can become markup.
@@ -734,6 +858,44 @@ mod tests {
         let mut s = Styles::plain("a");
         s.restyle("a", 0..1, |st| Style { link: Some("javascript:alert(1)".into()), ..st.clone() });
         assert!(!to_html("a", &s).contains("javascript"));
+    }
+
+    #[test]
+    fn pictures_sized_and_beside_their_column() {
+        // A logo on its own line, then the name, title and phone, a blank line, and a closing.
+        let text = format!("{PICTURE}\nRiley Moreno\nStudio Lantern\n+32 123 45 67 89\n\nSent from the studio");
+        let mut s = Styles::plain(&text);
+        s.restyle(&text, 0..1, |st| Style { picture: Some("logo".into()), width: Some(120), height: Some(80), ..st.clone() });
+        let html = to_html(&text, &s);
+        assert!(html.contains("<img src=\"cid:logo\" width=\"120\" height=\"80\" style=\"width:120px; height:80px\">"), "{html}");
+        assert!(beside_blocks(&text, &s).is_empty());
+        // Set left of the text: its column is the three lines after it; the closing is below.
+        s.restyle(&text, 0..1, |st| Style { wrap: Some(Wrap::Left), ..st.clone() });
+        let blocks = beside_blocks(&text, &s);
+        assert_eq!(blocks, vec![Beside { at: 0, side: Wrap::Left, paras: 0..4 }]);
+        let html = to_html(&text, &s);
+        let table = html.find("<table").unwrap();
+        let end = html.find("</table>").unwrap();
+        let inner = &html[table..end];
+        assert!(inner.contains("<td valign=\"top\" width=\"120\" style=\"padding:0 12px 0 0\"><img src=\"cid:logo\" width=\"120\""), "{inner}");
+        assert!(inner.contains("<div>Riley Moreno</div>\n<div>Studio Lantern</div>\n<div>+32 123 45 67 89</div>\n</td>"), "{inner}");
+        assert!(!inner.contains("<br>"), "the picture's own empty paragraph isn't a blank line in the column: {inner}");
+        assert!(html[end..].contains("<div><br></div>\n<div>Sent from the studio</div>"), "{html}");
+        // Right of the text: the cells the other way round; a width alone is sent alone.
+        s.restyle(&text, 0..1, |st| Style { wrap: Some(Wrap::Right), height: None, ..st.clone() });
+        let html = to_html(&text, &s);
+        assert!(html.contains("<div>+32 123 45 67 89</div>\n</td>\n<td valign=\"top\" width=\"120\" style=\"padding:0 0 0 12px\"><img src=\"cid:logo\" width=\"120\" style=\"width:120px\">"), "{html}");
+        // A second such picture starts a column of its own; a rule ends one; junk sizes are clamped.
+        let text = format!("{PICTURE}\na\n{PICTURE}\nb\n\nc");
+        let mut s = Styles::plain(&text);
+        s.restyle(&text, 0..1, |st| Style { picture: Some("p1".into()), wrap: Some(Wrap::Left), width: Some(60000), ..st.clone() });
+        s.restyle(&text, 4..5, |st| Style { picture: Some("p2".into()), wrap: Some(Wrap::Left), width: Some(1), ..st.clone() });
+        s.relayout(&text, 8..9, |p| p.rule = true);
+        let blocks = beside_blocks(&text, &s);
+        assert_eq!(blocks.iter().map(|b| b.paras.clone()).collect::<Vec<_>>(), vec![0..2, 2..4]);
+        let html = to_html(&text, &s);
+        assert!(html.contains("width=\"2000\"") && html.contains("width=\"16\"") && html.matches("<table").count() == 2, "{html}");
+        assert!(s.style(0).for_typing().width.is_none());
     }
 
     #[test]

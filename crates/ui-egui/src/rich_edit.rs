@@ -23,12 +23,16 @@ use crate::{Action, Dialog};
 const PX: f32 = 4.0 / 3.0;
 /// One indent step (and the room for a bullet or number).
 const INDENT: f32 = 28.0;
-/// The tallest a picture shows in the text.
-const PICTURE_PX: f32 = 72.0;
-/// A picture the text flows beside is drawn no larger than this (a logo), either way.
-const BESIDE_MAX: f32 = 200.0;
-/// The space between such a picture and the text beside it.
+/// The size a picture takes until it's decoded (or when it can't be).
+const PICTURE_FALLBACK: Vec2 = Vec2::splat(72.0);
+/// The tallest a picture is drawn in the editor (a taller one is shown smaller; sent as set).
+const PICTURE_TALLEST: f32 = 600.0;
+/// The space between a picture and the text beside it.
 const BESIDE_GAP: f32 = 12.0;
+/// A picture the text sits beside takes at most this much of the width.
+const BESIDE_SHARE: f32 = 0.6;
+/// The handles on a selected picture's corners: their size.
+const HANDLE: f32 = 8.0;
 /// Most undo steps kept.
 const UNDO_MAX: usize = 200;
 
@@ -74,15 +78,62 @@ pub(crate) struct Editor {
     paste: bool,
     /// The right-click menu was open last frame (closing it gives the text the keyboard back).
     menu_open: bool,
-    pictures: HashMap<String, Option<egui::TextureHandle>>,
-    /// The pictures drawn beside the text this frame: the character each stands for, and where
-    /// it was drawn (a right-click on it is a right-click on that character).
+    /// The pictures decoded (`None`: not a picture, or not here yet), with their own size.
+    pictures: HashMap<String, Option<Picture>>,
+    /// The pictures drawn this frame: the character each stands for, and where it was drawn (a
+    /// click on it selects it; a right-click on it is a right-click on that character).
     placed: Vec<(usize, Rect)>,
-    /// The picture beside the text the open right-click menu is about.
+    /// The picture the open right-click menu is about.
     menu_picture: Option<usize>,
+    /// A picture being resized by its corner: its character, and its size so far.
+    resizing: Option<(usize, Vec2)>,
     /// Give the keyboard back to the text (after a ribbon button took the click), with this
     /// selection.
     pub(crate) refocus: Option<Range<usize>>,
+}
+
+/// A decoded picture: its texture (shrunk for the screen) and its own size in pixels.
+struct Picture {
+    tex: egui::TextureHandle,
+    natural: Vec2,
+}
+
+/// What the layout knows of the pictures: their own sizes, and the one being resized.
+#[derive(Clone, Default)]
+struct Sizes {
+    natural: HashMap<String, Vec2>,
+    live: Option<(usize, Vec2)>,
+}
+
+impl Sizes {
+    /// The size picture `at` (with style `s`) is drawn at: the one being dragged, else the one
+    /// set (a width or height alone keeps its proportions), else its own.
+    fn of(&self, at: usize, s: &Style) -> Vec2 {
+        if let Some((i, size)) = self.live
+            && i == at
+        {
+            return size;
+        }
+        let natural = s.picture.as_ref().and_then(|cid| self.natural.get(cid).copied()).unwrap_or(PICTURE_FALLBACK);
+        sized(s, natural)
+    }
+}
+
+/// The size a picture with its own size `natural` is shown and sent at, as its style says.
+fn sized(s: &Style, natural: Vec2) -> Vec2 {
+    let natural = Vec2::new(natural.x.max(1.0), natural.y.max(1.0));
+    match (s.width, s.height) {
+        (Some(w), Some(h)) => vec2(f32::from(w), f32::from(h)),
+        (Some(w), None) => vec2(f32::from(w), f32::from(w) * natural.y / natural.x),
+        (None, Some(h)) => vec2(f32::from(h) * natural.x / natural.y, f32::from(h)),
+        (None, None) => natural,
+    }
+}
+
+/// `size` shrunk to fit `max` (never enlarged).
+fn fit(size: Vec2, max: Vec2) -> Vec2 {
+    let size = Vec2::new(size.x.max(1.0), size.y.max(1.0));
+    size * (max.x / size.x).min(max.y / size.y).clamp(0.01, 1.0)
 }
 
 /// Outlook's Insert Hyperlink, with what mail needs: a web page or file, or an email address.
@@ -200,10 +251,15 @@ impl Editor {
         self.pictures.get(cid).is_some_and(Option::is_some)
     }
 
-    /// Where the pictures beside the text were drawn last frame (tests).
+    /// Where the pictures were drawn last frame (tests).
     #[cfg(test)]
     pub(crate) fn placed_pictures(&self) -> Vec<Rect> {
         self.placed.iter().map(|(_, r)| *r).collect()
+    }
+
+    /// The pictures' own sizes, as decoded so far.
+    fn sizes(&self) -> Sizes {
+        Sizes { natural: self.pictures.iter().filter_map(|(cid, p)| p.as_ref().map(|p| (cid.clone(), p.natural))).collect(), live: self.resizing }
     }
 
     pub fn new(id: u64) -> Editor {
@@ -220,6 +276,7 @@ impl Editor {
             pictures: HashMap::new(),
             placed: Vec::new(),
             menu_picture: None,
+            resizing: None,
             refocus: None,
         }
     }
@@ -300,6 +357,8 @@ pub(crate) enum Op {
     Unlink,
     /// Where the picture(s) at the selection sit: in line with the text, or beside it.
     Wrap(Option<Wrap>),
+    /// The size the picture(s) at the selection are shown and sent at (`None`: their own).
+    Resize(Option<[u16; 2]>),
 }
 
 /// Apply `op` to the selection (or to what's typed next, when nothing is selected).
@@ -339,7 +398,7 @@ pub(crate) fn apply(ed: &mut Editor, c: &mut Compose, op: Op) {
         }
         Op::Color(col) => Some(Box::new(move |s| Style { color: col, ..s.clone() })),
         Op::Highlight(col) => Some(Box::new(move |s| Style { highlight: col, ..s.clone() })),
-        Op::Clear => Some(Box::new(|s| Style { picture: s.picture.clone(), ..Style::default() })),
+        Op::Clear => Some(Box::new(|s| Style { picture: s.picture.clone(), wrap: s.wrap, width: s.width, height: s.height, ..Style::default() })),
         Op::Link(url) => {
             let url = url.trim().to_string();
             Some(Box::new(move |s| Style { link: Some(url.clone()), ..s.clone() }))
@@ -358,6 +417,18 @@ pub(crate) fn apply(ed: &mut Editor, c: &mut Compose, op: Op) {
         for i in pictures_at(&c.body, &c.styles, sel.clone()) {
             c.styles.restyle(&c.body, i..i + 1, |s| Style { wrap, ..s.clone() });
         }
+        c.plain = false;
+        return;
+    }
+    if let Op::Resize(size) = op {
+        let (width, height) = match size {
+            Some([w, h]) => (Some(w.clamp(rich::PICTURE_MIN_PX, rich::PICTURE_MAX_PX)), Some(h.clamp(rich::PICTURE_MIN_PX, rich::PICTURE_MAX_PX))),
+            None => (None, None),
+        };
+        for i in pictures_at(&c.body, &c.styles, sel.clone()) {
+            c.styles.restyle(&c.body, i..i + 1, |s| Style { width, height, ..s.clone() });
+        }
+        c.plain = false;
         return;
     }
     let (first, last) = rich::lines_of(&c.body, sel.clone());
@@ -546,13 +617,29 @@ fn format(s: &Style, t: &Tokens) -> TextFormat {
     }
 }
 
-/// Room for a picture: an invisible, wide character the picture is drawn over.
-fn picture_format() -> TextFormat {
-    TextFormat { font_id: theme::regular(PICTURE_PX), color: Color32::TRANSPARENT, extra_letter_spacing: PICTURE_PX * 0.8, ..Default::default() }
+/// Room for a picture in the line: an invisible character as wide as the picture, on a row as
+/// tall as it (the text next to it sits at the bottom, as beside a picture in a web page).
+fn picture_format(size: Vec2) -> TextFormat {
+    TextFormat {
+        font_id: theme::regular(14.0),
+        color: Color32::TRANSPARENT,
+        extra_letter_spacing: size.x.max(1.0),
+        line_height: Some(size.y.max(4.0) + 4.0),
+        ..Default::default()
+    }
+}
+
+/// The height of the row of a picture the text sits beside, when nothing else is on it: next to
+/// nothing, so the column's first line starts at the picture's top, as it's sent.
+const MARK_ROW: f32 = 3.0;
+
+/// The widest a picture in the line is drawn: the room left of `wrap` after the indent.
+fn inline_max(wrap: f32, lead: f32) -> Vec2 {
+    vec2((wrap - lead - 4.0).max(24.0), PICTURE_TALLEST)
 }
 
 /// The text laid out with its styles; `shift` moves a paragraph right (alignment).
-fn job(text: &str, st: &Styles, plain: bool, t: &Tokens, wrap: f32, shift: &[f32]) -> LayoutJob {
+fn job(text: &str, st: &Styles, plain: bool, t: &Tokens, wrap: f32, shift: &[f32], sizes: &Sizes) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = wrap;
     let plain_fmt = TextFormat { font_id: theme::regular(14.5), color: t.text, ..Default::default() };
@@ -564,10 +651,11 @@ fn job(text: &str, st: &Styles, plain: bool, t: &Tokens, wrap: f32, shift: &[f32
             i += 1;
         }
         let p = st.para(n);
-        let mut lead = if plain { 0.0 } else { f32::from(p.indent) * INDENT + if p.list == List::None { 0.0 } else { INDENT } };
-        lead += shift.get(n).copied().unwrap_or(0.0);
+        let para_lead = if plain { 0.0 } else { f32::from(p.indent) * INDENT + if p.list == List::None { 0.0 } else { INDENT } };
+        let mut lead = para_lead + shift.get(n).copied().unwrap_or(0.0);
         let mut run_start = 0usize;
         let chars: Vec<(usize, char)> = line.char_indices().collect();
+        let alone = chars.len() == 1;
         for k in 0..chars.len() {
             let cur = st.chars.get(i + k).copied();
             let next = st.chars.get(i + k + 1).copied();
@@ -579,10 +667,19 @@ fn job(text: &str, st: &Styles, plain: bool, t: &Tokens, wrap: f32, shift: &[f32
                 let f = if plain {
                     plain_fmt.clone()
                 } else if piece.starts_with(PICTURE) && st.style(i + run_start).picture.is_some() {
-                    // Beside the text, the picture is drawn in the margin: its character takes
-                    // no more room than a letter.
                     let st0 = st.style(i + run_start);
-                    if st0.wrap.is_some() { TextFormat { color: Color32::TRANSPARENT, ..format(&st0, t) } } else { picture_format() }
+                    if st0.wrap.is_some() {
+                        // Beside the text, the picture is drawn in the margin: its character
+                        // takes no room, and its own paragraph next to none.
+                        let mut f = TextFormat { color: Color32::TRANSPARENT, ..format(&st0, t) };
+                        f.font_id.size = 1.0;
+                        if alone {
+                            f.line_height = Some(MARK_ROW);
+                        }
+                        f
+                    } else {
+                        picture_format(fit(sizes.of(i + run_start, &st0), inline_max(wrap, para_lead)))
+                    }
                 } else {
                     format(&st.style(i + run_start), t)
                 };
@@ -632,90 +729,108 @@ fn indent_empty_rows(g: Arc<Galley>, st: &Styles, plain: bool) -> Arc<Galley> {
     Arc::new(out)
 }
 
-/// The size a picture the text flows beside is drawn at, once decoded (kept for the layout,
-/// which runs before the drawing).
-fn beside_size(ctx: &egui::Context, cid: &str) -> Option<Vec2> {
-    ctx.data(|d| d.get_temp::<Vec2>(egui::Id::unique(("beside-size", cid))))
+/// A picture the text sits beside, as laid out: the column's paragraphs, which side, and the
+/// size the picture is drawn at.
+#[derive(Clone, Debug)]
+struct Column {
+    at: usize,
+    paras: Range<usize>,
+    side: Wrap,
+    size: Vec2,
 }
 
-/// The pictures the text flows beside: for each paragraph that sits beside one, the room the
-/// picture takes (its width and the gap) and which side it's on.
-fn beside(ctx: &egui::Context, text: &str, st: &Styles, g: &Galley) -> Vec<Option<(f32, Wrap)>> {
-    let paras: Vec<&str> = text.split('\n').collect();
-    let mut out: Vec<Option<(f32, Wrap)>> = vec![None; paras.len()];
-    // Each paragraph's height, from its rows.
-    let mut heights = vec![0.0f32; paras.len()];
-    let mut n = 0usize;
-    for r in &g.rows {
-        if let Some(h) = heights.get_mut(n) {
-            *h += r.rect().height();
-        }
-        if r.ends_with_newline {
-            n += 1;
-        }
-    }
-    let mut i = 0usize;
-    let mut active: Option<(f32, f32, Wrap)> = None;
-    for (n, line) in paras.iter().enumerate() {
-        for (k, ch) in line.chars().enumerate() {
-            if ch != PICTURE {
-                continue;
-            }
-            let style = st.style(i + k);
-            if let (Some(cid), Some(side)) = (&style.picture, style.wrap) {
-                let size = beside_size(ctx, cid).unwrap_or(Vec2::splat(PICTURE_PX));
-                active = Some((size.x + BESIDE_GAP, size.y + 6.0, side));
-            }
-        }
-        if let Some((margin, left, side)) = active.as_mut() {
+/// The pictures the text sits beside and their columns ([`rich::beside_blocks`]), with the
+/// size each picture is drawn at: as set, no wider than its share of `wrap`.
+fn columns(text: &str, st: &Styles, wrap: f32, sizes: &Sizes) -> Vec<Column> {
+    rich::beside_blocks(text, st)
+        .into_iter()
+        .map(|b| {
+            let size = fit(sizes.of(b.at, &st.style(b.at)), vec2((wrap * BESIDE_SHARE).max(24.0), PICTURE_TALLEST));
+            Column { at: b.at, paras: b.paras, side: b.side, size }
+        })
+        .collect()
+}
+
+/// The room (the picture's width and the gap) and side for each paragraph that's in a column.
+fn beside_of(cols: &[Column], paras: usize) -> Vec<Option<(f32, Wrap)>> {
+    let mut out: Vec<Option<(f32, Wrap)>> = vec![None; paras];
+    for c in cols {
+        for n in c.paras.clone() {
             if let Some(o) = out.get_mut(n) {
-                *o = Some((*margin, *side));
-            }
-            *left -= heights.get(n).copied().unwrap_or(0.0);
-            if *left <= 0.0 {
-                active = None;
+                *o = Some((c.size.x + BESIDE_GAP, c.side));
             }
         }
-        i += line.chars().count() + 1;
     }
     out
 }
 
 /// Lay the text out; centred and right-aligned paragraphs that fit on one line are moved over,
-/// and paragraphs beside a picture make room for it.
-fn layout(ui: &Ui, text: &str, st: &Styles, plain: bool, t: &Tokens, wrap: f32) -> Arc<Galley> {
-    let (g, beside) = layout_aligned(ui, text, st, plain, t, wrap);
+/// and the columns beside pictures make room for them: their rows move right of a picture on
+/// the left, and what follows a column shorter than its picture moves down below it.
+fn layout(ui: &Ui, text: &str, st: &Styles, plain: bool, t: &Tokens, wrap: f32, sizes: &Sizes) -> Arc<Galley> {
+    let (g, cols) = layout_aligned(ui, text, st, plain, t, wrap, sizes);
     let g = indent_empty_rows(g, st, plain);
-    if beside.iter().all(Option::is_none) {
+    if cols.is_empty() {
         return g;
     }
-    // Rows beside a picture on the left move right of it.
     let mut out = (*g).clone();
     let mut n = 0usize;
+    // How far the rows are pushed down so far, and the column being passed through: which,
+    // the picture's bottom, and the last row's.
+    let mut dy = 0.0f32;
+    let mut open: Option<(usize, f32, f32)> = None;
+    let mut bottom = 0.0f32;
     for r in &mut out.rows {
-        if let Some(Some((margin, Wrap::Left))) = beside.get(n) {
-            r.pos.x += margin;
+        let col = cols.iter().find(|c| c.paras.contains(&n));
+        if let Some((at, pic, last)) = open
+            && col.is_none_or(|c| c.at != at)
+        {
+            // Past the column: this row and the rest go below the picture.
+            if pic > last {
+                dy += pic - last;
+            }
+            open = None;
         }
+        r.pos.y += dy;
+        if let Some(c) = col {
+            if open.is_none() {
+                open = Some((c.at, r.pos.y + c.size.y + 6.0, r.pos.y));
+            }
+            if c.side == Wrap::Left {
+                r.pos.x += c.size.x + BESIDE_GAP;
+            }
+            if let Some((_, _, last)) = open.as_mut() {
+                *last = r.rect().bottom();
+            }
+        }
+        bottom = bottom.max(r.rect().bottom());
         if r.ends_with_newline {
             n += 1;
         }
     }
-    out.rect = out.rows.iter().fold(Rect::NOTHING, |acc, r| acc.union(r.rect()));
+    if let Some((_, pic, _)) = open {
+        bottom = bottom.max(pic);
+    }
+    // The text box paints the galley at its left minus the rect's: the rect starts at 0, or
+    // the rows moved right of a picture would be drawn under it.
+    let rows = out.rows.iter().fold(Rect::NOTHING, |acc, r| acc.union(r.rect()));
+    out.rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(rows.max.x.max(0.0), rows.max.y.max(bottom)));
     Arc::new(out)
 }
 
-fn layout_aligned(ui: &Ui, text: &str, st: &Styles, plain: bool, t: &Tokens, wrap: f32) -> (Arc<Galley>, Vec<Option<(f32, Wrap)>>) {
-    let mut first = ui.painter().layout_job(job(text, st, plain, t, wrap, &[]));
-    let mut beside_of = if plain { Vec::new() } else { beside(ui.ctx(), text, st, &first) };
+fn layout_aligned(ui: &Ui, text: &str, st: &Styles, plain: bool, t: &Tokens, wrap: f32, sizes: &Sizes) -> (Arc<Galley>, Vec<Column>) {
+    let mut first = ui.painter().layout_job(job(text, st, plain, t, wrap, &[], sizes));
+    let cols = if plain { Vec::new() } else { columns(text, st, wrap, sizes) };
+    let beside = beside_of(&cols, st.paras.len().max(1));
     // Text beside a picture has less room: laid out again, narrower, when a line would run
     // under the picture.
     let mut widths = vec![wrap; st.paras.len().max(1)];
-    if beside_of.iter().any(Option::is_some) {
-        let margin = beside_of.iter().flatten().map(|(m, _)| *m).fold(0.0f32, f32::max).min(wrap * 0.6);
+    if !cols.is_empty() {
+        let margin = beside.iter().flatten().map(|(m, _)| *m).fold(0.0f32, f32::max).min(wrap * BESIDE_SHARE);
         let mut n = 0usize;
         let mut overflow = false;
         for r in &first.rows {
-            if beside_of.get(n).is_some_and(Option::is_some) && r.rect().max.x > wrap - margin {
+            if beside.get(n).is_some_and(Option::is_some) && r.rect().max.x > wrap - margin {
                 overflow = true;
             }
             if r.ends_with_newline {
@@ -723,11 +838,10 @@ fn layout_aligned(ui: &Ui, text: &str, st: &Styles, plain: bool, t: &Tokens, wra
             }
         }
         if overflow {
-            first = ui.painter().layout_job(job(text, st, plain, t, wrap - margin, &[]));
-            beside_of = beside(ui.ctx(), text, st, &first);
+            first = ui.painter().layout_job(job(text, st, plain, t, wrap - margin, &[], sizes));
         }
         for (n, w) in widths.iter_mut().enumerate() {
-            if let Some(Some((m, _))) = beside_of.get(n) {
+            if let Some(Some((m, _))) = beside.get(n) {
                 *w = if overflow { wrap - margin } else { wrap - m };
             } else if overflow {
                 *w = wrap - margin;
@@ -740,7 +854,7 @@ fn layout_aligned(ui: &Ui, text: &str, st: &Styles, plain: bool, t: &Tokens, wra
         if a == Align::Left && lines.get(n).is_some_and(|l| crate::bidi::has_rtl(l) && crate::bidi::paragraph_rtl(l)) { Align::Right } else { a }
     };
     if plain || st.paras.iter().enumerate().all(|(n, p)| align_of(n, p.align) == Align::Left) {
-        return (first, beside_of);
+        return (first, cols);
     }
     let mut shift = vec![0.0; st.paras.len()];
     let mut row = 0;
@@ -766,7 +880,7 @@ fn layout_aligned(ui: &Ui, text: &str, st: &Styles, plain: bool, t: &Tokens, wra
         }
     }
     let max_width = widths.iter().copied().fold(wrap, f32::min);
-    (ui.painter().layout_job(job(text, st, plain, t, max_width, &shift)), beside_of)
+    (ui.painter().layout_job(job(text, st, plain, t, max_width, &shift, sizes)), cols)
 }
 
 /// The message text: the text box, then bullets and numbers, rules and pictures drawn over it.
@@ -800,7 +914,8 @@ pub(crate) fn body(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &mut Compose, st
     let styles = c.styles.clone();
     let plain = c.plain;
     let tokens = *t;
-    let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| layout(ui, buf.as_str(), &styles, plain, &tokens, wrap);
+    let sizes = ed.sizes();
+    let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| layout(ui, buf.as_str(), &styles, plain, &tokens, wrap, &sizes);
     // With the original drawn under it, the text takes the room it needs (a few lines at
     // least), so the original is right there; alone, it fills the pane.
     let height = if c.quoted.is_some() { 120.0 } else { ui.available_height().max(220.0) };
@@ -841,6 +956,15 @@ pub(crate) fn body(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &mut Compose, st
             cursor = Some(kept.clone());
         }
     }
+    // A click on a picture selects it (as in Word): its handles show, and Delete removes it.
+    if !c.plain
+        && out.response.clicked()
+        && let Some(p) = out.response.interact_pointer_pos()
+        && let Some((i, _)) = ed.placed.iter().find(|(_, r)| r.contains(p))
+    {
+        set_selection(ui.ctx(), id, *i..*i + 1);
+        cursor = Some(*i..*i + 1);
+    }
     if c.body != before {
         // The look of what was typed: the ribbon's choice, else the text's at the cursor.
         let typing = ed.typing.take().unwrap_or_else(|| typing_style(&before, &styles, ed.sel.start));
@@ -869,7 +993,8 @@ pub(crate) fn body(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &mut Compose, st
         ed.sel = at..at;
     }
     if !c.plain {
-        decorate(ui, t, ed, c, &out.galley, out.galley_pos);
+        let focused = out.response.has_focus();
+        decorate(ui, t, ed, c, &out.galley, out.galley_pos, focused);
     }
     if !out.response.has_focus() && !ed.sel.is_empty() {
         let color = ui.visuals().selection.bg_fill.gamma_multiply(0.45);
@@ -907,8 +1032,8 @@ fn text_menu(resp: &egui::Response, ed: &mut Editor, c: &mut Compose, acts: &mut
     let sel = ed.sel.start.min(n)..ed.sel.end.min(n);
     let chosen: String = c.body.chars().skip(sel.start).take(sel.end - sel.start).collect();
     let link = c.styles.style(sel.start).link.filter(|_| n > 0);
-    // A right-click on a picture drawn beside the text is one on its character (remembered
-    // while the menu is open: the text box puts its cursor where the click landed).
+    // A right-click on a picture is one on its character (remembered while the menu is open:
+    // the text box puts its cursor where the click landed).
     if resp.secondary_clicked() {
         ed.menu_picture = resp.interact_pointer_pos().and_then(|pos| ed.placed.iter().find(|(_, r)| r.contains(pos)).map(|(i, _)| *i));
         if let Some(i) = ed.menu_picture {
@@ -982,6 +1107,31 @@ fn text_menu(resp: &egui::Response, ed: &mut Editor, c: &mut Compose, acts: &mut
                             ui.close();
                         }
                     }
+                    ui.separator();
+                    // Its size: a step smaller or larger, or as it is (also by dragging its
+                    // corner handles).
+                    let shown = pictures.first().map(|i| ed.sizes().of(*i, &c.styles.style(*i))).unwrap_or(PICTURE_FALLBACK);
+                    let sized_now = pictures.first().is_some_and(|i| {
+                        let st = c.styles.style(*i);
+                        st.width.is_some() || st.height.is_some()
+                    });
+                    let px = |v: f32| {
+                        u16::try_from((v.round().clamp(f32::from(rich::PICTURE_MIN_PX), f32::from(rich::PICTURE_MAX_PX))) as u32)
+                            .unwrap_or(rich::PICTURE_MAX_PX)
+                    };
+                    for (label, factor) in [("Smaller", 0.8), ("Larger", 1.25)] {
+                        if item(ui, label, "", true) {
+                            ed.sel = sel.clone();
+                            apply(ed, c, Op::Resize(Some([px(shown.x * factor), px(shown.y * factor)])));
+                            ed.refocus = Some(ed.sel.clone());
+                        }
+                    }
+                    if item(ui, "Original size", "", sized_now) {
+                        ed.sel = sel.clone();
+                        apply(ed, c, Op::Resize(None));
+                        ed.refocus = Some(ed.sel.clone());
+                    }
+                    ui.label(RichText::new(format!("{} × {} px", shown.x.round(), shown.y.round())).color(ui.visuals().weak_text_color()).small());
                 });
             }
         }
@@ -998,15 +1148,19 @@ fn text_menu(resp: &egui::Response, ed: &mut Editor, c: &mut Compose, acts: &mut
     ed.menu_open = open;
 }
 
-/// Bullets and numbers, rules and pictures.
-fn decorate(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &Compose, g: &Galley, origin: egui::Pos2) {
+/// Bullets and numbers, rules and pictures (with their handles when selected).
+fn decorate(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &mut Compose, g: &Galley, origin: egui::Pos2, focused: bool) {
     let painter = ui.painter().clone();
     ed.placed.clear();
     let at = |i: usize| -> Rect { g.pos_from_cursor(CCursor::new(i)).translate(origin.to_vec2()) };
     let mut i = 0usize;
     let mut numbers: Vec<u32> = vec![0; 16];
     let right = ui.min_rect().right().max(origin.x + g.size().x);
-    for (n, line) in c.body.split('\n').enumerate() {
+    let wrap = g.job.wrap.max_width;
+    let cols = columns(&c.body, &c.styles, wrap, &ed.sizes());
+    let mut resized: Option<(usize, Vec2)> = None;
+    let body = c.body.clone();
+    for (n, line) in body.split('\n').enumerate() {
         let p = c.styles.para(n);
         let r = at(i);
         if p.rule {
@@ -1045,56 +1199,106 @@ fn decorate(ui: &mut Ui, t: &Tokens, ed: &mut Editor, c: &Compose, g: &Galley, o
                 continue;
             }
             let style = c.styles.style(i + k);
-            let Some(cid) = style.picture else { continue };
-            let (a, b) = (at(i + k), at(i + k + 1));
-            let mut room = Rect::from_min_max(egui::pos2(a.min.x + 2.0, a.min.y), egui::pos2(b.min.x.max(a.min.x + 8.0) - 2.0, a.max.y));
-            if let Some(side) = style.wrap {
-                // Beside the text: at the margin, from the top of its paragraph, no larger than
-                // a logo; the layout learns its size for the next frame.
-                let size = beside_size(ui.ctx(), &cid).unwrap_or(Vec2::splat(PICTURE_PX));
-                let top = at(i).min.y;
-                let x = match side {
-                    Wrap::Left => origin.x,
-                    Wrap::Right => right - size.x,
-                };
-                room = Rect::from_min_size(egui::pos2(x, top), size);
-                ed.placed.push((i + k, room));
-            }
+            let Some(cid) = style.picture.clone() else { continue };
             // A picture not here yet (a web picture being downloaded) is looked for again.
-            let tex = ed.pictures.entry(cid.clone()).or_insert(None);
-            if tex.is_none()
+            let pic = ed.pictures.entry(cid.clone()).or_insert(None);
+            if pic.is_none()
                 && let Some(p) = c.inline.iter().find(|p| p.cid == cid)
             {
-                *tex = crate::reading::decode(ui.ctx(), &format!("compose-{cid}"), &p.data, 400);
+                *pic = crate::reading::decode(ui.ctx(), &format!("compose-{cid}"), &p.data, 1024)
+                    .map(|tex| Picture { natural: natural_size(&p.data).unwrap_or_else(|| tex.size_vec2()), tex });
             }
-            match tex {
-                Some(tex) => {
-                    let size = tex.size_vec2();
-                    if style.wrap.is_some() {
-                        let shown = size * (BESIDE_MAX / size.x).min(BESIDE_MAX / size.y).min(1.0);
-                        if beside_size(ui.ctx(), &cid) != Some(shown) {
-                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique(("beside-size", cid.as_str())), shown));
-                            ui.ctx().request_repaint();
-                        }
-                        let r = Rect::from_min_size(room.min, shown);
-                        painter.image(tex.id(), r, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
-                        if let Some(p) = ed.placed.last_mut() {
-                            p.1 = r;
-                        }
-                        continue;
-                    }
-                    let scale = (room.width() / size.x).min(room.height() / size.y).min(1.0);
-                    let r = Rect::from_min_size(room.min, size * scale);
-                    painter.image(tex.id(), r, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+            let tex = pic.as_ref().map(|p| p.tex.id());
+            let sizes = ed.sizes();
+            let (a, b) = (at(i + k), at(i + k + 1));
+            let shown = match style.wrap {
+                Some(side) => {
+                    // Beside the text: at the margin, from the top of its paragraph.
+                    let size = cols.iter().find(|col| col.at == i + k).map_or(sizes.of(i + k, &style), |col| col.size);
+                    let x = match side {
+                        Wrap::Left => origin.x,
+                        Wrap::Right => right - size.x,
+                    };
+                    Rect::from_min_size(egui::pos2(x, at(i).min.y), size)
                 }
                 None => {
-                    painter.rect_stroke(room, 4.0, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
-                    icons::paint(&painter, icons::centered(room, 22.0), Icon::Image, t.dim);
+                    // In the line: the room its character takes, at the bottom of the row.
+                    let lead = f32::from(p.indent) * INDENT + if p.list == List::None { 0.0 } else { INDENT };
+                    let size = fit(sizes.of(i + k, &style), inline_max(wrap, lead));
+                    let room = Rect::from_min_max(egui::pos2(a.min.x + 2.0, a.min.y), egui::pos2(b.min.x.max(a.min.x + 8.0) - 2.0, a.max.y));
+                    Rect::from_min_size(egui::pos2(room.min.x, (room.max.y - size.y - 2.0).max(room.min.y)), size)
+                }
+            };
+            ed.placed.push((i + k, shown));
+            match tex {
+                Some(tex) => {
+                    painter.image(tex, shown, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                }
+                None => {
+                    painter.rect_stroke(shown, 4.0, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+                    icons::paint(&painter, icons::centered(shown, 22.0), Icon::Image, t.dim);
+                }
+            }
+            // Selected: a frame and handles at the corners; dragging one resizes it (as in Word),
+            // keeping its proportions.
+            let selected = (ed.sel == (i + k..i + k + 1) && (focused || ed.menu_open)) || ed.menu_picture == Some(i + k);
+            if selected || ed.resizing.is_some_and(|(r, _)| r == i + k) {
+                painter.rect_stroke(shown, 0.0, Stroke::new(1.5, t.accent), egui::StrokeKind::Outside);
+                let natural = sizes.of(i + k, &Style { width: None, height: None, ..style.clone() });
+                let corners = [
+                    (shown.left_top(), egui::CursorIcon::ResizeNwSe, vec2(-1.0, -1.0)),
+                    (shown.right_top(), egui::CursorIcon::ResizeNeSw, vec2(1.0, -1.0)),
+                    (shown.left_bottom(), egui::CursorIcon::ResizeNeSw, vec2(-1.0, 1.0)),
+                    (shown.right_bottom(), egui::CursorIcon::ResizeNwSe, vec2(1.0, 1.0)),
+                ];
+                for (n_corner, (corner, icon, dir)) in corners.into_iter().enumerate() {
+                    let hr = Rect::from_center_size(corner, Vec2::splat(HANDLE));
+                    let resp = ui.interact(hr.expand(3.0), egui::Id::unique(("picture-handle", c.id, i + k, n_corner)), Sense::drag());
+                    if resp.hovered() || resp.dragged() {
+                        ui.ctx().set_cursor_icon(icon);
+                    }
+                    if resp.drag_started() {
+                        ed.resizing = Some((i + k, shown.size()));
+                    }
+                    if resp.dragged()
+                        && let Some((_, size)) = ed.resizing.as_mut()
+                    {
+                        // The corner follows the pointer along the picture's diagonal.
+                        let d = resp.drag_delta();
+                        let along = (d.x * dir.x).max(d.y * dir.y * natural.x / natural.y.max(1.0));
+                        let w = (size.x + along).clamp(f32::from(rich::PICTURE_MIN_PX), f32::from(rich::PICTURE_MAX_PX));
+                        *size = vec2(w, (w * natural.y / natural.x.max(1.0)).max(1.0));
+                        ui.ctx().request_repaint();
+                    }
+                    if resp.drag_stopped()
+                        && let Some((r, size)) = ed.resizing.take()
+                    {
+                        resized = Some((r, size));
+                    }
+                    painter.rect(hr, 1.0, t.surface, Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
                 }
             }
         }
         i += line.chars().count() + 1;
     }
+    if let Some((r, size)) = resized {
+        ed.sel = r..r + 1;
+        let w = size.x.round().clamp(f32::from(rich::PICTURE_MIN_PX), f32::from(rich::PICTURE_MAX_PX));
+        let h = size.y.round().clamp(f32::from(rich::PICTURE_MIN_PX), f32::from(rich::PICTURE_MAX_PX));
+        // Float to u16 with the range clamped above.
+        let (w, h) = (u16::try_from(w as u32).unwrap_or(rich::PICTURE_MAX_PX), u16::try_from(h as u32).unwrap_or(rich::PICTURE_MAX_PX));
+        apply(ed, c, Op::Resize(Some([w, h])));
+        ed.refocus = Some(r..r + 1);
+    }
+}
+
+/// A picture's own size in pixels, from its header (never decoded here).
+fn natural_size(data: &[u8]) -> Option<Vec2> {
+    if data.len() > 30 << 20 {
+        return None;
+    }
+    let (w, h) = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format().ok()?.into_dimensions().ok()?;
+    (w > 0 && h > 0 && w <= 12_000 && h <= 12_000).then(|| vec2(w as f32, h as f32))
 }
 
 /// A ribbon button: an icon or a letter, lit when its format is on.
@@ -1410,6 +1614,15 @@ mod tests {
         assert!(ed.undo.len() >= 3, "each is a step to undo");
         // Typing after a placed picture isn't placed.
         assert!(typing_style(&text, &c.styles, 1).wrap.is_none());
+        // Its size: set (clamped), and back to its own; Clear formatting leaves both alone.
+        ed.sel = 0..1;
+        apply(&mut ed, &mut c, Op::Resize(Some([120, 60000])));
+        assert_eq!((c.styles.style(0).width, c.styles.style(0).height), (Some(120), Some(rich::PICTURE_MAX_PX)));
+        apply(&mut ed, &mut c, Op::Clear);
+        assert_eq!((c.styles.style(0).width, c.styles.style(0).wrap), (Some(120), Some(Wrap::Left)));
+        apply(&mut ed, &mut c, Op::Resize(None));
+        assert_eq!(c.styles.style(0).width, None);
+        assert!(typing_style(&text, &c.styles, 1).width.is_none());
     }
 
     #[test]
@@ -1430,5 +1643,61 @@ mod tests {
         let f = LinkForm::open(&c, 0..5);
         assert!(f.email && f.editing && !f.multi);
         assert_eq!((f.to.as_str(), f.subject.as_str(), f.text.as_str()), ("ann@x.example", "Hi there", "write"));
+    }
+
+    fn laid(ctx: &egui::Context, text: &str, st: &Styles, sizes: &Sizes, wrap: f32) -> Vec<(String, egui::Pos2, f32)> {
+        let mut out = Vec::new();
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))), ..Default::default() };
+        let mut o = ctx.run_ui(input, |ui| {
+            let g = layout(ui, text, st, false, &theme::Tokens::light(), wrap, sizes);
+            for r in &g.rows {
+                out.push((r.row.glyphs.iter().map(|g| g.chr).collect(), r.pos, r.row.size.y));
+            }
+            assert!(g.rect.min.x <= 0.0 && g.rect.min.y <= 0.0, "the galley's rect starts at its origin: {:?}", g.rect);
+        });
+        o.textures_delta.clear();
+        out
+    }
+
+    /// A logo set left of the text: the lines after it, up to a blank one, start right of it;
+    /// the lines after that blank go below the logo. In the line, a picture is as tall as set.
+    #[test]
+    fn a_column_beside_a_logo_and_a_sized_picture_in_the_line() {
+        let ctx = egui::Context::default();
+        let text = format!("{PICTURE}\nRiley Moreno\nStudio Lantern\n\nBest wishes");
+        let mut st = Styles::plain(&text);
+        st.restyle(&text, 0..1, |s| Style { picture: Some("logo".into()), wrap: Some(Wrap::Left), ..s.clone() });
+        let sizes = Sizes { natural: [("logo".to_string(), vec2(300.0, 200.0))].into_iter().collect(), live: None };
+        let rows = laid(&ctx, &text, &st, &sizes, 600.0);
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        let name = &rows[1];
+        assert_eq!(name.0, "Riley Moreno");
+        assert!((name.1.x - (300.0 + BESIDE_GAP)).abs() < 0.5, "right of the logo: {rows:?}");
+        assert!(name.1.y < 10.0, "from the logo's top: {rows:?}");
+        let closing = &rows[4];
+        assert_eq!(closing.0, "Best wishes");
+        assert!(closing.1.x < 1.0 && closing.1.y >= 200.0, "below the logo: {rows:?}");
+        // Set to 120 px wide: the column moves in; the blank line's row sits below the logo.
+        st.restyle(&text, 0..1, |s| Style { width: Some(120), ..s.clone() });
+        let rows = laid(&ctx, &text, &st, &sizes, 600.0);
+        assert!((rows[1].1.x - (120.0 + BESIDE_GAP)).abs() < 0.5, "{rows:?}");
+        assert!(rows[4].1.y >= 80.0 && rows[4].1.y < 120.0, "{rows:?}");
+        // A wider logo than its share of the width is shown narrower; the drag's size wins.
+        st.restyle(&text, 0..1, |s| Style { width: Some(1500), ..s.clone() });
+        let rows = laid(&ctx, &text, &st, &sizes, 600.0);
+        assert!(rows[1].1.x <= 600.0 * BESIDE_SHARE + BESIDE_GAP + 0.5, "{rows:?}");
+        let live = Sizes { live: Some((0, vec2(90.0, 60.0))), ..sizes.clone() };
+        let rows = laid(&ctx, &text, &st, &live, 600.0);
+        assert!((rows[1].1.x - (90.0 + BESIDE_GAP)).abs() < 0.5, "{rows:?}");
+        // In the line: the row is as tall as the picture, as set.
+        let text = format!("See {PICTURE} here\nnext");
+        let mut st = Styles::plain(&text);
+        st.restyle(&text, 4..5, |s| Style { picture: Some("logo".into()), height: Some(150), ..s.clone() });
+        let rows = laid(&ctx, &text, &st, &sizes, 600.0);
+        assert!(rows[0].2 >= 150.0 && rows[0].2 < 160.0, "{rows:?}");
+        assert!(rows[1].1.y >= 150.0, "{rows:?}");
+        assert_eq!(sized(&st.style(4), vec2(300.0, 200.0)), vec2(225.0, 150.0));
+        assert_eq!(fit(vec2(3000.0, 10.0), vec2(300.0, 300.0)), vec2(300.0, 1.0));
+        assert_eq!(sized(&Style::default(), vec2(0.0, 0.0)), vec2(1.0, 1.0));
     }
 }

@@ -654,8 +654,16 @@ tester's does, a contact as Exchange keeps it, Outlook's clipboard), then fixed 
 - **Pictures in a message:** a right-click on a picture in a message (in its text, or an
   attached picture shown below it) offers *Copy picture* (as pixels, for any program) and *Save
   picture as…*; in the message being written, the pictures of the original under it too.
-- **Text beside a picture:** a picture in a message or signature can be set *Left of the text*
-  or *Right of the text* (its right-click menu › Picture, as Word's wrap text): it's drawn in
-  the margin, no larger than a logo, and the lines after it flow beside it until its height is
-  used up (a logo with the name, address and phone next to it). Sent as a floated `<img>`
-  (`float` and `align`, which Outlook's own renderer reads); *In line with text* is the default.
+- **Pictures at their size, with text beside them:** a picture in a message or signature is
+  shown at its own size (it was shrunk to a thumbnail, and a logo beside the text to 200 px
+  whatever it was) and can be resized: a click selects it (a frame and corner handles, as in
+  Word), dragging a corner keeps its proportions, and its right-click menu › Picture has
+  *Smaller*, *Larger* and *Original size* with the size shown. A pasted `<img>` keeps its
+  `width` and `height`. The size goes with the picture (`Style.width`, `Style.height`), is
+  saved with the signature and sent as the `<img>`'s `width`/`height`.
+  *Left of the text* / *Right of the text* (the Picture menu, as Word's wrap text) now makes a
+  column: the paragraphs after the picture, up to a blank line or a rule, sit beside it from
+  its top (a logo with the name, title and phone next to it; what follows the blank line goes
+  below the logo). The text beside a picture on the left was invisible (drawn under it: the
+  text box paints the rows from the galley's left edge). Sent as a two-cell table rather than a
+  floated `<img>`, which Outlook's renderer and webmail lay out the same.

@@ -466,6 +466,18 @@ impl SignatureForm {
         self.editor.0.has_picture(cid)
     }
 
+    /// Where the editor drew its pictures last frame (tests).
+    #[cfg(test)]
+    pub(crate) fn placed_pictures(&self) -> Vec<egui::Rect> {
+        self.editor.0.placed_pictures()
+    }
+
+    /// The editor's selection (tests).
+    #[cfg(test)]
+    pub(crate) fn selection(&self) -> std::ops::Range<usize> {
+        self.editor.0.sel.clone()
+    }
+
     /// What `account.setSignature` is given: the text, its styles and the pictures it shows.
     pub fn save_params(&self) -> serde_json::Value {
         use mailcraft_engine::mime::{b64, rich};

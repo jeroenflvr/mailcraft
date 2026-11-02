@@ -420,9 +420,61 @@ pub fn pasted_html_with_pictures(html: &str, cid_for: &mut dyn FnMut() -> Option
     let first = lines.iter().position(|l| !blank(l)).unwrap_or(lines.len());
     lines.drain(..first);
     let (text, styles) = rich::from_rich_with(&lines, &|src| map.iter().find(|(s, _)| s == src).map(|(_, c)| c.clone()));
-    let (text, styles) = fonts::apply(&text, &styles, &fonts);
+    let (text, mut styles) = fonts::apply(&text, &styles, &fonts);
+    // The size each picture was given (`width`, `height`), kept so a pasted logo stays its size.
+    let sizes = picture_sizes(html);
+    for (i, ch) in text.chars().enumerate() {
+        if ch != rich::PICTURE {
+            continue;
+        }
+        let Some(cid) = styles.style(i).picture else { continue };
+        let Some((_, w, h)) = map.iter().find(|(_, c)| *c == cid).and_then(|(src, _)| sizes.iter().find(|(s, _, _)| s == src)) else { continue };
+        if w.is_some() || h.is_some() {
+            styles.restyle(&text, i..i + 1, |st| rich::Style { width: *w, height: *h, ..st.clone() });
+        }
+    }
     pictures.retain(|p| rich::pictures(&text, &styles).contains(&p.cid));
     (text, styles, pictures)
+}
+
+/// Every `<img>`'s address with the size it was given: the `width` and `height` attributes, or
+/// the same in its `style`, in pixels (a percentage or `auto` is no size).
+fn picture_sizes(html: &str) -> Vec<(String, Option<u16>, Option<u16>)> {
+    let lower = html.to_ascii_lowercase();
+    let mut out: Vec<(String, Option<u16>, Option<u16>)> = Vec::new();
+    let mut from = 0;
+    while let Some(i) = lower.get(from..).and_then(|r| r.find("<img")) {
+        let start = from + i;
+        let Some(end) = lower.get(start..).and_then(|r| r.find('>')).map(|e| start + e) else { break };
+        from = end + 1;
+        if out.len() >= 200 {
+            break;
+        }
+        let tag = html.get(start..end).unwrap_or("");
+        let Some(src) = tag_attr(tag, "src").map(str::trim).filter(|s| !s.is_empty()) else { continue };
+        let px = |v: &str| -> Option<u16> {
+            let v = v.trim();
+            let n = v.strip_suffix("px").unwrap_or(v).trim();
+            if n.is_empty() || n.ends_with('%') {
+                return None;
+            }
+            let n = n.parse::<f32>().ok()?;
+            (n >= f32::from(rich::PICTURE_MIN_PX) && n <= f32::from(rich::PICTURE_MAX_PX)).then(|| n.round() as u16)
+        };
+        let css = |name: &str| -> Option<u16> {
+            let style = tag_attr(tag, "style")?;
+            style.split(';').find_map(|d| {
+                let (k, v) = d.split_once(':')?;
+                (k.trim().eq_ignore_ascii_case(name)).then(|| px(v)).flatten()
+            })
+        };
+        let w = css("width").or_else(|| tag_attr(tag, "width").and_then(px));
+        let h = css("height").or_else(|| tag_attr(tag, "height").and_then(px));
+        if !out.iter().any(|(s, _, _)| s == src) {
+            out.push((src.to_string(), w, h));
+        }
+    }
+    out
 }
 
 /// HTML → lines of formatted spans: paragraphs, emphasis, links, list bullets, quotes, tables
@@ -1643,7 +1695,12 @@ iVBORw0KGgo=\r\n\
         );
         assert!(text.starts_with(rich::PICTURE), "the logo stays first: {text:?}");
         assert_eq!(styles.style(0).picture.as_deref(), Some("p1@x"));
+        assert_eq!((styles.style(0).width, styles.style(0).height), (Some(80), None), "the logo keeps the width it was given");
         assert!(text.contains("Zoe Park") && !text.contains("[picture]"), "{text:?}");
+        // Sizes from the style too; percentages and junk are no size.
+        let sizes =
+            picture_sizes("<img src=\"a\" style=\"width: 120.4px; height:auto\" width=\"50%\"><IMG SRC='b' height=9999999><img src=\"c\" width=1>");
+        assert_eq!(sizes, vec![("a".to_string(), Some(120), None), ("b".to_string(), None, None), ("c".to_string(), None, None)]);
         // Without cids: as `pasted_html`, no pictures.
         let (plain, _) = pasted_html(&html);
         assert!(!plain.contains(rich::PICTURE));
