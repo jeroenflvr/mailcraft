@@ -1402,6 +1402,23 @@ fn html_menu(ui: &Ui, rect: egui::Rect, view_id: egui::Id, whole: &str) {
 
 /// Right-click on a plain-text message: Copy the selection, Select all, or copy the whole message.
 fn plain_text_menu(ctx: &egui::Context, resp: &egui::Response, id: egui::Id, whole: &str) {
+    // egui's text edit moves the cursor on any press, the right button included: restore the
+    // selection from the frame before, so the menu acts on it.
+    let kept_id = id.with("kept-selection");
+    if resp.hovered() && ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary)) {
+        if let Some((a, b)) = ctx.data(|d| d.get_temp::<Option<(usize, usize)>>(kept_id)).flatten() {
+            let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(a), egui::text::CCursor::new(b))));
+            state.store(ctx, id);
+            ctx.request_repaint();
+        }
+    } else {
+        let now = egui::TextEdit::load_state(ctx, id)
+            .and_then(|s| s.cursor.char_range())
+            .map(|r| r.as_sorted_char_range())
+            .map(|r| (r.start.0, r.end.0));
+        ctx.data_mut(|d| d.insert_temp(kept_id, now));
+    }
     let selected: Option<String> = egui::TextEdit::load_state(ctx, id)
         .and_then(|s| s.cursor.char_range())
         .map(|r| r.as_sorted_char_range())
