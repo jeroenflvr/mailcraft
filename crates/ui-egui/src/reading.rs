@@ -281,7 +281,10 @@ fn message(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
 
             // Attachments.
             // Pictures the formatted message shows in place aren't listed again as files.
-            let formatted = s.prefs.show_html && !p.rich.is_empty();
+            // A formatted message can be switched to plain text for this message (see `html_menu`).
+            let view_id = ui.scope_id().with(("reader-view", r.key.to_id()));
+            let view = ui.ctx().data(|d| d.get_temp::<ReaderView>(view_id)).unwrap_or_default();
+            let formatted = s.prefs.show_html && !p.rich.is_empty() && !view.plain;
             let shown: Vec<usize> = if formatted { p.images.iter().filter_map(|i| mime::picture_attachment(p, i)).collect() } else { Vec::new() };
             let in_place = |a: &mime::AttachmentInfo| shown.contains(&a.index);
             // An invitation is shown as its card above, not as a file.
@@ -333,8 +336,9 @@ fn message(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
             let sep = ui.available_rect_before_wrap();
             ui.painter().line_segment([sep.left_top(), sep.right_top()], egui::Stroke::new(1.0, t.border));
             ui.add_space(12.0);
-            if s.prefs.show_html && !p.rich.is_empty() {
-                rich_body(s, st, ui, &r.key, p, acts);
+            if formatted {
+                let body = ui.scope(|ui| rich_body(s, st, ui, &r.key, p, acts));
+                html_menu(ui, body.response.rect, view_id, &p.text);
             } else if crate::bidi::has_rtl(&p.text) {
                 // Right-to-left text, laid out line by line. egui can't select it (its text layout
                 // miscounts right-to-left letters, so a selection copies nothing): right-click
@@ -342,14 +346,25 @@ fn message(s: &mut Session, st: &mut UiState, ui: &mut Ui, acts: &mut Vec<Action
                 let r = crate::bidi::label(ui, &p.text, theme::regular(14.5), t.text);
                 rtl_copy_menu(&r, None, &p.text);
             } else {
+                let id = ui.scope_id().with(("message-text", r.key.to_id()));
+                if view.select_all {
+                    let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+                    let n = p.text.chars().count();
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n))));
+                    state.store(ui.ctx(), id);
+                    ui.ctx().data_mut(|d| d.insert_temp(view_id, ReaderView { select_all: false, ..view }));
+                    ui.ctx().request_repaint();
+                }
                 let mut text = p.text.as_str();
-                ui.add(
+                let out = ui.add(
                     egui::TextEdit::multiline(&mut text)
+                        .id(id)
                         .frame(egui::Frame::NONE)
                         .desired_width(f32::INFINITY)
                         .font(theme::regular(14.5))
                         .text_color(t.text),
                 );
+                plain_text_menu(ui.ctx(), &out, id, &p.text);
             }
         });
     });
@@ -1344,6 +1359,65 @@ fn rtl_copy_menu(r: &egui::Response, line: Option<&str>, whole: &str) {
             && ui.button(tl!("Copy")).clicked()
         {
             ui.ctx().copy_text(line.trim().to_string());
+            ui.close();
+        }
+        if ui.button(tl!("Copy the whole message")).clicked() {
+            ui.ctx().copy_text(whole.trim().to_string());
+            ui.close();
+        }
+    });
+}
+
+/// How one message is shown in the reading pane, kept in egui memory: `plain` once "Select all"
+/// switched a formatted message to plain text; `select_all` to select that text when it is drawn.
+#[derive(Clone, Copy, Default)]
+struct ReaderView {
+    plain: bool,
+    select_all: bool,
+}
+
+/// Right-click on a formatted (HTML) message body. egui can't select a formatted body as a whole
+/// (its label selection is internal), so "Select all" shows this message as plain text, where all
+/// of it is selected and can be copied with Ctrl+C. "Copy the whole message" copies the text now.
+fn html_menu(ui: &Ui, rect: egui::Rect, view_id: egui::Id, whole: &str) {
+    let ctx = ui.ctx().clone();
+    let open_id = view_id.with("menu");
+    let click = ctx.input(|i| if i.pointer.secondary_clicked() { i.pointer.interact_pos() } else { None });
+    if let Some(pos) = click.filter(|pos| rect.contains(*pos)) {
+        ctx.data_mut(|d| d.insert_temp(open_id, pos));
+        egui::Popup::open_id(&ctx, open_id);
+    }
+    let Some(pos) = ctx.data(|d| d.get_temp::<egui::Pos2>(open_id)) else { return };
+    egui::Popup::new(open_id, ctx.clone(), pos, ui.layer_id()).show(|ui| {
+        if ui.button(tl!("Select all")).clicked() {
+            ui.ctx().data_mut(|d| d.insert_temp(view_id, ReaderView { plain: true, select_all: true }));
+            ui.close();
+        }
+        if ui.button(tl!("Copy the whole message")).clicked() {
+            ui.ctx().copy_text(whole.trim().to_string());
+            ui.close();
+        }
+    });
+}
+
+/// Right-click on a plain-text message: Copy the selection, Select all, or copy the whole message.
+fn plain_text_menu(ctx: &egui::Context, resp: &egui::Response, id: egui::Id, whole: &str) {
+    let selected: Option<String> = egui::TextEdit::load_state(ctx, id)
+        .and_then(|s| s.cursor.char_range())
+        .map(|r| r.as_sorted_char_range())
+        .filter(|r| !r.is_empty())
+        .map(|r| whole.chars().skip(r.start.0).take(r.end.0 - r.start.0).collect());
+    let n = whole.chars().count();
+    resp.context_menu(|ui| {
+        if ui.add_enabled(selected.is_some(), egui::Button::new(tl!("Copy"))).clicked() {
+            ui.ctx().copy_text(selected.clone().unwrap_or_default());
+            ui.close();
+        }
+        if ui.button(tl!("Select all")).clicked() {
+            let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n))));
+            state.store(ui.ctx(), id);
+            resp.request_focus();
             ui.close();
         }
         if ui.button(tl!("Copy the whole message")).clicked() {
